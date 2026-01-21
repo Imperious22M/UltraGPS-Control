@@ -29,9 +29,7 @@ class PositionModule:
             receiver_positions (list): List of all distances from the receivers to the vehicle
             Must be in order (index 0 -> Receiver 1)
         """
-        print(receiver_indices)
         initial_position = self.ordinary_least_squares(receiver_distances,receiver_indices)
-        print(initial_position)
         position_non_linear, result = self.non_linear_least_squares(receiver_distances, initial_position, receiver_indices)
 
         return (position_non_linear, result)
@@ -109,7 +107,6 @@ class PositionModule:
         x_nonlinear = result.x
         # [0] => x-cord
         # [1] => y-cord
-        print("Nonlinear LS estimate:", x_nonlinear)
         return (x_nonlinear, result)
 
 import numpy as np
@@ -198,22 +195,17 @@ class CEPPositioning:
     def compute_position_and_cep(self, distances, use_indices=None):
         """
         Compute position and CEP for a specific set of transmitters
-        
+
         Returns: (position, CEP_radius, covariance_matrix)
         """
         if use_indices is None:
-            use_indices = range(self.num_receivers)
-        
-        distances = np.array(distances)
-        selected_receivers = self.receivers[use_indices]
-        selected_distances = distances[use_indices]
+            use_indices = list(range(self.num_receivers))
 
+        distances = np.array(distances)
 
         pos_module = PositionModule(self.receiver_positions)
-        print(distances)
-        #print(pos_module.multilateration_method_1() )
-        position, result = pos_module.multilateration_method_1(self.receiver_positions)
-        print("llll")
+        # Pass full distances array - multilateration_method_1 will select by indices internally
+        pos, result = pos_module.multilateration_method_1(distances, use_indices)
 
         # Initial guess: centroid of selected receivers
         #initial_guess = np.mean(selected_receivers, axis=0)
@@ -224,14 +216,15 @@ class CEPPositioning:
         
         #result = least_squares(residuals, initial_guess, method='lm')
         #position = result.x
+
         
         # Compute covariance matrix and CEP
         # Jacobian at solution gives sensitivity
         J = result.jac
         residuals_vec = result.fun
-        
+
         # Estimate measurement variance from residuals
-        n = len(selected_distances)
+        n = len(use_indices)
         m = 2  # number of parameters (x, y)
         if n > m:
             # Weighted by inverse of residual magnitude
@@ -258,7 +251,7 @@ class CEPPositioning:
             cov = np.eye(2) * 1000
             cep = 1000
             
-        return position, cep, cov, use_indices
+        return pos, cep, cov, use_indices
     
     def find_best_subset(self, distances, max_subsets_to_try=None):
         """

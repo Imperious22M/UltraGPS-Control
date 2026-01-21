@@ -277,10 +277,15 @@ class PositionWindow:
         connected_y = [receiver_y[i] for i in connection_order]
         self.ax.plot(connected_x, connected_y, 'b-', linewidth=2, alpha=0.5, label='Receiver Connections')
         
-        # Initialize vehicle position plot
-        self.vehicle_point, = self.ax.plot([], [], 'go', markersize=10, zorder=6, label='Current Position')
-        self.vehicle_trail, = self.ax.plot([], [], 'g-', linewidth=1, alpha=0.5, label='Position Trail')
-        
+        # Initialize vehicle position plot (multilateration_method_1 - blue)
+        self.vehicle_point, = self.ax.plot([], [], 'bo', markersize=10, zorder=6, label='Multilateration Position')
+        self.vehicle_trail, = self.ax.plot([], [], 'b-', linewidth=1, alpha=0.5, label='Multilateration Trail')
+
+        # Initialize CEP position plot (orange)
+        self.cep_point, = self.ax.plot([], [], 'o', color='orange', markersize=10, zorder=6, label='CEP Position')
+        self.cep_trail, = self.ax.plot([], [], '-', color='orange', linewidth=1, alpha=0.5, label='CEP Trail')
+        self.cep_position_history = deque(maxlen=50)  # Store last 50 CEP positions
+
         self.ax.legend(loc='upper right')
         plt.tight_layout()
 
@@ -292,8 +297,7 @@ class PositionWindow:
         from PositionModule import CEPPositioning
         #self.stable_pos = StablePositionEstimator(self.receiver_positions)
         #receiver_coordinates = [cords for index,cords in receiver_positions]
-        self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=5)
-
+        self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
 
     def update_cords(self, x, y):
         """
@@ -305,11 +309,11 @@ class PositionWindow:
         """
         # Add new position to history
         self.position_history.append((x, y))
-        
-        # Update current position (green dot)
+
+        # Update current position (blue dot)
         self.vehicle_point.set_data([x], [y])
-            
-        # Update position trail (green line showing last 50 positions)
+
+        # Update position trail (blue line showing last 50 positions)
         if len(self.position_history) > 1:
             trail_x = [pos[0] for pos in self.position_history]
             trail_y = [pos[1] for pos in self.position_history]
@@ -317,6 +321,28 @@ class PositionWindow:
         
         # Note: Canvas will be automatically redrawn by _refresh_animations()
         # which runs every 10ms and calls canvas.draw() on all active_animations
+
+    def update_cep_cords(self, x, y):
+        """
+        Update the CEP position marker on the plot
+
+        Args:
+            x (float): X coordinate from CEP calculation
+            y (float): Y coordinate from CEP calculation
+        """
+        # Add new position to CEP history
+        self.cep_position_history.append((x, y))
+
+        # Update current CEP position (orange dot)
+        self.cep_point.set_data([x], [y])
+
+        # Update CEP position trail (orange line showing last 50 positions)
+        if len(self.cep_position_history) > 1:
+            trail_x = [pos[0] for pos in self.cep_position_history]
+            trail_y = [pos[1] for pos in self.cep_position_history]
+            self.cep_trail.set_data(trail_x, trail_y)
+
+        # Note: Canvas will be automatically redrawn by _refresh_animations()
 
     def update_cords_thread(self, control_module:ControlModule):
         """
@@ -351,16 +377,14 @@ class PositionWindow:
                 y_calc = pos[1]
                 print(f"tick Pos: ({x_calc}, {y_calc})")
                 
-                #best_pos, best_cep, best_indices, cov, all_results = \
-                #        self.stable_pos.find_best_subset(receiver_distances, max_subsets_to_try=15)
-                #final_pos, final_cep, weights, used_indices = \
-                #        self.stable_pos.adaptive_weighted_solution(receiver_distances)
-                #print(best_pos)
-                #print(final_pos)
+                best_pos, best_cep, best_indices, cov, all_results = \
+                        self.stable_pos.find_best_subset(receiver_distances, max_subsets_to_try=15)
+                print(f"CEP Position: {best_pos}, CEP: {best_cep}, Indices: {best_indices}")
 
+                # Update multilateration position (blue dot)
                 self.update_cords(x_calc, y_calc)
-                #self.update_cords(best_pos[0],best_pos[1])
-                #self.update_cords(final_pos[0],final_pos[1])
+                # Update CEP position (orange dot)
+                self.update_cep_cords(best_pos[0], best_pos[1])
                 
                 print(f"~~~~~~~~~~~")
                 print(time.time()-time_start) 
