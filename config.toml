@@ -1,0 +1,59 @@
+cal_state = 1
+calibration_reads = 5
+number_of_receivers = 6
+serial_port = '/dev/ttyACM0'
+units = 'cm'
+
+[[receivers]]
+cal_distances = [ 224.90000000000001, 185.80000000000001 ]
+id = 0
+position = [ -125.7, -186.59999999999999 ]
+
+    [receivers.offset]
+    intercept = -7.7522140221402083
+    slope = 0.036070110701107008
+
+[[receivers]]
+cal_distances = [ 125.7, 138.80000000000001 ]
+id = 1
+position = [ -125.7, 0 ]
+
+    [receivers.offset]
+    intercept = -50.226845637583992
+    slope = 0.043959731543624189
+
+[[receivers]]
+cal_distances = [ 226.30000000000001, 275.19999999999999 ]
+id = 2
+position = [ -125.7, 188.19999999999999 ]
+
+    [receivers.offset]
+    intercept = -39.591251022076733
+    slope = 0.039983646770237101
+
+[[receivers]]
+cal_distances = [ 221.59999999999999, 180.0 ]
+id = 3
+position = [ 131.40000000000001, -178.40000000000001 ]
+
+    [receivers.offset]
+    intercept = -24.782106244175196
+    slope = 0.038769804287045663
+
+[[receivers]]
+cal_distances = [ 131.40000000000001, 140.19999999999999 ]
+id = 4
+position = [ 131.40000000000001, 0 ]
+
+    [receivers.offset]
+    intercept = 21.262020905923563
+    slope = 0.030662020905923286
+
+[[receivers]]
+cal_distances = [ 229.5, 275.39999999999998 ]
+id = 5
+position = [ 131.40000000000001, 188.19999999999999 ]
+
+    [receivers.offset]
+    intercept = -3.0869495596475929
+    slope = 0.036749399519615672

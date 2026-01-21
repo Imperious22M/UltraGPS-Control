@@ -1,0 +1,476 @@
+# Contains the mathematical functions used to calculate the position of the transmiter/vehicle
+
+import numpy as np
+from scipy.optimize import least_squares
+
+
+class PositionModule:
+    def __init__(self, receiver_positions):
+        """
+        Helper class that contains all the methods for calculating transmitter position
+        using the receiver known coordinates and receiver measured distances
+
+        Args:
+            receiver_coordinates (list): 2D list of x,y coordinates of all receivers
+                Must be in order (index 0 -> Receiver 1)
+        """
+
+        # Sort incoming position array by the embedded tower id
+        self.receiver_coordinates = np.array([cord for id,cord in sorted(receiver_positions) ])
+        self.receiver_count = len(self.receiver_coordinates)
+        #print(self.receiver_coordinates)
+        #print(self.receiver_count)
+
+    def multilateration_method_1(self, receiver_distances, receiver_indices):
+        """
+        Calculates the initial position of a transmitter based on a list of distances
+
+        Args:
+            receiver_positions (list): List of all distances from the receivers to the vehicle
+            Must be in order (index 0 -> Receiver 1)
+        """
+        print(receiver_indices)
+        initial_position = self.ordinary_least_squares(receiver_distances,receiver_indices)
+        print(initial_position)
+        position_non_linear, result = self.non_linear_least_squares(receiver_distances, initial_position, receiver_indices)
+
+        return (position_non_linear, result)
+
+    # ~~~~~~ Internal Math functions ~~~~~~~ 
+
+    # Ordinary Linear Least Squares Solution to the system of linear equations
+    def ordinary_least_squares(self, receiver_distances, indices):
+
+        if not isinstance(receiver_distances,np.ndarray):
+            receiver_distances = np.array(receiver_distances)
+        # At least 3 transmitters need to be used
+        if len(indices)<3:
+            raise(ValueError)
+
+        # Pick the receivers to be used for calculation
+        receiver_coordinates = self.receiver_coordinates[indices]
+        receiver_distances = receiver_distances[indices]
+
+        # Ideally x1/y1 would be from the receiver with the smallest distance (to minimize error)
+        x1, y1 = receiver_coordinates[0]
+        d1_sq = receiver_distances[0]**2
+
+        A = []
+        b = []
+        # Build the A and b matrices
+        for i in range(1, len(receiver_distances)):
+            xi, yi = receiver_coordinates[i]
+            A.append([2*(x1 - xi), 2*(y1 - yi)])
+            b.append(receiver_distances[i]**2 - d1_sq - (xi**2 + yi**2) + (x1**2 + y1**2))
+
+        A = np.array(A)
+        b = np.array(b)
+
+        # Solve linear least squares
+        # [0] => x-cord
+        # [1] => y-cord
+        x_linear = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        return x_linear
+
+    # Non-linear least squares estimate
+    def non_linear_least_squares(self, receiver_distances, initial_estimate, indices):
+        """ 
+            Iterative method of obtaining a linear solution by minimzing a cost function
+            using a least-squares approach
+
+            Args:
+                receiver_coordinates: Ordered list of (x,y) coordinates of all receivers
+                receiver_distances: Ordered list of all measured distances
+                initial_estimate: Initial position estimate (x,y), obtained by some other method
+        """
+
+        if not isinstance(receiver_distances,np.ndarray):
+            receiver_distances = np.array(receiver_distances)
+        # At least 3 transmitters need to be used
+        if len(indices)<3:
+            raise(ValueError)
+
+        # Pick the receivers to be used for calculation
+        receiver_coordinates = self.receiver_coordinates[indices]
+        receiver_distances = receiver_distances[indices]
+
+        # Define residual function (cost function)
+        def residuals(x, positions, measurements):
+            """Compute residuals: predicted_distance - measured_distance"""
+            return np.linalg.norm(positions - x, axis=1) - measurements
+
+        # Solve nonlinear least squares
+        result = least_squares(residuals, initial_estimate,
+                                #loss='soft_l1',
+                                args=(receiver_coordinates, 
+                                receiver_distances),
+                                method='lm')
+        x_nonlinear = result.x
+        # [0] => x-cord
+        # [1] => y-cord
+        print("Nonlinear LS estimate:", x_nonlinear)
+        return (x_nonlinear, result)
+
+import numpy as np
+from scipy.optimize import least_squares
+from itertools import combinations
+
+class StablePositionEstimator:
+    def __init__(self, receiver_positions):
+        self.receivers = [list(cords) for index,cords in receiver_positions]
+        print(self.receivers)
+        self.num_rx = len(receiver_positions)
+        
+    def estimate_with_cep(self, distances):
+        """
+        Main function: Returns stable position estimate
+        """
+        # Step 1: Try different transmitter combinations
+        best_error = float('inf')
+        best_pos = None
+        
+        # Always try all transmitters first
+        combos_to_try = [list(range(self.num_rx))]
+        
+        # Try removing one transmitter at a time
+        for i in range(self.num_rx):
+            combos_to_try.append([j for j in range(self.num_rx) if j != i])
+
+        # Try removing the two noisiest-looking ones
+        # (based on largest residuals from all-transmitter solution)
+        all_pos = self.solve_position(distances, list(range(self.num_rx)) )
+        receivers_arr = np.array(self.receivers)
+        distances_arr = np.array(distances)
+        residuals = np.abs(np.linalg.norm(receivers_arr - all_pos, axis=1) - distances_arr)
+        
+        noisy_indices = np.argsort(residuals)[-2:]  # Two with largest residuals
+        combos_to_try.append([i for i in range(self.num_rx) if i not in noisy_indices])
+        
+        # Evaluate each combination
+        for indices in combos_to_try:
+            if len(indices) >= 3:  # Need at least 3 for 2D
+                pos = self.solve_position(distances, indices)
+                
+                # Calculate "quality score" = position consistency
+                # (not formal CEP but effective)
+                pred_dists = np.linalg.norm(self.receivers - pos, axis=1)
+                print(pred_dists)
+                print("done")
+                print(indices)
+                error = np.std(pred_dists[indices] - distances_arr[indices])
+                
+                print("done")
+                if error < best_error:
+                    best_error = error
+                    best_pos = pos
+        
+        return best_pos
+    
+    def solve_position(self, distances, indices):
+        """Solve for position using specific transmitters"""
+        # Convert to numpy arrays for fancy indexing
+        receivers_arr = np.array(self.receivers)
+        distances_arr = np.array(distances)
+        selected_rx = receivers_arr[indices]
+        selected_dists = distances_arr[indices]
+        # Centroid as initial guess
+        initial_guess = np.mean(selected_rx, axis=0)
+        
+        def residuals(pos):
+            return np.linalg.norm(selected_rx - pos, axis=1) - selected_dists
+        
+        result = least_squares(residuals, initial_guess, method='lm')
+        return result.x
+
+class CEPPositioning:
+    def __init__(self, receiver_positions, min_transmitters=4):
+        """
+        receiver_positions: (6, 2) array of receiver coordinates
+        min_transmitters: Minimum number to use (3 for 2D, but 4 is more robust)
+        """
+        self.receiver_positions = receiver_positions
+        receiver_coordinates = [cords for index,cords in receiver_positions]
+        self.receivers = np.array(receiver_coordinates)
+        self.num_receivers = len(receiver_positions)
+        self.min_transmitters = min_transmitters
+        
+    def compute_position_and_cep(self, distances, use_indices=None):
+        """
+        Compute position and CEP for a specific set of transmitters
+        
+        Returns: (position, CEP_radius, covariance_matrix)
+        """
+        if use_indices is None:
+            use_indices = range(self.num_receivers)
+        
+        distances = np.array(distances)
+        selected_receivers = self.receivers[use_indices]
+        selected_distances = distances[use_indices]
+
+
+        pos_module = PositionModule(self.receiver_positions)
+        print(distances)
+        #print(pos_module.multilateration_method_1() )
+        position, result = pos_module.multilateration_method_1(self.receiver_positions)
+        print("llll")
+
+        # Initial guess: centroid of selected receivers
+        #initial_guess = np.mean(selected_receivers, axis=0)
+        
+        ## Solve with nonlinear least squares
+        #def residuals(pos):
+        #    return np.linalg.norm(selected_receivers - pos, axis=1) - selected_distances
+        
+        #result = least_squares(residuals, initial_guess, method='lm')
+        #position = result.x
+        
+        # Compute covariance matrix and CEP
+        # Jacobian at solution gives sensitivity
+        J = result.jac
+        residuals_vec = result.fun
+        
+        # Estimate measurement variance from residuals
+        n = len(selected_distances)
+        m = 2  # number of parameters (x, y)
+        if n > m:
+            # Weighted by inverse of residual magnitude
+            W = np.diag(1.0 / (np.abs(residuals_vec) + 0.1))
+            # Covariance: (J^T W J)^-1
+            try:
+                cov = np.linalg.inv(J.T @ W @ J)
+                
+                # CEP approximation for 2D Gaussian
+                # CEP ≈ 0.59 * (σ_x + σ_y) for small covariance
+                # More accurate: CEP = 0.59 * sqrt(σ_x² + σ_y²) * sqrt(2)
+                sigma_x = np.sqrt(cov[0, 0])
+                sigma_y = np.sqrt(cov[1, 1])
+                cep = 0.59 * np.sqrt(sigma_x**2 + sigma_y**2) * np.sqrt(2)
+                
+                # Alternative: use 1.1774 * sqrt(average variance)
+                # cep = 1.1774 * np.sqrt((sigma_x**2 + sigma_y**2) / 2)
+                
+            except np.linalg.LinAlgError:
+                # Singular matrix - receivers in bad geometry
+                cov = np.eye(2) * 1000  # Large uncertainty
+                cep = 1000
+        else:
+            cov = np.eye(2) * 1000
+            cep = 1000
+            
+        return position, cep, cov, use_indices
+    
+    def find_best_subset(self, distances, max_subsets_to_try=None):
+        """
+        Try different transmitter combinations, return one with lowest CEP
+        
+        Returns: (best_position, best_cep, best_indices)
+        """
+        if max_subsets_to_try is None:
+            max_subsets_to_try = 20  # Limit to avoid combinatorial explosion
+        
+        best_cep = float('inf')
+        best_position = None
+        best_indices = None
+        best_cov = None
+        
+        # Try different combinations of transmitters
+        all_combinations = []
+        
+        # Start with using all transmitters
+        all_combinations.append(list(range(self.num_receivers)))
+        
+        # Try subsets of size min_transmitters and up
+        for k in range(self.min_transmitters, self.num_receivers):
+            for subset in combinations(range(self.num_receivers), k):
+                all_combinations.append(list(subset))
+                if len(all_combinations) >= max_subsets_to_try:
+                    break
+            if len(all_combinations) >= max_subsets_to_try:
+                break
+        
+        # Evaluate each combination
+        results = []
+        for indices in all_combinations:
+            position, cep, cov, _ = self.compute_position_and_cep(distances, indices)
+            results.append({
+                'position': position,
+                'cep': cep,
+                'indices': indices,
+                'cov': cov,
+                'num_transmitters': len(indices)
+            })
+            
+            if cep < best_cep:
+                best_cep = cep
+                best_position = position
+                best_indices = indices
+                best_cov = cov
+        
+        # Sort by CEP for analysis
+        results.sort(key=lambda x: x['cep'])
+        
+        return best_position, best_cep, best_indices, best_cov, results
+    
+    def adaptive_weighted_solution(self, distances, history_length=10):
+        """
+        Adaptive method: Learn which transmitters are consistently noisy
+        by tracking their contribution to CEP over time
+        """
+        # Initialize weights based on recent performance
+        if not hasattr(self, 'weight_history'):
+            self.weight_history = []
+            self.receiver_weights = np.ones(self.num_receivers)
+        
+        # Get current best subset
+        current_position, current_cep, best_indices, cov, all_results = \
+            self.find_best_subset(distances, max_subsets_to_try=15)
+        
+        # Update weight history
+        weight_update = np.zeros(self.num_receivers)
+        weight_update[list(best_indices)] = 1.0
+        
+        self.weight_history.append(weight_update)
+        if len(self.weight_history) > history_length:
+            self.weight_history.pop(0)
+        
+        # Compute average reliability
+        if len(self.weight_history) >= 5:  # Need some history
+            reliability = np.mean(self.weight_history, axis=0)
+            # Smooth weights: alpha * old + (1-alpha) * new
+            alpha = 0.8
+            self.receiver_weights = alpha * self.receiver_weights + (1-alpha) * reliability
+        
+        # Use weights in final weighted solution
+        def weighted_residuals(pos):
+            pred = np.linalg.norm(self.receivers - pos, axis=1)
+            residuals = pred - distances
+            return residuals * np.sqrt(self.receiver_weights)
+        
+        # Use current best as initial guess
+        result = least_squares(weighted_residuals, current_position, method='lm')
+        final_position = result.x
+        
+        # Compute final CEP with all transmitters (weighted)
+        J = result.jac
+        residuals_vec = result.fun
+        W = np.diag(self.receiver_weights)
+        try:
+            cov_final = np.linalg.inv(J.T @ W @ J)
+            sigma_x = np.sqrt(cov_final[0, 0])
+            sigma_y = np.sqrt(cov_final[1, 1])
+            final_cep = 0.59 * np.sqrt(sigma_x**2 + sigma_y**2) * np.sqrt(2)
+        except:
+            final_cep = current_cep
+        
+        return final_position, final_cep, self.receiver_weights, best_indices
+
+
+import numpy as np
+from scipy.optimize import least_squares
+from collections import deque
+from filterpy.kalman import KalmanFilter
+
+class StabilizedPositioningSystem:
+    def __init__(self, receiver_positions, initial_guess):
+        self.receivers = [list(pos) for id,pos in receiver_positions]
+        print(self.receivers)
+        self.num_receivers = len(receiver_positions)
+        
+        # Weight tracking (learn receiver reliability)
+        self.receiver_weights = np.ones(self.num_receivers)
+        self.residual_history = deque(maxlen=100)
+        
+        # Position history for smoothing
+        self.position_history = deque(maxlen=10)
+        self.last_position = np.array(initial_guess)
+        
+        # Kalman filter (if you have time/speed info)
+        self.use_kalman = False
+        if self.use_kalman:
+            #from filterpy.kalman import KalmanFilter
+            self.kf = self._init_kalman_filter(initial_guess)
+    
+    def _init_kalman_filter(self, initial_pos):
+        kf = KalmanFilter(dim_x=4, dim_z=2)
+        kf.x = np.array([initial_pos[0], initial_pos[1], 0, 0])  # [x, y, vx, vy]
+        
+        # Constant velocity model
+        dt = 0.1  # Time step
+        kf.F = np.array([[1, 0, dt, 0],
+                        [0, 1, 0, dt],
+                        [0, 0, 1, 0],
+                        [0, 0, 0, 1]])
+        
+        kf.H = np.array([[1, 0, 0, 0],
+                        [0, 1, 0, 0]])
+        
+        kf.P *= 10  # Initial uncertainty
+        kf.R = np.eye(2) * 0.5  # Measurement noise
+        kf.Q = np.eye(4) * 0.1  # Process noise
+        
+        return kf
+    
+    def estimate_position(self, distances):
+        # Step 1: Get initial estimate with current weights
+        receivers_arr = np.array(self.receivers)
+        distances_arr = np.array(distances)
+        def residuals(tower_pos):
+            predicted = np.linalg.norm(receivers_arr - tower_pos, axis=1)
+            return np.sqrt(self.receiver_weights) * (predicted - distances_arr)
+        
+        # Use previous position as initial guess (warm start)
+        result = least_squares(
+            residuals,
+            self.last_position,
+            #method='lm',
+            loss='soft_l1',  # Robust to outliers
+            f_scale=0.5
+        )
+        
+        raw_estimate = result.x
+        
+        # Step 2: Update receiver weights based on residuals
+        current_residuals = np.abs(result.fun)
+        self.residual_history.append(current_residuals)
+        
+        # Calculate moving average of residuals for each receiver
+        if len(self.residual_history) > 10:
+            recent_residuals = np.array(self.residual_history)[-10:]
+            avg_residuals = np.mean(recent_residuals, axis=0)
+            
+            # Update weights: lower weight for receivers with high average residuals
+            self.receiver_weights = 1.0 / (avg_residuals + 0.1)
+            self.receiver_weights = self.receiver_weights / np.max(self.receiver_weights)
+        
+        # Step 3: Apply Kalman filtering if enabled
+        if self.use_kalman:
+            self.kf.predict()
+            self.kf.update(raw_estimate)
+            filtered_estimate = self.kf.x[:2]
+        else:
+            # Simple moving average
+            self.position_history.append(raw_estimate)
+            filtered_estimate = np.mean(self.position_history, axis=0)
+        
+        print("done")
+        # Step 4: Validate position
+        #filtered_estimate = self._validate_position(filtered_estimate)
+        
+        # Step 5: Update last position
+        self.last_position = filtered_estimate
+        
+        return filtered_estimate
+    
+    def _validate_position(self, new_pos):
+        """Sanity checks on position"""
+        # 1. Check if within reasonable bounds
+        bounds_margin = 50
+        receivers_arr = np.array(self.receivers)
+        x_min, x_max = receivers_arr[:, 0].min(), receivers_arr[:, 0].max()
+        y_min, y_max = receivers_arr[:, 1].min(), receivers_arr[:, 1].max()
+        
+        x_bounded = np.clip(new_pos[0], x_min - bounds_margin, x_max + bounds_margin)
+        y_bounded = np.clip(new_pos[1], y_min - bounds_margin, y_max + bounds_margin)
+        
+        return np.array([x_bounded, y_bounded])
