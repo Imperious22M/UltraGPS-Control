@@ -231,19 +231,23 @@ class PositionWindow:
         # Layout: [distance_text_left, left_plots, main_arena, right_plots, distance_text_right]
         from matplotlib.gridspec import GridSpec
 
-        self.fig = plt.figure(figsize=(16, 10))
+        self.fig = plt.figure(figsize=(16, 10), facecolor='black')
         # 3-column layout: left_plots, main_arena, right_plots
         gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 5, 1], hspace=0.3, wspace=0.4)
 
         # Create main arena axes in center (spans all 3 rows)
         self.ax = self.fig.add_subplot(gs[:, 1])
+        self.ax.set_facecolor('black')
         self.ax.set_xlim(-grid_width/2-self.grid_padding, grid_width/2+self.grid_padding)
         self.ax.set_ylim(-grid_height/2-self.grid_padding, grid_height/2+self.grid_padding)
         self.ax.set_aspect('equal')
-        self.ax.grid(True, alpha=0.3)
-        self.ax.set_xlabel('X Position')
-        self.ax.set_ylabel('Y Position')
-        self.ax.set_title('Vehicle Position Tracking')
+        self.ax.grid(True, alpha=0.3, color='gray')
+        self.ax.set_xlabel('X Position', color='white')
+        self.ax.set_ylabel('Y Position', color='white')
+        self.ax.set_title('Vehicle Position Tracking', color='white')
+        self.ax.tick_params(colors='white')
+        for spine in self.ax.spines.values():
+            spine.set_color('white')
 
         # Create distance plot axes: left side (1-3), right side (4-6)
         self.distance_histories = [deque(maxlen=50) for _ in range(6)]
@@ -256,21 +260,25 @@ class PositionWindow:
         # Left column: receivers 1, 2, 3 (indices 0, 1, 2) - column 0
         for row in range(3):
             ax_dist = self.fig.add_subplot(gs[row, 0])
-            ax_dist.set_title(f'Receiver {row + 1}', fontsize=10)
-            ax_dist.tick_params(axis='both', labelsize=8)
+            ax_dist.set_facecolor('black')
+            ax_dist.set_title(f'Receiver {row + 1}', fontsize=10, color='white')
+            ax_dist.tick_params(axis='both', labelsize=8, colors='white')
             ax_dist.set_xlim(0, 50)
             ax_dist.set_ylim(0, 500)
-            ax_dist.set_xlabel('Sample', fontsize=8)
-            ax_dist.set_ylabel('Distance (cm)', fontsize=8)
+            ax_dist.set_xlabel('Sample', fontsize=8, color='white')
+            ax_dist.set_ylabel('Distance (cm)', fontsize=8, color='white')
             ax_dist.yaxis.set_label_position('right')
             ax_dist.yaxis.tick_right()
-            ax_dist.grid(True, alpha=0.3)
-            line, = ax_dist.plot([], [], 'g-', linewidth=1)
+            ax_dist.grid(True, alpha=0.3, color='gray')
+            for spine in ax_dist.spines.values():
+                spine.set_color('white')
+            line, = ax_dist.plot([], [], color='#39FF14', linewidth=1)  # Neon green
             # Add distance_window text at top right of left plots
             distance_window = ax_dist.text(0.98, 0.95, '---',
                                            ha='right', va='top', fontsize=12,
                                            fontweight='bold', transform=ax_dist.transAxes,
-                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                                           color='white',
+                                           bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
             self.distance_insets.append(ax_dist)
             self.distance_lines.append(line)
             self.distance_windows.append(distance_window)
@@ -278,21 +286,25 @@ class PositionWindow:
         # Right column: receivers 4, 5, 6 (indices 3, 4, 5) - column 2
         for row in range(3):
             ax_dist = self.fig.add_subplot(gs[row, 2])
-            ax_dist.set_title(f'Receiver {row + 4}', fontsize=10)
-            ax_dist.tick_params(axis='both', labelsize=8)
+            ax_dist.set_facecolor('black')
+            ax_dist.set_title(f'Receiver {row + 4}', fontsize=10, color='white')
+            ax_dist.tick_params(axis='both', labelsize=8, colors='white')
             ax_dist.set_xlim(0, 50)
             ax_dist.set_ylim(0, 500)
-            ax_dist.set_xlabel('Sample', fontsize=8)
-            ax_dist.set_ylabel('Distance (cm)', fontsize=8)
+            ax_dist.set_xlabel('Sample', fontsize=8, color='white')
+            ax_dist.set_ylabel('Distance (cm)', fontsize=8, color='white')
             ax_dist.yaxis.set_label_position('left')
             ax_dist.yaxis.tick_left()
-            ax_dist.grid(True, alpha=0.3)
-            line, = ax_dist.plot([], [], 'g-', linewidth=1)
+            ax_dist.grid(True, alpha=0.3, color='gray')
+            for spine in ax_dist.spines.values():
+                spine.set_color('white')
+            line, = ax_dist.plot([], [], color='#39FF14', linewidth=1)  # Neon green
             # Add distance_window text at top left of right plots
             distance_window = ax_dist.text(0.02, 0.95, '---',
                                            ha='left', va='top', fontsize=12,
                                            fontweight='bold', transform=ax_dist.transAxes,
-                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                                           color='white',
+                                           bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
             self.distance_insets.append(ax_dist)
             self.distance_lines.append(line)
             self.distance_windows.append(distance_window)
@@ -305,53 +317,66 @@ class PositionWindow:
         arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
         
         # Draw X axis arrow (pointing right)
-        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y), 
+        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
                         xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='black', lw=2, zorder=7))
-        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3, 
-                    'X', color='black', fontsize=12, fontweight='bold', 
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
+                    'X', color='white', fontsize=12, fontweight='bold',
                     ha='center', va='top', zorder=7)
-        
+
         # Draw Y axis arrow (pointing up)
-        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length), 
+        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
                         xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='black', lw=2, zorder=7))
-        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5, 
-                    'Y', color='black', fontsize=12, fontweight='bold', 
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
+                    'Y', color='white', fontsize=12, fontweight='bold',
                     ha='right', va='center', zorder=7)
         
-        # Draw receivers (red dots)
+        # Draw receivers (neon magenta dots)
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
         receiver_y = [pos[1][1] for pos in self.receiver_positions]
-        self.ax.scatter(receiver_x, receiver_y, c='red', s=100, zorder=5, label='Receivers')
-        
+        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')  # Neon magenta
+
         # Add ID labels next to each receiver+1 (to match real-life labeling)
         for receiver_id, (x, y) in self.receiver_positions:
-            self.ax.text(x + 5, y + 5, str(receiver_id+1), color='black', 
-                        fontsize=10, fontweight='bold', zorder=6, 
+            self.ax.text(x + 5, y + 5, str(receiver_id+1), color='white',
+                        fontsize=10, fontweight='bold', zorder=6,
                         ha='left', va='bottom')
-        
-        # Draw blue line connecting receivers (connect in order, then close the loop)
+
+        # Draw neon cyan line connecting receivers (connect in order, then close the loop)
         # Connect receivers in a rectangular pattern
         connection_order = [0, 1, 2, 5, 4, 3, 0]  # Connect around the rectangle
         connected_x = [receiver_x[i] for i in connection_order]
         connected_y = [receiver_y[i] for i in connection_order]
-        self.ax.plot(connected_x, connected_y, 'b-', linewidth=2, alpha=0.5, label='Receiver Connections')
-        
-        # Initialize vehicle position plot (multilateration_method_1 - blue)
-        self.vehicle_point, = self.ax.plot([], [], 'bo', markersize=10, zorder=6, label='Multilateration Position')
-        self.vehicle_trail, = self.ax.plot([], [], 'b-', linewidth=1, alpha=0.5, label='Multilateration Trail')
+        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')  # Neon cyan
 
-        # Initialize CEP position plot (orange)
-        self.cep_point, = self.ax.plot([], [], 'o', color='orange', markersize=10, zorder=6, label='CEP Position')
-        self.cep_trail, = self.ax.plot([], [], '-', color='orange', linewidth=1, alpha=0.5, label='CEP Trail')
+        # Initialize vehicle position plot (multilateration_method_1 - neon green)
+        self.vehicle_point, = self.ax.plot([], [], 'o', color='#39FF14', markersize=10, zorder=6, label='Multilateration Position')  # Neon green
+        self.vehicle_trail, = self.ax.plot([], [], '-', color='#39FF14', linewidth=1, alpha=0.5, label='Multilateration Trail')
+
+        # Initialize CEP position plot (neon yellow)
+        self.cep_point, = self.ax.plot([], [], 'o', color='#FFFF00', markersize=10, zorder=6, label='CEP Position')  # Neon yellow
+        self.cep_trail, = self.ax.plot([], [], '-', color='#FFFF00', linewidth=1, alpha=0.5, label='CEP Trail')
         self.cep_position_history = deque(maxlen=50)  # Store last 50 CEP positions
 
         # Median filter buffers for each receiver (window size = 5 samples)
         self.median_filter_window = 5
         self.distance_filter_buffers = [deque(maxlen=self.median_filter_window) for _ in range(6)]
 
-        self.ax.legend(loc='upper right')
+        self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
+
+        # Position text windows at bottom of main plot
+        self.multilateration_pos_text = self.ax.text(0.25, 0.02, 'Multilat: (---, ---)',
+                                                      ha='center', va='bottom', fontsize=11,
+                                                      fontweight='bold', transform=self.ax.transAxes,
+                                                      color='#39FF14',
+                                                      bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+        self.cep_pos_text = self.ax.text(0.75, 0.02, 'CEP: (---, ---)',
+                                          ha='center', va='bottom', fontsize=11,
+                                          fontweight='bold', transform=self.ax.transAxes,
+                                          color='#FFFF00',
+                                          bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+
         plt.tight_layout()
 
         # Thread running variable
@@ -375,15 +400,18 @@ class PositionWindow:
         # Add new position to history
         self.position_history.append((x, y))
 
-        # Update current position (blue dot)
+        # Update current position (green dot)
         self.vehicle_point.set_data([x], [y])
 
-        # Update position trail (blue line showing last 50 positions)
+        # Update position trail (green line showing last 50 positions)
         if len(self.position_history) > 1:
             trail_x = [pos[0] for pos in self.position_history]
             trail_y = [pos[1] for pos in self.position_history]
             self.vehicle_trail.set_data(trail_x, trail_y)
-        
+
+        # Update multilateration position text window
+        self.multilateration_pos_text.set_text(f'Multilat: ({x:.1f}, {y:.1f})')
+
         # Note: Canvas will be automatically redrawn by _refresh_animations()
         # which runs every 10ms and calls canvas.draw() on all active_animations
 
@@ -401,11 +429,14 @@ class PositionWindow:
         # Update current CEP position (orange dot)
         self.cep_point.set_data([x], [y])
 
-        # Update CEP position trail (orange line showing last 50 positions)
+        # Update CEP position trail (yellow line showing last 50 positions)
         if len(self.cep_position_history) > 1:
             trail_x = [pos[0] for pos in self.cep_position_history]
             trail_y = [pos[1] for pos in self.cep_position_history]
             self.cep_trail.set_data(trail_x, trail_y)
+
+        # Update CEP position text window
+        self.cep_pos_text.set_text(f'CEP: ({x:.1f}, {y:.1f})')
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
 
