@@ -429,7 +429,44 @@ class CEPPositioning:
             self.last_good_cov = best_cov
 
         return best_position, best_cep, best_indices, best_cov, results
-    
+
+    def validate_position(self, position):
+        """
+        Validate that the predicted position is within the bounds of the receiver coordinates.
+        The position must have X and Y values within the min/max X and Y of all receivers.
+
+        Args:
+            position: Array-like [x, y] position to validate
+
+        Returns:
+            tuple: (validated_position, invalid_position)
+                - validated_position: The input position if valid, or last_good_position if invalid
+                - invalid_position: Boolean, True if position was outside bounds
+        """
+        if position is None:
+            return self.last_good_position, True
+
+        x, y = position[0], position[1]
+
+        # Get receiver coordinate bounds
+        x_min = self.receivers[:, 0].min()
+        x_max = self.receivers[:, 0].max()
+        y_min = self.receivers[:, 1].min()
+        y_max = self.receivers[:, 1].max()
+
+        # Check if position is within bounds
+        is_valid = (x_min <= x <= x_max) and (y_min <= y <= y_max)
+
+        if is_valid:
+            return position, False
+        else:
+            # Position is outside bounds, return last good position
+            if self.last_good_position is not None:
+                return self.last_good_position, True
+            else:
+                # No last good position available, return the invalid position anyway
+                return position, True
+
     def adaptive_weighted_solution(self, distances, history_length=10):
         """
         Adaptive method: Learn which transmitters are consistently noisy

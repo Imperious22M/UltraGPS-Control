@@ -209,19 +209,54 @@ class GraphicsModule:
         multilat_switch.pack(side=tk.LEFT, padx=5)
         tk.Label(multilat_switch_frame, text="ON", bg='black', fg='#39FF14', font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
 
+        # Insufficient Receivers section (center)
+        insuff_frame = tk.Frame(control_frame, bg='black')
+        insuff_frame.pack(side=tk.LEFT, expand=True, padx=20)
+
+        # Frame to hold label and LED side by side
+        insuff_label_frame = tk.Frame(insuff_frame, bg='black')
+        insuff_label_frame.pack()
+
+        # Insufficient receivers label
+        tk.Label(
+            insuff_label_frame,
+            text="Insufficient Receivers:",
+            bg='black',
+            fg='white',
+            font=('Arial', 12, 'bold')
+        ).pack(side=tk.LEFT)
+
+        # Insufficient receivers LED indicator (green = sufficient, red = insufficient)
+        insuff_led_canvas = tk.Canvas(insuff_label_frame, width=20, height=20, bg='black', highlightthickness=0)
+        insuff_led_canvas.pack(side=tk.LEFT, padx=5)
+        # Draw LED circle (initially green - sufficient receivers)
+        self.position_window.insuff_receivers_led = insuff_led_canvas.create_oval(2, 2, 18, 18, fill='#39FF14', outline='white', width=2)
+        self.position_window.insuff_led_canvas = insuff_led_canvas
+
         # CEP section (right side)
         cep_frame = tk.Frame(control_frame, bg='black')
         cep_frame.pack(side=tk.LEFT, expand=True, padx=20)
 
+        # Frame to hold CEP label and validity LED side by side
+        cep_label_frame = tk.Frame(cep_frame, bg='black')
+        cep_label_frame.pack()
+
         # CEP position label
         self.position_window.cep_label = tk.Label(
-            cep_frame,
+            cep_label_frame,
             text="CEP: (---, ---)",
             bg='black',
             fg='#FFFF00',
             font=('Arial', 14, 'bold')
         )
-        self.position_window.cep_label.pack()
+        self.position_window.cep_label.pack(side=tk.LEFT)
+
+        # CEP validity LED indicator (green = valid, red = invalid)
+        cep_led_canvas = tk.Canvas(cep_label_frame, width=20, height=20, bg='black', highlightthickness=0)
+        cep_led_canvas.pack(side=tk.LEFT, padx=5)
+        # Draw LED circle (initially green)
+        self.position_window.cep_validity_led = cep_led_canvas.create_oval(2, 2, 18, 18, fill='#39FF14', outline='white', width=2)
+        self.position_window.cep_led_canvas = cep_led_canvas
 
         # CEP on/off switch
         cep_switch_frame = tk.Frame(cep_frame, bg='black')
@@ -613,6 +648,38 @@ class PositionWindow:
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
 
+    def update_cep_validity_led(self, invalid_position):
+        """
+        Update the CEP validity LED indicator based on position validation result.
+        Green = valid position (within receiver bounds), Red = invalid position.
+
+        Args:
+            invalid_position: Boolean, True if position is outside receiver bounds
+        """
+        if hasattr(self, 'cep_led_canvas') and hasattr(self, 'cep_validity_led'):
+            if hasattr(self, '_graphics_module'):
+                # Schedule update on main thread for thread safety
+                color = '#FF0000' if invalid_position else '#39FF14'
+                self._graphics_module._schedule_update(
+                    lambda c=color: self.cep_led_canvas.itemconfig(self.cep_validity_led, fill=c)
+                )
+
+    def update_insufficient_receivers_led(self, insufficient):
+        """
+        Update the insufficient receivers LED indicator.
+        Green = sufficient receivers (>= 3 sane), Red = insufficient receivers (< 3 sane).
+
+        Args:
+            insufficient: Boolean, True if fewer than 3 receivers are sane
+        """
+        if hasattr(self, 'insuff_led_canvas') and hasattr(self, 'insuff_receivers_led'):
+            if hasattr(self, '_graphics_module'):
+                # Schedule update on main thread for thread safety
+                color = '#FF0000' if insufficient else '#39FF14'
+                self._graphics_module._schedule_update(
+                    lambda c=color: self.insuff_led_canvas.itemconfig(self.insuff_receivers_led, fill=c)
+                )
+
     def apply_median_filter(self, receiver_distances):
         """
         Apply median filter to raw receiver distances to reduce noise and outliers.
@@ -675,8 +742,12 @@ class PositionWindow:
                 best_pos, best_cep, best_indices, cov, all_results = \
                         self.stable_pos.find_best_subset(filtered_distances, max_subsets_to_try=15)
                 print(f"CEP Position: {best_pos}, CEP: {best_cep}, Indices: {best_indices}")
-                
-                
+
+                # Validate that CEP position is within receiver bounds
+                validated_pos, invalid_position = self.stable_pos.validate_position(best_pos)
+                if invalid_position:
+                    print(f"CEP position invalid (outside bounds), using last good position")
+                best_pos = validated_pos
 
                 #weighted_cep, final_cep, recv_weights, best_indices = \
                     #self.stable_pos.adaptive_weighted_solution(filtered_distances)
@@ -696,6 +767,15 @@ class PositionWindow:
                 cep_sane = self.stable_pos.last_sane_indices if self.stable_pos.last_sane_indices is not None else []
                 self.update_sane_leds(multilat_sane, cep_sane)
                 print(f"Sane indices - Multilat: {multilat_sane}, CEP: {cep_sane}")
+
+                # Check for insufficient receivers (< 3 sane in either module)
+                insufficient_receivers = (len(multilat_sane) < 3) or (len(cep_sane) < 3)
+                self.update_insufficient_receivers_led(insufficient_receivers)
+                if insufficient_receivers:
+                    print(f"WARNING: Insufficient receivers - Multilat: {len(multilat_sane)}, CEP: {len(cep_sane)}")
+
+                # Update CEP validity LED (green = valid, red = invalid position)
+                self.update_cep_validity_led(invalid_position)
 
                 print(f"~~~~~~~~~~~")
                 print(time.time()-time_start) 
