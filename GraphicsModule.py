@@ -348,6 +348,9 @@ class PositionWindow:
         # Distance windows: text labels showing current distance (stored for updating)
         self.distance_windows = []
 
+        # LED indicators for receiver sanity state (green = sane, red = not sane)
+        self.sane_leds = []
+
         # Left column: receivers 1, 2, 3 (indices 0, 1, 2) - column 0
         for row in range(3):
             ax_dist = self.fig.add_subplot(gs[row, 0])
@@ -370,9 +373,15 @@ class PositionWindow:
                                            fontweight='bold', transform=ax_dist.transAxes,
                                            color='white',
                                            bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+            # Add LED indicator at top left of left plots (green = sane, red = not sane)
+            from matplotlib.patches import Circle
+            led = Circle((0.08, 0.88), 0.06, transform=ax_dist.transAxes,
+                        facecolor='#39FF14', edgecolor='white', linewidth=1.5, zorder=10)
+            ax_dist.add_patch(led)
             self.distance_insets.append(ax_dist)
             self.distance_lines.append(line)
             self.distance_windows.append(distance_window)
+            self.sane_leds.append(led)
 
         # Right column: receivers 4, 5, 6 (indices 3, 4, 5) - column 2
         for row in range(3):
@@ -396,10 +405,16 @@ class PositionWindow:
                                            fontweight='bold', transform=ax_dist.transAxes,
                                            color='white',
                                            bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+            # Add LED indicator at top right of right plots (green = sane, red = not sane)
+            from matplotlib.patches import Circle
+            led = Circle((0.92, 0.88), 0.06, transform=ax_dist.transAxes,
+                        facecolor='#39FF14', edgecolor='white', linewidth=1.5, zorder=10)
+            ax_dist.add_patch(led)
             self.distance_insets.append(ax_dist)
             self.distance_lines.append(line)
             self.distance_windows.append(distance_window)
-        
+            self.sane_leds.append(led)
+
         # Add X/Y compass rose in top left corner
         x_min, x_max = self.ax.get_xlim()
         y_min, y_max = self.ax.get_ylim()
@@ -577,6 +592,27 @@ class PositionWindow:
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
 
+    def update_sane_leds(self, multilat_sane_indices, cep_sane_indices):
+        """
+        Update the LED indicators for each receiver based on sanity check results.
+        A receiver is shown as green if it's sane in BOTH multilateration and CEP,
+        red otherwise.
+
+        Args:
+            multilat_sane_indices: Array of indices considered sane by PositionModule
+            cep_sane_indices: Array of indices considered sane by CEPPositioning
+        """
+        for i in range(6):
+            # Receiver is sane if it appears in both sane indices lists
+            is_sane = (i in multilat_sane_indices) and (i in cep_sane_indices)
+
+            if is_sane:
+                self.sane_leds[i].set_facecolor('#39FF14')  # Neon green
+            else:
+                self.sane_leds[i].set_facecolor('#FF0000')  # Red
+
+        # Note: Canvas will be automatically redrawn by _refresh_animations()
+
     def apply_median_filter(self, receiver_distances):
         """
         Apply median filter to raw receiver distances to reduce noise and outliers.
@@ -654,7 +690,13 @@ class PositionWindow:
                 self.update_cep_cords(best_pos[0], best_pos[1])
                 # Update distance graphs for all receivers (show raw distances)
                 self.update_distances(raw_distances)
-                
+
+                # Update LED indicators based on sane indices from both modules
+                multilat_sane = pos_module.last_sane_indices if pos_module.last_sane_indices is not None else []
+                cep_sane = self.stable_pos.last_sane_indices if self.stable_pos.last_sane_indices is not None else []
+                self.update_sane_leds(multilat_sane, cep_sane)
+                print(f"Sane indices - Multilat: {multilat_sane}, CEP: {cep_sane}")
+
                 print(f"~~~~~~~~~~~")
                 print(time.time()-time_start) 
                 # Re-check graphics module status

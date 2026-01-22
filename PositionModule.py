@@ -23,6 +23,7 @@ class PositionModule:
         self.max_differential = max_differential
         self.last_distances = None
         self.last_good_position = None
+        self.last_sane_indices = None
         #print(self.receiver_coordinates)
         #print(self.receiver_count)
 
@@ -43,7 +44,9 @@ class PositionModule:
         # On first call, all receivers are sane (no previous data to compare)
         if self.last_distances is None:
             self.last_distances = receiver_distances.copy()
-            return np.arange(len(receiver_distances))
+            sane_indices = np.arange(len(receiver_distances))
+            self.last_sane_indices = sane_indices
+            return sane_indices
 
         # Calculate the differential for each receiver
         differentials = np.abs(receiver_distances - self.last_distances)
@@ -53,6 +56,9 @@ class PositionModule:
 
         # Update last distances for next call
         self.last_distances = receiver_distances.copy()
+
+        # Store sane indices for external access
+        self.last_sane_indices = sane_indices
 
         return sane_indices
 
@@ -256,6 +262,7 @@ class CEPPositioning:
         self.last_good_cep = None
         self.last_good_indices = None
         self.last_good_cov = None
+        self.last_sane_indices = None
 
     def filter_receivers(self, receiver_distances):
         """
@@ -274,7 +281,9 @@ class CEPPositioning:
         # On first call, all receivers are sane (no previous data to compare)
         if self.last_distances is None:
             self.last_distances = receiver_distances.copy()
-            return np.arange(len(receiver_distances))
+            sane_indices = np.arange(len(receiver_distances))
+            self.last_sane_indices = sane_indices
+            return sane_indices
 
         # Calculate the differential for each receiver
         differentials = np.abs(receiver_distances - self.last_distances)
@@ -285,8 +294,11 @@ class CEPPositioning:
         # Update last distances for next call
         self.last_distances = receiver_distances.copy()
 
+        # Store sane indices for external access
+        self.last_sane_indices = sane_indices
+
         return sane_indices
-        
+
     def compute_position_and_cep(self, distances, use_indices=None):
         """
         Compute position and CEP for a specific set of transmitters
