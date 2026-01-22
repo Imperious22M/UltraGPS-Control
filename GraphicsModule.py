@@ -231,12 +231,12 @@ class PositionWindow:
         # Layout: [distance_text_left, left_plots, main_arena, right_plots, distance_text_right]
         from matplotlib.gridspec import GridSpec
 
-        self.fig = plt.figure(figsize=(16, 10), facecolor='black')
-        # 3-column layout: left_plots, main_arena, right_plots
-        gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 5, 1], hspace=0.3, wspace=0.4)
+        self.fig = plt.figure(figsize=(16, 11), facecolor='black')
+        # 4 rows x 3 columns: rows 0-2 for main content, row 3 for position text bar
+        gs = GridSpec(4, 3, figure=self.fig, width_ratios=[1, 5, 1], height_ratios=[1, 1, 1, 0.15], hspace=0.3, wspace=0.4)
 
-        # Create main arena axes in center (spans all 3 rows)
-        self.ax = self.fig.add_subplot(gs[:, 1])
+        # Create main arena axes in center (spans rows 0-2)
+        self.ax = self.fig.add_subplot(gs[0:3, 1])
         self.ax.set_facecolor('black')
         self.ax.set_xlim(-grid_width/2-self.grid_padding, grid_width/2+self.grid_padding)
         self.ax.set_ylim(-grid_height/2-self.grid_padding, grid_height/2+self.grid_padding)
@@ -365,17 +365,21 @@ class PositionWindow:
 
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
-        # Position text windows at bottom of main plot
-        self.multilateration_pos_text = self.ax.text(0.25, 0.02, 'Multilat: (---, ---)',
-                                                      ha='center', va='bottom', fontsize=11,
-                                                      fontweight='bold', transform=self.ax.transAxes,
-                                                      color='#39FF14',
-                                                      bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
-        self.cep_pos_text = self.ax.text(0.75, 0.02, 'CEP: (---, ---)',
-                                          ha='center', va='bottom', fontsize=11,
-                                          fontweight='bold', transform=self.ax.transAxes,
-                                          color='#FFFF00',
-                                          bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+        # Position text bar below the main plot (row 3, center column)
+        self.pos_text_bar = self.fig.add_subplot(gs[3, 1])
+        self.pos_text_bar.set_facecolor('black')
+        self.pos_text_bar.axis('off')  # Hide axes
+
+        self.multilateration_pos_text = self.pos_text_bar.text(0.25, 0.5, 'Multilat: (---, ---)',
+                                                                ha='center', va='center', fontsize=14,
+                                                                fontweight='bold', transform=self.pos_text_bar.transAxes,
+                                                                color='#39FF14',
+                                                                bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8, pad=0.5))
+        self.cep_pos_text = self.pos_text_bar.text(0.75, 0.5, 'CEP: (---, ---)',
+                                                    ha='center', va='center', fontsize=14,
+                                                    fontweight='bold', transform=self.pos_text_bar.transAxes,
+                                                    color='#FFFF00',
+                                                    bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8, pad=0.5))
 
         plt.tight_layout()
 
