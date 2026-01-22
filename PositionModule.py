@@ -181,7 +181,7 @@ class StablePositionEstimator:
         return result.x
 
 class CEPPositioning:
-    def __init__(self, receiver_positions, min_transmitters=4):
+    def __init__(self, receiver_positions, min_transmitters=3):
         """
         receiver_positions: (6, 2) array of receiver coordinates
         min_transmitters: Minimum number to use (3 for 2D, but 4 is more robust)

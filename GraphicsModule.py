@@ -640,6 +640,12 @@ class PositionWindow:
                         self.stable_pos.find_best_subset(filtered_distances, max_subsets_to_try=15)
                 print(f"CEP Position: {best_pos}, CEP: {best_cep}, Indices: {best_indices}")
 
+                #weighted_cep, final_cep, recv_weights, best_indices = \
+                    #self.stable_pos.adaptive_weighted_solution(filtered_distances)
+
+                # OVERRIDE CEP CORDS TO TEST OTHER TACTICS
+                #best_pos = weighted_cep
+
                 # Update multilateration position (blue dot)
                 self.update_cords(x_calc, y_calc)
                 # Update CEP position (orange dot)
