@@ -189,16 +189,17 @@ class GraphicsModule:
         multilat_switch_frame = tk.Frame(multilat_frame, bg='black')
         multilat_switch_frame.pack(pady=5)
 
-        multilat_var = tk.BooleanVar(value=True)
+        # Inverted: unchecked (False) = ON (colored), checked (True) = OFF (dark)
+        multilat_var = tk.BooleanVar(value=False)
         tk.Label(multilat_switch_frame, text="OFF", bg='black', fg='gray', font=('Arial', 9)).pack(side=tk.LEFT)
         multilat_switch = tk.Checkbutton(
             multilat_switch_frame,
             variable=multilat_var,
             command=toggle_multilateration,
-            bg='black',
-            fg='#39FF14',
-            selectcolor='#39FF14',
-            activebackground='black',
+            bg='#39FF14',           # Colored when unchecked (ON)
+            fg='black',
+            selectcolor='#333333',  # Dark when checked (OFF)
+            activebackground='#39FF14',
             indicatoron=False,
             width=4,
             height=1,
@@ -226,16 +227,17 @@ class GraphicsModule:
         cep_switch_frame = tk.Frame(cep_frame, bg='black')
         cep_switch_frame.pack(pady=5)
 
-        cep_var = tk.BooleanVar(value=True)
+        # Inverted: unchecked (False) = ON (colored), checked (True) = OFF (dark)
+        cep_var = tk.BooleanVar(value=False)
         tk.Label(cep_switch_frame, text="OFF", bg='black', fg='gray', font=('Arial', 9)).pack(side=tk.LEFT)
         cep_switch = tk.Checkbutton(
             cep_switch_frame,
             variable=cep_var,
             command=toggle_cep,
-            bg='black',
-            fg='#FFFF00',
-            selectcolor='#FFFF00',
-            activebackground='black',
+            bg='#FFFF00',           # Colored when unchecked (ON)
+            fg='black',
+            selectcolor='#333333',  # Dark when checked (OFF)
+            activebackground='#FFFF00',
             indicatoron=False,
             width=4,
             height=1,
