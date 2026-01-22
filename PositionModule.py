@@ -22,6 +22,7 @@ class PositionModule:
         self.receiver_count = len(self.receiver_coordinates)
         self.max_differential = max_differential
         self.last_distances = None
+        self.last_good_position = None
         #print(self.receiver_coordinates)
         #print(self.receiver_count)
 
@@ -60,11 +61,33 @@ class PositionModule:
         Calculates the initial position of a transmitter based on a list of distances
 
         Args:
-            receiver_positions (list): List of all distances from the receivers to the vehicle
-            Must be in order (index 0 -> Receiver 1)
+            receiver_distances (list): List of all distances from the receivers to the vehicle
+                Must be in order (index 0 -> Receiver 1)
+            receiver_indices (list): Indices of receivers to use for calculation
+
+        Returns:
+            tuple: (position, result) where position is [x, y] and result is the optimization result.
+                   If fewer than 3 sane receivers, returns (last_good_position, None).
         """
-        initial_position = self.ordinary_least_squares(receiver_distances,receiver_indices)
-        position_non_linear, result = self.non_linear_least_squares(receiver_distances, initial_position, receiver_indices)
+        # Filter receivers based on differential
+        sane_indices = self.filter_receivers(receiver_distances)
+
+        # Intersect sane indices with requested receiver indices
+        filtered_indices = np.array([i for i in receiver_indices if i in sane_indices])
+
+        # Check if we have at least 3 sane receivers
+        if len(filtered_indices) < 3:
+            if self.last_good_position is not None:
+                return (self.last_good_position, None)
+            else:
+                # No last good position, fall back to using all requested indices
+                filtered_indices = np.array(receiver_indices)
+
+        initial_position = self.ordinary_least_squares(receiver_distances, filtered_indices)
+        position_non_linear, result = self.non_linear_least_squares(receiver_distances, initial_position, filtered_indices)
+
+        # Save as last good position
+        self.last_good_position = position_non_linear.copy()
 
         return (position_non_linear, result)
 
@@ -215,22 +238,60 @@ class StablePositionEstimator:
         return result.x
 
 class CEPPositioning:
-    def __init__(self, receiver_positions, min_transmitters=3):
+    def __init__(self, receiver_positions, min_transmitters=3, max_differential=30):
         """
         receiver_positions: (6, 2) array of receiver coordinates
         min_transmitters: Minimum number to use (3 for 2D, but 4 is more robust)
+        max_differential: Maximum allowed change in distance (cm/s) for a receiver
+            to be considered "sane". Default is 30.
         """
         self.receiver_positions = receiver_positions
         receiver_coordinates = [cords for index,cords in receiver_positions]
         self.receivers = np.array(receiver_coordinates)
         self.num_receivers = len(receiver_positions)
         self.min_transmitters = min_transmitters
+        self.max_differential = max_differential
+        self.last_distances = None
+        self.last_good_position = None
+        self.last_good_cep = None
+        self.last_good_indices = None
+        self.last_good_cov = None
+
+    def filter_receivers(self, receiver_distances):
+        """
+        Filter receivers based on the differential (change from last measurement).
+        A "sane" receiver is one whose differential is less than max_differential.
+
+        Args:
+            receiver_distances (list or np.ndarray): List of all distances from receivers
+
+        Returns:
+            np.ndarray: Indices of receivers considered "sane"
+        """
+        if not isinstance(receiver_distances, np.ndarray):
+            receiver_distances = np.array(receiver_distances)
+
+        # On first call, all receivers are sane (no previous data to compare)
+        if self.last_distances is None:
+            self.last_distances = receiver_distances.copy()
+            return np.arange(len(receiver_distances))
+
+        # Calculate the differential for each receiver
+        differentials = np.abs(receiver_distances - self.last_distances)
+
+        # Find indices where differential is below threshold
+        sane_indices = np.where(differentials < self.max_differential)[0]
+
+        # Update last distances for next call
+        self.last_distances = receiver_distances.copy()
+
+        return sane_indices
         
     def compute_position_and_cep(self, distances, use_indices=None):
         """
         Compute position and CEP for a specific set of transmitters
 
-        Returns: (position, CEP_radius, covariance_matrix)
+        Returns: (position, CEP_radius, covariance_matrix, use_indices)
         """
         if use_indices is None:
             use_indices = list(range(self.num_receivers))
@@ -240,7 +301,14 @@ class CEPPositioning:
         pos_module = PositionModule(self.receiver_positions)
         # Pass full distances array - multilateration_method_1 will select by indices internally
         pos, result = pos_module.multilateration_method_1(distances, use_indices)
-        
+
+        # If result is None (returned last good position due to insufficient sane receivers),
+        # return with high uncertainty
+        if result is None:
+            cov = np.eye(2) * 1000
+            cep = 1000
+            return pos, cep, cov, use_indices
+
         # Compute covariance matrix and CEP
         # Jacobian at solution gives sensitivity
         J = result.jac
@@ -255,17 +323,17 @@ class CEPPositioning:
             # Covariance: (J^T W J)^-1
             try:
                 cov = np.linalg.inv(J.T @ W @ J)
-                
+
                 # CEP approximation for 2D Gaussian
                 # CEP ≈ 0.59 * (σ_x + σ_y) for small covariance
                 # More accurate: CEP = 0.59 * sqrt(σ_x² + σ_y²) * sqrt(2)
                 sigma_x = np.sqrt(cov[0, 0])
                 sigma_y = np.sqrt(cov[1, 1])
                 cep = 0.59 * np.sqrt(sigma_x**2 + sigma_y**2) * np.sqrt(2)
-                
+
                 # Alternative: use 1.1774 * sqrt(average variance)
                 # cep = 1.1774 * np.sqrt((sigma_x**2 + sigma_y**2) / 2)
-                
+
             except np.linalg.LinAlgError:
                 # Singular matrix - receivers in bad geometry
                 cov = np.eye(2) * 1000  # Large uncertainty
@@ -273,38 +341,53 @@ class CEPPositioning:
         else:
             cov = np.eye(2) * 1000
             cep = 1000
-            
+
         return pos, cep, cov, use_indices
     
     def find_best_subset(self, distances, max_subsets_to_try=None):
         """
-        Try different transmitter combinations, return one with lowest CEP
-        
-        Returns: (best_position, best_cep, best_indices)
+        Try different transmitter combinations, return one with lowest CEP.
+        Filters receivers based on differential before calculating.
+
+        Returns: (best_position, best_cep, best_indices, best_cov, results)
+                 If fewer than 3 sane receivers, returns last good values.
         """
         if max_subsets_to_try is None:
             max_subsets_to_try = 20  # Limit to avoid combinatorial explosion
-        
+
+        # Filter receivers based on differential
+        sane_indices = self.filter_receivers(distances)
+
+        # Check if we have at least 3 sane receivers
+        if len(sane_indices) < 3:
+            if self.last_good_position is not None:
+                return (self.last_good_position, self.last_good_cep,
+                        self.last_good_indices, self.last_good_cov, [])
+            else:
+                # No last good position, use all receivers as fallback
+                sane_indices = np.arange(self.num_receivers)
+
         best_cep = float('inf')
         best_position = None
         best_indices = None
         best_cov = None
-        
-        # Try different combinations of transmitters
+
+        # Try different combinations of sane transmitters only
         all_combinations = []
-        
-        # Start with using all transmitters
-        all_combinations.append(list(range(self.num_receivers)))
-        
-        # Try subsets of size min_transmitters and up
-        for k in range(self.min_transmitters, self.num_receivers):
-            for subset in combinations(range(self.num_receivers), k):
+        sane_list = list(sane_indices)
+
+        # Start with using all sane transmitters
+        all_combinations.append(sane_list)
+
+        # Try subsets of sane receivers of size min_transmitters and up
+        for k in range(self.min_transmitters, len(sane_list)):
+            for subset in combinations(sane_list, k):
                 all_combinations.append(list(subset))
                 if len(all_combinations) >= max_subsets_to_try:
                     break
             if len(all_combinations) >= max_subsets_to_try:
                 break
-        
+
         # Evaluate each combination
         results = []
         for indices in all_combinations:
@@ -316,16 +399,23 @@ class CEPPositioning:
                 'cov': cov,
                 'num_transmitters': len(indices)
             })
-            
+
             if cep < best_cep:
                 best_cep = cep
                 best_position = position
                 best_indices = indices
                 best_cov = cov
-        
+
         # Sort by CEP for analysis
         results.sort(key=lambda x: x['cep'])
-        
+
+        # Save as last good values
+        if best_position is not None:
+            self.last_good_position = best_position.copy() if hasattr(best_position, 'copy') else best_position
+            self.last_good_cep = best_cep
+            self.last_good_indices = best_indices
+            self.last_good_cov = best_cov
+
         return best_position, best_cep, best_indices, best_cov, results
     
     def adaptive_weighted_solution(self, distances, history_length=10):
