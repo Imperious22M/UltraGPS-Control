@@ -24,13 +24,33 @@ class PositionModule:
         self.last_distances = None
         self.last_good_position = None
         self.last_sane_indices = None
+
+        # Calculate maximum distance between any two receivers
+        # This is used to validate that reported distances are within arena bounds
+        self.max_receiver_distance = self._calculate_max_receiver_distance()
         #print(self.receiver_coordinates)
         #print(self.receiver_count)
 
+    def _calculate_max_receiver_distance(self):
+        """
+        Calculate the maximum distance between any two receivers.
+        This represents the maximum valid distance a receiver could report.
+        """
+        max_dist = 0
+        for i in range(self.receiver_count):
+            for j in range(i + 1, self.receiver_count):
+                dist = np.linalg.norm(self.receiver_coordinates[i] - self.receiver_coordinates[j])
+                if dist > max_dist:
+                    max_dist = dist
+        return max_dist
+
     def filter_receivers(self, receiver_distances):
         """
-        Filter receivers based on the differential (change from last measurement).
-        A "sane" receiver is one whose differential is less than max_differential.
+        Filter receivers based on:
+        1. The differential (change from last measurement) - must be less than max_differential
+        2. The distance value - must be less than max_receiver_distance (arena bounds)
+
+        A "sane" receiver passes both checks.
 
         Args:
             receiver_distances (list or np.ndarray): List of all distances from receivers
@@ -41,18 +61,22 @@ class PositionModule:
         if not isinstance(receiver_distances, np.ndarray):
             receiver_distances = np.array(receiver_distances)
 
-        # On first call, all receivers are sane (no previous data to compare)
+        # Check which receivers report distances within arena bounds
+        within_bounds = receiver_distances <= self.max_receiver_distance
+
+        # On first call, only check bounds (no previous data for differential)
         if self.last_distances is None:
             self.last_distances = receiver_distances.copy()
-            sane_indices = np.arange(len(receiver_distances))
+            sane_indices = np.where(within_bounds)[0]
             self.last_sane_indices = sane_indices
             return sane_indices
 
         # Calculate the differential for each receiver
         differentials = np.abs(receiver_distances - self.last_distances)
 
-        # Find indices where differential is below threshold
-        sane_indices = np.where(differentials < self.max_differential)[0]
+        # Find indices where differential is below threshold AND distance is within bounds
+        sane_mask = (differentials < self.max_differential) & within_bounds
+        sane_indices = np.where(sane_mask)[0]
 
         # Update last distances for next call
         self.last_distances = receiver_distances.copy()
@@ -264,10 +288,30 @@ class CEPPositioning:
         self.last_good_cov = None
         self.last_sane_indices = None
 
+        # Calculate maximum distance between any two receivers
+        # This is used to validate that reported distances are within arena bounds
+        self.max_receiver_distance = self._calculate_max_receiver_distance()
+
+    def _calculate_max_receiver_distance(self):
+        """
+        Calculate the maximum distance between any two receivers.
+        This represents the maximum valid distance a receiver could report.
+        """
+        max_dist = 0
+        for i in range(self.num_receivers):
+            for j in range(i + 1, self.num_receivers):
+                dist = np.linalg.norm(self.receivers[i] - self.receivers[j])
+                if dist > max_dist:
+                    max_dist = dist
+        return max_dist
+
     def filter_receivers(self, receiver_distances):
         """
-        Filter receivers based on the differential (change from last measurement).
-        A "sane" receiver is one whose differential is less than max_differential.
+        Filter receivers based on:
+        1. The differential (change from last measurement) - must be less than max_differential
+        2. The distance value - must be less than max_receiver_distance (arena bounds)
+
+        A "sane" receiver passes both checks.
 
         Args:
             receiver_distances (list or np.ndarray): List of all distances from receivers
@@ -278,18 +322,22 @@ class CEPPositioning:
         if not isinstance(receiver_distances, np.ndarray):
             receiver_distances = np.array(receiver_distances)
 
-        # On first call, all receivers are sane (no previous data to compare)
+        # Check which receivers report distances within arena bounds
+        within_bounds = receiver_distances <= self.max_receiver_distance
+
+        # On first call, only check bounds (no previous data for differential)
         if self.last_distances is None:
             self.last_distances = receiver_distances.copy()
-            sane_indices = np.arange(len(receiver_distances))
+            sane_indices = np.where(within_bounds)[0]
             self.last_sane_indices = sane_indices
             return sane_indices
 
         # Calculate the differential for each receiver
         differentials = np.abs(receiver_distances - self.last_distances)
 
-        # Find indices where differential is below threshold
-        sane_indices = np.where(differentials < self.max_differential)[0]
+        # Find indices where differential is below threshold AND distance is within bounds
+        sane_mask = (differentials < self.max_differential) & within_bounds
+        sane_indices = np.where(sane_mask)[0]
 
         # Update last distances for next call
         self.last_distances = receiver_distances.copy()
