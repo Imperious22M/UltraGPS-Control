@@ -5,7 +5,7 @@ from scipy.optimize import least_squares
 
 
 class PositionModule:
-    def __init__(self, receiver_positions):
+    def __init__(self, receiver_positions, max_differential=30):
         """
         Helper class that contains all the methods for calculating transmitter position
         using the receiver known coordinates and receiver measured distances
@@ -13,13 +13,47 @@ class PositionModule:
         Args:
             receiver_coordinates (list): 2D list of x,y coordinates of all receivers
                 Must be in order (index 0 -> Receiver 1)
+            max_differential (float): Maximum allowed change in distance (cm/s) for a
+                receiver to be considered "sane". Default is 30.
         """
 
         # Sort incoming position array by the embedded tower id
         self.receiver_coordinates = np.array([cord for id,cord in sorted(receiver_positions) ])
         self.receiver_count = len(self.receiver_coordinates)
+        self.max_differential = max_differential
+        self.last_distances = None
         #print(self.receiver_coordinates)
         #print(self.receiver_count)
+
+    def filter_receivers(self, receiver_distances):
+        """
+        Filter receivers based on the differential (change from last measurement).
+        A "sane" receiver is one whose differential is less than max_differential.
+
+        Args:
+            receiver_distances (list or np.ndarray): List of all distances from receivers
+
+        Returns:
+            np.ndarray: Indices of receivers considered "sane"
+        """
+        if not isinstance(receiver_distances, np.ndarray):
+            receiver_distances = np.array(receiver_distances)
+
+        # On first call, all receivers are sane (no previous data to compare)
+        if self.last_distances is None:
+            self.last_distances = receiver_distances.copy()
+            return np.arange(len(receiver_distances))
+
+        # Calculate the differential for each receiver
+        differentials = np.abs(receiver_distances - self.last_distances)
+
+        # Find indices where differential is below threshold
+        sane_indices = np.where(differentials < self.max_differential)[0]
+
+        # Update last distances for next call
+        self.last_distances = receiver_distances.copy()
+
+        return sane_indices
 
     def multilateration_method_1(self, receiver_distances, receiver_indices):
         """
