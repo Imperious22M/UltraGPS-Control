@@ -156,6 +156,95 @@ class GraphicsModule:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Create control panel frame below the canvas
+        control_frame = tk.Frame(frame, bg='black')
+        control_frame.pack(fill=tk.X, pady=10)
+
+        # Thread-safe boolean flags for showing/hiding plots (both on by default)
+        self.position_window.show_multilateration = True
+        self.position_window.show_cep = True
+
+        # Callback functions to toggle the flags
+        def toggle_multilateration():
+            self.position_window.show_multilateration = not self.position_window.show_multilateration
+
+        def toggle_cep():
+            self.position_window.show_cep = not self.position_window.show_cep
+
+        # Multilateration section (left side)
+        multilat_frame = tk.Frame(control_frame, bg='black')
+        multilat_frame.pack(side=tk.LEFT, expand=True, padx=20)
+
+        # Multilateration position label
+        self.position_window.multilat_label = tk.Label(
+            multilat_frame,
+            text="Multilat: (---, ---)",
+            bg='black',
+            fg='#39FF14',
+            font=('Arial', 14, 'bold')
+        )
+        self.position_window.multilat_label.pack()
+
+        # Multilateration on/off switch
+        multilat_switch_frame = tk.Frame(multilat_frame, bg='black')
+        multilat_switch_frame.pack(pady=5)
+
+        multilat_var = tk.BooleanVar(value=True)
+        tk.Label(multilat_switch_frame, text="OFF", bg='black', fg='gray', font=('Arial', 9)).pack(side=tk.LEFT)
+        multilat_switch = tk.Checkbutton(
+            multilat_switch_frame,
+            variable=multilat_var,
+            command=toggle_multilateration,
+            bg='black',
+            fg='#39FF14',
+            selectcolor='#39FF14',
+            activebackground='black',
+            indicatoron=False,
+            width=4,
+            height=1,
+            relief=tk.RAISED,
+            bd=2
+        )
+        multilat_switch.pack(side=tk.LEFT, padx=5)
+        tk.Label(multilat_switch_frame, text="ON", bg='black', fg='#39FF14', font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
+
+        # CEP section (right side)
+        cep_frame = tk.Frame(control_frame, bg='black')
+        cep_frame.pack(side=tk.LEFT, expand=True, padx=20)
+
+        # CEP position label
+        self.position_window.cep_label = tk.Label(
+            cep_frame,
+            text="CEP: (---, ---)",
+            bg='black',
+            fg='#FFFF00',
+            font=('Arial', 14, 'bold')
+        )
+        self.position_window.cep_label.pack()
+
+        # CEP on/off switch
+        cep_switch_frame = tk.Frame(cep_frame, bg='black')
+        cep_switch_frame.pack(pady=5)
+
+        cep_var = tk.BooleanVar(value=True)
+        tk.Label(cep_switch_frame, text="OFF", bg='black', fg='gray', font=('Arial', 9)).pack(side=tk.LEFT)
+        cep_switch = tk.Checkbutton(
+            cep_switch_frame,
+            variable=cep_var,
+            command=toggle_cep,
+            bg='black',
+            fg='#FFFF00',
+            selectcolor='#FFFF00',
+            activebackground='black',
+            indicatoron=False,
+            width=4,
+            height=1,
+            relief=tk.RAISED,
+            bd=2
+        )
+        cep_switch.pack(side=tk.LEFT, padx=5)
+        tk.Label(cep_switch_frame, text="ON", bg='black', fg='#FFFF00', font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
+
         # Store canvas reference for updates
         self.position_window.canvas = canvas
         # Store reference to graphics module for thread-safe updates
@@ -231,9 +320,9 @@ class PositionWindow:
         # Layout: [distance_text_left, left_plots, main_arena, right_plots, distance_text_right]
         from matplotlib.gridspec import GridSpec
 
-        self.fig = plt.figure(figsize=(16, 11), facecolor='black')
-        # 4 rows x 3 columns: rows 0-2 for main content, row 3 for position text bar
-        gs = GridSpec(4, 3, figure=self.fig, width_ratios=[1, 5, 1], height_ratios=[1, 1, 1, 0.15], hspace=0.3, wspace=0.4)
+        self.fig = plt.figure(figsize=(16, 10), facecolor='black')
+        # 3 rows x 3 columns for main content (position text moved to tkinter)
+        gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 5, 1], height_ratios=[1, 1, 1], hspace=0.3, wspace=0.4)
 
         # Create main arena axes in center (spans rows 0-2)
         self.ax = self.fig.add_subplot(gs[0:3, 1])
@@ -365,22 +454,6 @@ class PositionWindow:
 
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
-        # Position text bar below the main plot (row 3, center column)
-        self.pos_text_bar = self.fig.add_subplot(gs[3, 1])
-        self.pos_text_bar.set_facecolor('black')
-        self.pos_text_bar.axis('off')  # Hide axes
-
-        self.multilateration_pos_text = self.pos_text_bar.text(0.25, 0.5, 'Multilat: (---, ---)',
-                                                                ha='center', va='center', fontsize=14,
-                                                                fontweight='bold', transform=self.pos_text_bar.transAxes,
-                                                                color='#39FF14',
-                                                                bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8, pad=0.5))
-        self.cep_pos_text = self.pos_text_bar.text(0.75, 0.5, 'CEP: (---, ---)',
-                                                    ha='center', va='center', fontsize=14,
-                                                    fontweight='bold', transform=self.pos_text_bar.transAxes,
-                                                    color='#FFFF00',
-                                                    bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8, pad=0.5))
-
         plt.tight_layout()
 
         # Thread running variable
@@ -396,7 +469,7 @@ class PositionWindow:
     def update_cords(self, x, y):
         """
         Update the vehicle coordinates of the plot
-        
+
         Args:
             x (float): X coordinate of the vehicle
             y (float): Y coordinate of the vehicle
@@ -404,17 +477,30 @@ class PositionWindow:
         # Add new position to history
         self.position_history.append((x, y))
 
-        # Update current position (green dot)
-        self.vehicle_point.set_data([x], [y])
+        # Update tkinter label if available (schedule on main thread)
+        if hasattr(self, 'multilat_label') and hasattr(self, '_graphics_module'):
+            text = f'Multilat: ({x:.1f}, {y:.1f})'
+            self._graphics_module._schedule_update(
+                lambda t=text: self.multilat_label.config(text=t)
+            )
 
-        # Update position trail (green line showing last 50 positions)
-        if len(self.position_history) > 1:
-            trail_x = [pos[0] for pos in self.position_history]
-            trail_y = [pos[1] for pos in self.position_history]
-            self.vehicle_trail.set_data(trail_x, trail_y)
+        # Check if plotting is enabled
+        show_plot = getattr(self, 'show_multilateration', True)
 
-        # Update multilateration position text window
-        self.multilateration_pos_text.set_text(f'Multilat: ({x:.1f}, {y:.1f})')
+        # Only update plot if multilateration display is enabled
+        if show_plot:
+            # Update current position (green dot)
+            self.vehicle_point.set_data([x], [y])
+
+            # Update position trail (green line showing last 50 positions)
+            if len(self.position_history) > 1:
+                trail_x = [pos[0] for pos in self.position_history]
+                trail_y = [pos[1] for pos in self.position_history]
+                self.vehicle_trail.set_data(trail_x, trail_y)
+        else:
+            # Hide the multilateration position and trail
+            self.vehicle_point.set_data([], [])
+            self.vehicle_trail.set_data([], [])
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
         # which runs every 10ms and calls canvas.draw() on all active_animations
@@ -430,17 +516,30 @@ class PositionWindow:
         # Add new position to CEP history
         self.cep_position_history.append((x, y))
 
-        # Update current CEP position (orange dot)
-        self.cep_point.set_data([x], [y])
+        # Update tkinter label if available (schedule on main thread)
+        if hasattr(self, 'cep_label') and hasattr(self, '_graphics_module'):
+            text = f'CEP: ({x:.1f}, {y:.1f})'
+            self._graphics_module._schedule_update(
+                lambda t=text: self.cep_label.config(text=t)
+            )
 
-        # Update CEP position trail (yellow line showing last 50 positions)
-        if len(self.cep_position_history) > 1:
-            trail_x = [pos[0] for pos in self.cep_position_history]
-            trail_y = [pos[1] for pos in self.cep_position_history]
-            self.cep_trail.set_data(trail_x, trail_y)
+        # Check if plotting is enabled
+        show_plot = getattr(self, 'show_cep', True)
 
-        # Update CEP position text window
-        self.cep_pos_text.set_text(f'CEP: ({x:.1f}, {y:.1f})')
+        # Only update plot if CEP display is enabled
+        if show_plot:
+            # Update current CEP position (yellow dot)
+            self.cep_point.set_data([x], [y])
+
+            # Update CEP position trail (yellow line showing last 50 positions)
+            if len(self.cep_position_history) > 1:
+                trail_x = [pos[0] for pos in self.cep_position_history]
+                trail_y = [pos[1] for pos in self.cep_position_history]
+                self.cep_trail.set_data(trail_x, trail_y)
+        else:
+            # Hide the CEP position and trail
+            self.cep_point.set_data([], [])
+            self.cep_trail.set_data([], [])
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
 
