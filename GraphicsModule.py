@@ -8,6 +8,7 @@ import tkinter as tk
 import threading
 import queue
 import time
+import numpy as np
 from ControlModule import ControlModule
 from PositionModule import PositionModule
 from SettingsModule import SettingsModule
@@ -226,8 +227,16 @@ class PositionWindow:
                 raise ValueError("Must provide exactly 6 receiver positions")
             self.receiver_positions = receiver_positions
         
-        # Initialize matplotlib figure
-        self.fig, self.ax = plt.subplots(figsize=(10, 10))
+        # Initialize matplotlib figure with GridSpec layout
+        # Layout: [distance_text_left, left_plots, main_arena, right_plots, distance_text_right]
+        from matplotlib.gridspec import GridSpec
+
+        self.fig = plt.figure(figsize=(16, 10))
+        # 3-column layout: left_plots, main_arena, right_plots
+        gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 5, 1], hspace=0.3, wspace=0.4)
+
+        # Create main arena axes in center (spans all 3 rows)
+        self.ax = self.fig.add_subplot(gs[:, 1])
         self.ax.set_xlim(-grid_width/2-self.grid_padding, grid_width/2+self.grid_padding)
         self.ax.set_ylim(-grid_height/2-self.grid_padding, grid_height/2+self.grid_padding)
         self.ax.set_aspect('equal')
@@ -235,6 +244,58 @@ class PositionWindow:
         self.ax.set_xlabel('X Position')
         self.ax.set_ylabel('Y Position')
         self.ax.set_title('Vehicle Position Tracking')
+
+        # Create distance plot axes: left side (1-3), right side (4-6)
+        self.distance_histories = [deque(maxlen=50) for _ in range(6)]
+        self.distance_insets = []
+        self.distance_lines = []
+
+        # Distance windows: text labels showing current distance (stored for updating)
+        self.distance_windows = []
+
+        # Left column: receivers 1, 2, 3 (indices 0, 1, 2) - column 0
+        for row in range(3):
+            ax_dist = self.fig.add_subplot(gs[row, 0])
+            ax_dist.set_title(f'Receiver {row + 1}', fontsize=10)
+            ax_dist.tick_params(axis='both', labelsize=8)
+            ax_dist.set_xlim(0, 50)
+            ax_dist.set_ylim(0, 500)
+            ax_dist.set_xlabel('Sample', fontsize=8)
+            ax_dist.set_ylabel('Distance (cm)', fontsize=8)
+            ax_dist.yaxis.set_label_position('right')
+            ax_dist.yaxis.tick_right()
+            ax_dist.grid(True, alpha=0.3)
+            line, = ax_dist.plot([], [], 'g-', linewidth=1)
+            # Add distance_window text at top right of left plots
+            distance_window = ax_dist.text(0.98, 0.95, '---',
+                                           ha='right', va='top', fontsize=12,
+                                           fontweight='bold', transform=ax_dist.transAxes,
+                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            self.distance_insets.append(ax_dist)
+            self.distance_lines.append(line)
+            self.distance_windows.append(distance_window)
+
+        # Right column: receivers 4, 5, 6 (indices 3, 4, 5) - column 2
+        for row in range(3):
+            ax_dist = self.fig.add_subplot(gs[row, 2])
+            ax_dist.set_title(f'Receiver {row + 4}', fontsize=10)
+            ax_dist.tick_params(axis='both', labelsize=8)
+            ax_dist.set_xlim(0, 50)
+            ax_dist.set_ylim(0, 500)
+            ax_dist.set_xlabel('Sample', fontsize=8)
+            ax_dist.set_ylabel('Distance (cm)', fontsize=8)
+            ax_dist.yaxis.set_label_position('left')
+            ax_dist.yaxis.tick_left()
+            ax_dist.grid(True, alpha=0.3)
+            line, = ax_dist.plot([], [], 'g-', linewidth=1)
+            # Add distance_window text at top left of right plots
+            distance_window = ax_dist.text(0.02, 0.95, '---',
+                                           ha='left', va='top', fontsize=12,
+                                           fontweight='bold', transform=ax_dist.transAxes,
+                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            self.distance_insets.append(ax_dist)
+            self.distance_lines.append(line)
+            self.distance_windows.append(distance_window)
         
         # Add X/Y compass rose in top left corner
         x_min, x_max = self.ax.get_xlim()
@@ -285,6 +346,10 @@ class PositionWindow:
         self.cep_point, = self.ax.plot([], [], 'o', color='orange', markersize=10, zorder=6, label='CEP Position')
         self.cep_trail, = self.ax.plot([], [], '-', color='orange', linewidth=1, alpha=0.5, label='CEP Trail')
         self.cep_position_history = deque(maxlen=50)  # Store last 50 CEP positions
+
+        # Median filter buffers for each receiver (window size = 5 samples)
+        self.median_filter_window = 5
+        self.distance_filter_buffers = [deque(maxlen=self.median_filter_window) for _ in range(6)]
 
         self.ax.legend(loc='upper right')
         plt.tight_layout()
@@ -344,6 +409,60 @@ class PositionWindow:
 
         # Note: Canvas will be automatically redrawn by _refresh_animations()
 
+    def update_distances(self, receiver_distances):
+        """
+        Update the distance graphs for all 6 receivers
+
+        Args:
+            receiver_distances: Array of 6 distance values from each receiver
+        """
+        for i in range(6):
+            # Add new distance to history
+            distance = receiver_distances[i]
+            self.distance_histories[i].append(distance)
+
+            # Update line data
+            history = list(self.distance_histories[i])
+            x_data = list(range(len(history)))
+            self.distance_lines[i].set_data(x_data, history)
+
+            # Update y-axis limits: current distance +/- (distance * 3)
+            if len(history) > 0:
+                current_dist = history[-1]
+                y_center = current_dist
+                y_range = current_dist * 3
+                y_min = max(0, y_center - y_range)
+                y_max = y_center + y_range
+                self.distance_insets[i].set_ylim(y_min, y_max)
+                self.distance_insets[i].set_xlim(0, max(50, len(history)))
+
+            # Update distance_window text inside each plot
+            self.distance_windows[i].set_text(f'{distance:.1f} cm')
+
+        # Note: Canvas will be automatically redrawn by _refresh_animations()
+
+    def apply_median_filter(self, receiver_distances):
+        """
+        Apply median filter to raw receiver distances to reduce noise and outliers.
+
+        Args:
+            receiver_distances: Array of 6 raw distance values from each receiver
+
+        Returns:
+            Array of 6 median-filtered distance values
+        """
+        filtered_distances = np.zeros(6)
+
+        for i in range(6):
+            # Add new distance to filter buffer
+            self.distance_filter_buffers[i].append(receiver_distances[i])
+
+            # Calculate median of buffer
+            buffer = list(self.distance_filter_buffers[i])
+            filtered_distances[i] = np.median(buffer)
+
+        return filtered_distances
+
     def update_cords_thread(self, control_module:ControlModule):
         """
         Thread function to update the position data asyncronously
@@ -366,25 +485,31 @@ class PositionWindow:
 
                 # Request the system to send a pulse and calculate the distances
                 control_module.update()
-                receiver_distances = control_module.get_receiver_distances()
+                raw_distances = control_module.get_receiver_distances()
                 serial_messages = control_module.get_serial_message()
                 print(f"Serial Message: {serial_messages}")
-                print(f"Receiver Distances: {receiver_distances}")
+                print(f"Raw Distances: {raw_distances}")
 
-                # Add positioning decode algorithm here!
-                pos, result = pos_module.multilateration_method_1(receiver_distances,[0,1,2,3,4,5] ) 
+                # Apply median filter to reduce noise and outliers
+                filtered_distances = self.apply_median_filter(raw_distances)
+                print(f"Filtered Distances: {filtered_distances}")
+
+                # Use filtered distances for position calculation
+                pos, result = pos_module.multilateration_method_1(filtered_distances, [0,1,2,3,4,5])
                 x_calc = pos[0]
                 y_calc = pos[1]
                 print(f"tick Pos: ({x_calc}, {y_calc})")
-                
+
                 best_pos, best_cep, best_indices, cov, all_results = \
-                        self.stable_pos.find_best_subset(receiver_distances, max_subsets_to_try=15)
+                        self.stable_pos.find_best_subset(filtered_distances, max_subsets_to_try=15)
                 print(f"CEP Position: {best_pos}, CEP: {best_cep}, Indices: {best_indices}")
 
                 # Update multilateration position (blue dot)
                 self.update_cords(x_calc, y_calc)
                 # Update CEP position (orange dot)
                 self.update_cep_cords(best_pos[0], best_pos[1])
+                # Update distance graphs for all receivers (show raw distances)
+                self.update_distances(raw_distances)
                 
                 print(f"~~~~~~~~~~~")
                 print(time.time()-time_start) 

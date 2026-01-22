@@ -206,17 +206,6 @@ class CEPPositioning:
         pos_module = PositionModule(self.receiver_positions)
         # Pass full distances array - multilateration_method_1 will select by indices internally
         pos, result = pos_module.multilateration_method_1(distances, use_indices)
-
-        # Initial guess: centroid of selected receivers
-        #initial_guess = np.mean(selected_receivers, axis=0)
-        
-        ## Solve with nonlinear least squares
-        #def residuals(pos):
-        #    return np.linalg.norm(selected_receivers - pos, axis=1) - selected_distances
-        
-        #result = least_squares(residuals, initial_guess, method='lm')
-        #position = result.x
-
         
         # Compute covariance matrix and CEP
         # Jacobian at solution gives sensitivity
