@@ -22,6 +22,7 @@ class GraphicsModule:
         self.position_window = None
         self.update_queue = queue.Queue()
         self.running = True
+        self._queue_paused = False  # Atomic flag to pause queue processing during window changes
         self.active_threads = [] # Active threads for currently active windows
         self.active_animations = [] #FIFO list of active animations that need refreshing
 
@@ -33,6 +34,12 @@ class GraphicsModule:
 
         # Instantiate matplotlib window classes
         self.position_window = PositionWindow(
+                                grid_width=self.settings_module.arena_size[0],
+                                grid_height=self.settings_module.arena_size[1],
+                                receiver_positions=self.settings_module.get_tower_coordinates()
+                                )
+
+        self.calibration_window = CalibrationWindow(
                                 grid_width=self.settings_module.arena_size[0],
                                 grid_height=self.settings_module.arena_size[1],
                                 receiver_positions=self.settings_module.get_tower_coordinates()
@@ -62,22 +69,38 @@ class GraphicsModule:
         # Set running false to prevent scheduling extra tasks
         self.running = False
     
+    def _pause_process_queue(self):
+        """Pause queue processing during window changes and clear stale callbacks."""
+        self._queue_paused = True
+        # Clear the queue to discard stale callbacks that reference old widgets
+        while not self.update_queue.empty():
+            try:
+                self.update_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _resume_process_queue(self):
+        """Resume queue processing after window changes."""
+        self._queue_paused = False
+
     def _process_queue(self):
         """Process update queue in the tkinter thread, every 10ms."""
         # Check if we should continue processing
         if not self.running or not self.root:
             return
-        
-        try:
-            while True:
-                try:
-                    callback = self.update_queue.get_nowait()
-                    callback()
-                except queue.Empty:
-                    break
-        except Exception as e:
-            print(f"Error processing queue: {e}")
-        
+
+        # Skip processing if queue is paused during window changes
+        if not self._queue_paused:
+            try:
+                while True:
+                    try:
+                        callback = self.update_queue.get_nowait()
+                        callback()
+                    except queue.Empty:
+                        break
+            except Exception as e:
+                print(f"Error processing queue: {e}")
+
         # Schedule next check only if still running and root exists
         if self.running and self.root:
             try:
@@ -103,13 +126,15 @@ class GraphicsModule:
         if not self.running or not self.root:
             return
 
-        # Refresh all active animation canvases
-        for canvas in self.active_animations:
-            if canvas:
-                try:
-                    canvas.draw()
-                except Exception as e:
-                    print(f"Error refreshing animation: {e}")
+        # Skip refreshing if queue is paused during window changes
+        if not self._queue_paused:
+            # Refresh all active animation canvases
+            for canvas in self.active_animations:
+                if canvas:
+                    try:
+                        canvas.draw()
+                    except Exception as e:
+                        print(f"Error refreshing animation: {e}")
 
         # Schedule next refresh only if still running and root exists
         if self.running and self.root:
@@ -122,11 +147,12 @@ class GraphicsModule:
     def _schedule_update(self, callback):
         """
         Schedule a callback to run in the tkinter thread.
-        
+
         Args:
             callback (callable): Function to execute in tkinter thread
         """
-        if self.running:
+        # Skip scheduling if paused during window changes to prevent stale callbacks
+        if self.running and not self._queue_paused:
             self.update_queue.put(callback)
     
     def show_position_window(self):
@@ -138,10 +164,18 @@ class GraphicsModule:
             position_window (PositionWindow): The PositionWindow instance to display
         """
         #self.position_window = position_window
-            
+
         if not self.root:
             return
-            
+
+        # Pause queue processing during window change
+        self._pause_process_queue()
+
+        # Remove CalibrationWindow canvas from active_animations if present
+        if self.calibration_window and hasattr(self.calibration_window, 'canvas'):
+            if self.calibration_window.canvas in self.active_animations:
+                self.active_animations.remove(self.calibration_window.canvas)
+
         # Clear existing widgets
         for widget in self.root.winfo_children():
             widget.destroy()
@@ -282,6 +316,26 @@ class GraphicsModule:
         cep_switch.pack(side=tk.LEFT, padx=5)
         tk.Label(cep_switch_frame, text="ON", bg='black', fg='#FFFF00', font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
 
+        # Calibration button section (far right)
+        calib_frame = tk.Frame(control_frame, bg='black')
+        calib_frame.pack(side=tk.LEFT, expand=True, padx=20)
+
+        calib_button = tk.Button(
+            calib_frame,
+            text="Calibration",
+            command=self.show_calibration_window,
+            bg='#FF00FF',  # Neon magenta
+            fg='white',
+            font=('Arial', 12, 'bold'),
+            activebackground='#CC00CC',
+            activeforeground='white',
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        calib_button.pack()
+
         # Store canvas reference for updates
         self.position_window.canvas = canvas
         # Store reference to graphics module for thread-safe updates
@@ -301,7 +355,7 @@ class GraphicsModule:
             for t in self.active_threads
         )
 
-        # This thread will need to be stopped if a window change occurs 
+        # This thread will need to be stopped if a window change occurs
         if not position_thread_running:
             thread = threading.Thread(
                 target=self.position_window.update_cords_thread,
@@ -311,6 +365,85 @@ class GraphicsModule:
             )
             thread.start()
             self.active_threads.append(thread)
+
+        # Resume queue processing after window change is complete
+        self._resume_process_queue()
+
+    def show_calibration_window(self):
+        """
+        Display the CalibrationWindow in a tkinter frame.
+        Frees resources from PositionWindow and shows a simplified calibration view.
+        """
+        if not self.root:
+            return
+
+        # Pause queue processing during window change
+        self._pause_process_queue()
+
+        # Stop the position update thread
+        if self.position_window:
+            self.position_window.update_thread_run = False
+
+        # Remove PositionWindow canvas from active_animations
+        if self.position_window and hasattr(self.position_window, 'canvas'):
+            if self.position_window.canvas in self.active_animations:
+                self.active_animations.remove(self.position_window.canvas)
+
+        # Clear existing widgets
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        # Create a frame for the calibration window
+        frame = tk.Frame(self.root, bg='black')
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create a top bar frame for the back button
+        top_bar = tk.Frame(frame, bg='black')
+        top_bar.pack(fill=tk.X, pady=5)
+
+        # Back button in top right
+        back_button = tk.Button(
+            top_bar,
+            text="← Back",
+            command=self.show_position_window,
+            bg='#39FF14',  # Neon green
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#2BCC10',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        back_button.pack(side=tk.RIGHT, padx=10)
+
+        # Title label
+        title_label = tk.Label(
+            top_bar,
+            text="Calibration Mode",
+            bg='black',
+            fg='#FF00FF',  # Neon magenta
+            font=('Arial', 16, 'bold')
+        )
+        title_label.pack(side=tk.LEFT, padx=10)
+
+        # Embed the matplotlib figure in tkinter
+        canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=frame)
+        self.calibration_window.canvas = canvas
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Store reference to graphics module for thread-safe updates
+        self.calibration_window._graphics_module = self
+
+        # Add canvas to active_animations for automatic refreshing
+        if hasattr(self.calibration_window, 'canvas') and self.calibration_window.canvas in self.active_animations:
+            self.active_animations.remove(self.calibration_window.canvas)
+        self.active_animations.append(canvas)
+
+        # Resume queue processing after window change is complete
+        self._resume_process_queue()
 
     def show_main_window(self):
         """Show the main tkinter window."""
@@ -788,6 +921,126 @@ class PositionWindow:
                 break
         
         print("Position update thread stopped")
+
+    def close(self):
+        """Close the matplotlib window."""
+        plt.close(self.fig)
+
+
+class CalibrationWindow:
+    def __init__(self, grid_width=10, grid_height=10, receiver_positions=None):
+        """
+        Initialize the CalibrationWindow with matplotlib.
+        Contains only the X/Y position plot for calibration purposes.
+
+        Args:
+            grid_width (float): Width of the rectangular grid
+            grid_height (float): Height of the rectangular grid
+            receiver_positions (list of tuples, optional): List of (id, (x, y)) positions for 6 receivers.
+                "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
+                The label created is index+1 to mimic real-world labels which are 1-indexed
+        """
+        self.grid_width = grid_width
+        self.grid_height = grid_height
+        self.grid_padding = 20  # Extra padding on the side to make receivers visible
+        self.position_history = deque(maxlen=50)  # Store last 50 positions
+
+        # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
+        if receiver_positions is None:
+            raise ValueError("Must provide receiver positions!")
+        else:
+            if len(receiver_positions) != 6:
+                raise ValueError("Must provide exactly 6 receiver positions")
+            self.receiver_positions = receiver_positions
+
+        # Initialize matplotlib figure with single plot
+        self.fig = plt.figure(figsize=(10, 10), facecolor='black')
+
+        # Create main arena axes
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor('black')
+        self.ax.set_xlim(-grid_width/2 - self.grid_padding, grid_width/2 + self.grid_padding)
+        self.ax.set_ylim(-grid_height/2 - self.grid_padding, grid_height/2 + self.grid_padding)
+        self.ax.set_aspect('equal')
+        self.ax.grid(True, alpha=0.3, color='gray')
+        self.ax.set_xlabel('X Position', color='white')
+        self.ax.set_ylabel('Y Position', color='white')
+        self.ax.set_title('Vehicle Position Tracking', color='white')
+        self.ax.tick_params(colors='white')
+        for spine in self.ax.spines.values():
+            spine.set_color('white')
+
+        # Add X/Y compass rose in center
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        compass_x = 0
+        compass_y = 0
+        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
+
+        # Draw X axis arrow (pointing right)
+        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
+                    'X', color='white', fontsize=12, fontweight='bold',
+                    ha='center', va='top', zorder=7)
+
+        # Draw Y axis arrow (pointing up)
+        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
+                    'Y', color='white', fontsize=12, fontweight='bold',
+                    ha='right', va='center', zorder=7)
+
+        # Draw receivers (neon magenta dots)
+        receiver_x = [pos[1][0] for pos in self.receiver_positions]
+        receiver_y = [pos[1][1] for pos in self.receiver_positions]
+        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')  # Neon magenta
+
+        # Add ID labels next to each receiver+1 (to match real-life labeling)
+        for receiver_id, (x, y) in self.receiver_positions:
+            self.ax.text(x + 5, y + 5, str(receiver_id + 1), color='white',
+                        fontsize=10, fontweight='bold', zorder=6,
+                        ha='left', va='bottom')
+
+        # Draw neon cyan line connecting receivers (connect in order, then close the loop)
+        # Connect receivers in a rectangular pattern
+        connection_order = [0, 1, 2, 5, 4, 3, 0]  # Connect around the rectangle
+        connected_x = [receiver_x[i] for i in connection_order]
+        connected_y = [receiver_y[i] for i in connection_order]
+        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')  # Neon cyan
+
+        # Initialize vehicle position plot (neon green)
+        self.vehicle_point, = self.ax.plot([], [], 'o', color='#39FF14', markersize=10, zorder=6, label='Position')  # Neon green
+        self.vehicle_trail, = self.ax.plot([], [], '-', color='#39FF14', linewidth=1, alpha=0.5, label='Trail')
+
+        self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
+
+        plt.tight_layout()
+
+    def update_cords(self, x, y):
+        """
+        Update the vehicle coordinates of the plot
+
+        Args:
+            x (float): X coordinate of the vehicle
+            y (float): Y coordinate of the vehicle
+        """
+        # Add new position to history
+        self.position_history.append((x, y))
+
+        # Update current position (green dot)
+        self.vehicle_point.set_data([x], [y])
+
+        # Update position trail (green line showing last 50 positions)
+        if len(self.position_history) > 1:
+            trail_x = [pos[0] for pos in self.position_history]
+            trail_y = [pos[1] for pos in self.position_history]
+            self.vehicle_trail.set_data(trail_x, trail_y)
+
+        # Note: Canvas will be automatically redrawn by _refresh_animations()
+        # which runs every 10ms and calls canvas.draw() on all active_animations
 
     def close(self):
         """Close the matplotlib window."""
