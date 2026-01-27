@@ -26,6 +26,11 @@ class GraphicsModule:
         self.active_threads = [] # Active threads for currently active windows
         self.active_animations = [] #FIFO list of active animations that need refreshing
 
+        # Cached frames for fast window switching (show/hide instead of destroy/recreate)
+        self._position_frame = None
+        self._calibration_frame = None
+        self._frames_initialized = False
+
         # Instnatiate control module
         self.control_module = ControlModule("127.0.0.1")
 
@@ -154,7 +159,14 @@ class GraphicsModule:
         # Skip scheduling if paused during window changes to prevent stale callbacks
         if self.running and not self._queue_paused:
             self.update_queue.put(callback)
-    
+
+    def _hide_all_frames(self):
+        """Hide all cached frames."""
+        if self._position_frame:
+            self._position_frame.pack_forget()
+        if self._calibration_frame:
+            self._calibration_frame.pack_forget()
+
     def show_position_window(self):
         """
         Display a PositionWindow in a tkinter frame.
@@ -163,8 +175,6 @@ class GraphicsModule:
         Args:
             position_window (PositionWindow): The PositionWindow instance to display
         """
-        #self.position_window = position_window
-
         if not self.root:
             return
 
@@ -176,22 +186,32 @@ class GraphicsModule:
             if self.calibration_window.canvas in self.active_animations:
                 self.active_animations.remove(self.calibration_window.canvas)
 
-        # Clear existing widgets
-        for widget in self.root.winfo_children():
-            widget.destroy()
-            
-        # Create a frame for the position window
-        frame = tk.Frame(self.root)
-        frame.pack(fill=tk.BOTH, expand=True)
-            
+        # Hide all frames instead of destroying
+        self._hide_all_frames()
+
+        # If position frame already exists, just show it
+        if self._position_frame:
+            self._position_frame.pack(fill=tk.BOTH, expand=True)
+            # Re-add canvas to active_animations
+            if self.position_window.canvas not in self.active_animations:
+                self.active_animations.append(self.position_window.canvas)
+            # Restart position update thread if needed
+            self._start_position_thread()
+            self._resume_process_queue()
+            return
+
+        # First time setup - create the frame
+        self._position_frame = tk.Frame(self.root)
+        self._position_frame.pack(fill=tk.BOTH, expand=True)
+
         # Embed the matplotlib figure in tkinter
-        canvas = FigureCanvasTkAgg(self.position_window.fig, master=frame)
+        canvas = FigureCanvasTkAgg(self.position_window.fig, master=self._position_frame)
         self.position_window.canvas = canvas
-        canvas.draw()
+        canvas.draw_idle()  # Non-blocking draw
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # Create control panel frame below the canvas
-        control_frame = tk.Frame(frame, bg='black')
+        control_frame = tk.Frame(self._position_frame, bg='black')
         control_frame.pack(fill=tk.X, pady=10)
 
         # Thread-safe boolean flags for showing/hiding plots (both on by default)
@@ -347,15 +367,19 @@ class GraphicsModule:
             self.active_animations.remove(self.position_window.canvas)
         self.active_animations.append(canvas)
 
-        # Make a thread to get the position from the system
-        # and update the canvas (only if not already running)
-        # Check if there's already a running thread for position updates
+        # Start position update thread
+        self._start_position_thread()
+
+        # Resume queue processing after window change is complete
+        self._resume_process_queue()
+
+    def _start_position_thread(self):
+        """Start the position update thread if not already running."""
         position_thread_running = any(
-            t.is_alive() and t.name == 'position_update_thread' 
+            t.is_alive() and t.name == 'position_update_thread'
             for t in self.active_threads
         )
 
-        # This thread will need to be stopped if a window change occurs
         if not position_thread_running:
             thread = threading.Thread(
                 target=self.position_window.update_cords_thread,
@@ -365,9 +389,6 @@ class GraphicsModule:
             )
             thread.start()
             self.active_threads.append(thread)
-
-        # Resume queue processing after window change is complete
-        self._resume_process_queue()
 
     def show_calibration_window(self):
         """
@@ -389,16 +410,24 @@ class GraphicsModule:
             if self.position_window.canvas in self.active_animations:
                 self.active_animations.remove(self.position_window.canvas)
 
-        # Clear existing widgets
-        for widget in self.root.winfo_children():
-            widget.destroy()
+        # Hide all frames instead of destroying
+        self._hide_all_frames()
 
-        # Create a frame for the calibration window
-        frame = tk.Frame(self.root, bg='black')
-        frame.pack(fill=tk.BOTH, expand=True)
+        # If calibration frame already exists, just show it
+        if self._calibration_frame:
+            self._calibration_frame.pack(fill=tk.BOTH, expand=True)
+            # Re-add canvas to active_animations
+            if self.calibration_window.canvas not in self.active_animations:
+                self.active_animations.append(self.calibration_window.canvas)
+            self._resume_process_queue()
+            return
+
+        # First time setup - create the frame
+        self._calibration_frame = tk.Frame(self.root, bg='black')
+        self._calibration_frame.pack(fill=tk.BOTH, expand=True)
 
         # Create a top bar frame for the back button
-        top_bar = tk.Frame(frame, bg='black')
+        top_bar = tk.Frame(self._calibration_frame, bg='black')
         top_bar.pack(fill=tk.X, pady=5)
 
         # Back button in top right
@@ -429,9 +458,9 @@ class GraphicsModule:
         title_label.pack(side=tk.LEFT, padx=10)
 
         # Embed the matplotlib figure in tkinter
-        canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=frame)
+        canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=self._calibration_frame)
         self.calibration_window.canvas = canvas
-        canvas.draw()
+        canvas.draw_idle()  # Non-blocking draw
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # Store reference to graphics module for thread-safe updates
