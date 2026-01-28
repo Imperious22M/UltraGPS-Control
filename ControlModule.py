@@ -34,7 +34,6 @@ class ControlModule:
         self.distances = None
         self.serial_message = None
 
-
     def update(self):
         """
         Updates all the module information by requesting it from the server 
@@ -379,3 +378,7 @@ class NetworkClass:
     def __del__(self):
         """Clean up socket when object is destroyed."""
         self.close()
+
+class CalibrateSystem:
+    def __init__(self):
+        pass

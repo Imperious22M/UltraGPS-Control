@@ -31,7 +31,7 @@ class GraphicsModule:
         self._calibration_frame = None
         self._frames_initialized = False
 
-        # Instnatiate control module
+        # Instantiate control module
         self.control_module = ControlModule("127.0.0.1")
 
         # Instantiate the settings module
@@ -892,8 +892,9 @@ class PositionWindow:
                 print(f"Raw Distances: {raw_distances}")
 
                 # Apply median filter to reduce noise and outliers
-                filtered_distances = self.apply_median_filter(raw_distances)
-                print(f"Filtered Distances: {filtered_distances}")
+                #filtered_distances = self.apply_median_filter(raw_distances)
+                #print(f"Filtered Distances: {filtered_distances}")
+                filtered_distances = raw_distances
 
                 # Use filtered distances for position calculation
                 pos, result = pos_module.multilateration_method_1(filtered_distances, [0,1,2,3,4,5])
