@@ -1845,7 +1845,6 @@ class GraphicsModule:
             self._schedule_update(lambda: (self._on_closing if self.root else None))
             #self._schedule_update(lambda: (self.root.quit() if self.root else None))
 
-
 class PositionWindow:
     def __init__(self, receiver_positions=None):
         """
@@ -2404,7 +2403,6 @@ class PositionWindow:
         """Close the matplotlib window."""
         plt.close(self.fig)
 
-
 class CalibrationWindow:
     def __init__(self, receiver_positions=None):
         """
@@ -2607,7 +2605,6 @@ class CalibrationWindow:
     def close(self):
         """Close the matplotlib window."""
         plt.close(self.fig)
-
 
 class ArenaMakerWindow:
     def __init__(self, receiver_positions=None):
@@ -3202,7 +3199,6 @@ class ArenaMakerWindow:
     def close(self):
         """Close the matplotlib window."""
         plt.close(self.fig)
-
 
 class MainWindow:
     def __init__(self):
