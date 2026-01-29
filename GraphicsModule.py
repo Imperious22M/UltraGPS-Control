@@ -2925,7 +2925,8 @@ class CalibrationWindow:
         # Layout: Position arena on left, Run1 histograms in middle, Run2 histograms on right
         self.fig = plt.figure(figsize=(18, 10), facecolor='black')
         gs = self.fig.add_gridspec(4, 7, width_ratios=[3, 1, 1, 0.2, 1, 1, 0.2],
-                                   height_ratios=[0.1, 1, 1, 1], hspace=0.3, wspace=0.3)
+                                   height_ratios=[0.02, 1, 1, 1], hspace=0.5, wspace=0.3,
+                                   top=0.98, bottom=0.08)
 
         # Create main arena axes (spans left column, rows 1-3)
         self.ax = self.fig.add_subplot(gs[1:4, 0])
@@ -3207,14 +3208,22 @@ class CalibrationWindow:
 
         if values:
             bars = ax.bar(range(len(values)), counts, color='#00FFFF', alpha=0.7)
-            ax.set_xticks(range(len(values)))
-            ax.set_xticklabels(values, rotation=45, ha='right', fontsize=5)
+            # Only show 4 evenly spaced tick labels
+            num_bars = len(values)
+            if num_bars <= 4:
+                ax.set_xticks(range(num_bars))
+                ax.set_xticklabels(values, rotation=45, ha='right', fontsize=5)
+            else:
+                # Show 4 evenly spaced labels
+                tick_indices = [0, num_bars // 3, 2 * num_bars // 3, num_bars - 1]
+                ax.set_xticks(tick_indices)
+                ax.set_xticklabels([values[i] for i in tick_indices], rotation=45, ha='right', fontsize=5)
 
             # Add label showing most common value below the plot
             most_common_value = sorted_data[0][0]  # First item is most frequent
             most_common_count = sorted_data[0][1]
-            ax.set_xlabel(f'Most Common: {int(most_common_value)} (n={most_common_count})',
-                         color='#39FF14', fontsize=7, fontweight='bold')
+            ax.set_xlabel(f'{int(most_common_value)} (n={most_common_count})',
+                         color='#39FF14', fontsize=8, fontweight='bold')
 
     def get_most_frequent_value(self, receiver_id, run_num):
         """
