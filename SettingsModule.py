@@ -19,14 +19,11 @@ class SettingsModule:
         # Verify the config file
         self.valid_settings, err = self.verify_settings()
 
-        # Arena size (calculated from receiver positions if valid)
-        if self.valid_settings:
-            self.arena_size = self._calculate_arena_size()
-        else:
+        # Print warning if settings not initialized
+        if not self.valid_settings:
             print("Config file settings not initialized, arena size set to 0")
             if err:
                 print(err)
-            self.arena_size = (0.0, 0.0)
 
     def _get_default_config(self):
         """
@@ -181,11 +178,6 @@ class SettingsModule:
     def reload_config(self):
         """Reload the configuration from the file."""
         self._config = self._load_config()
-        # Recalculate arena size
-        if self.valid_settings:
-            self.arena_size = self._calculate_arena_size()
-        else:
-            self.arena_size = (0.0, 0.0)
 
     def verify_settings(self):
         """
@@ -194,7 +186,9 @@ class SettingsModule:
         Checks:
         - All 6 receivers exist
         - All receiver positions are non-zero (at least one coordinate)
+        - All receiver calibration distances are set
         - All receiver offsets have been set
+        - Calibration points are set (not both zeros)
 
         Returns:
             tuple (is_valid: bool, errors: list of str)
@@ -228,6 +222,14 @@ class SettingsModule:
             if 'slope' not in offset or 'intercept' not in offset:
                 errors.append(f"Receiver {i} (label {i+1}) offset parameters missing")
 
+        # Check calibration points are set
+        cal_p1 = self._config.get('cal_point_1', [0.0, 0.0])
+        cal_p2 = self._config.get('cal_point_2', [0.0, 0.0])
+        if cal_p1[0] == 0.0 and cal_p1[1] == 0.0:
+            errors.append("Calibration point 1 not initialized")
+        if cal_p2[0] == 0.0 and cal_p2[1] == 0.0:
+            errors.append("Calibration point 2 not initialized")
+
         is_valid = len(errors) == 0
         return (is_valid, errors)
 
@@ -243,9 +245,14 @@ class SettingsModule:
         """Set the valid_settings flag and save to file."""
         self._config['valid_settings'] = bool(value)
         self._save_config()
-        # Recalculate arena size when settings become valid
-        if value:
-            self.arena_size = self._calculate_arena_size()
+
+    @property
+    def arena_size(self):
+        """
+        Get the arena size (width, height) calculated from receiver positions.
+        Always recalculates from current receiver positions.
+        """
+        return self._calculate_arena_size()
 
     @property
     def cal_state(self):

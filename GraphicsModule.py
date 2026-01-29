@@ -37,8 +37,14 @@ class GraphicsModule:
         # Store reference to arena maker top bar button for conditional display
         self._arena_maker_top_button = None
 
+        # Store reference to re-dimension button (shown below Back button during normal operation)
+        self._arena_maker_redim_button = None
+
         # Store references to distance entry fields for arena maker
         self._distance_entries = {}
+
+        # Store references to calibration point entry fields for arena maker
+        self._cal_point_entries = {}
 
         # Instantiate control module
         self.control_module = ControlModule("127.0.0.1")
@@ -219,6 +225,11 @@ class GraphicsModule:
 
         # Hide all frames instead of destroying
         self._hide_all_frames()
+
+        # Update position window with current settings from settings file
+        receiver_positions = self.settings_module.get_tower_coordinates()
+        grid_width, grid_height = self.settings_module.arena_size
+        self.position_window.update_arena(grid_width, grid_height, receiver_positions)
 
         # If position frame already exists, just show it
         if self._position_frame:
@@ -494,6 +505,11 @@ class GraphicsModule:
 
         # Hide all frames instead of destroying
         self._hide_all_frames()
+
+        # Update calibration window with current settings from settings file
+        receiver_positions = self.settings_module.get_tower_coordinates()
+        grid_width, grid_height = self.settings_module.arena_size
+        self.calibration_window.update_arena(grid_width, grid_height, receiver_positions)
 
         # If calibration frame already exists, just show it
         if self._calibration_frame:
@@ -798,8 +814,261 @@ class GraphicsModule:
             for receiver_id, (x, y) in new_positions:
                 self.settings_module.set_receiver_position(receiver_id, x, y)
 
+            # Recalculate calibration distances for all receivers
+            cal_p1 = self.settings_module.cal_point_1
+            cal_p2 = self.settings_module.cal_point_2
+            for receiver_id, (rx, ry) in new_positions:
+                dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+                dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+                self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
         except ValueError:
             pass  # Invalid input, don't update
+
+    def _update_calibration_points_from_entries(self):
+        """Update calibration points when coordinate entries change."""
+        if not hasattr(self, '_cal_point_entries') or not self._cal_point_entries:
+            return
+
+        try:
+            # Get values from entry fields
+            cal1_x = float(self._cal_point_entries['Cal 1']['x'].get())
+            cal1_y = float(self._cal_point_entries['Cal 1']['y'].get())
+            cal2_x = float(self._cal_point_entries['Cal 2']['x'].get())
+            cal2_y = float(self._cal_point_entries['Cal 2']['y'].get())
+
+            # Update settings module
+            self.settings_module.cal_point_1 = [cal1_x, cal1_y]
+            self.settings_module.cal_point_2 = [cal2_x, cal2_y]
+
+            # Update calibration points on the arena plot
+            if hasattr(self.arena_maker_window, 'update_calibration_points'):
+                self.arena_maker_window.update_calibration_points(
+                    self.settings_module.cal_point_1,
+                    self.settings_module.cal_point_2
+                )
+
+            # Recalculate calibration distances for all receivers
+            cal_p1 = self.settings_module.cal_point_1
+            cal_p2 = self.settings_module.cal_point_2
+            for receiver_id in range(6):
+                pos = self.settings_module.get_receiver_position(receiver_id)
+                if pos:
+                    rx, ry = pos
+                    dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+                    dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+                    self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
+            # Update RC entries to reflect new distances
+            if 'RC_1' in self._cal_point_entries:
+                rc1_dist = math.sqrt(cal1_x**2 + cal1_y**2)
+                self._cal_point_entries['RC_1'].delete(0, tk.END)
+                self._cal_point_entries['RC_1'].insert(0, f"{rc1_dist:.1f}")
+            if 'RC_2' in self._cal_point_entries:
+                rc2_dist = math.sqrt(cal2_x**2 + cal2_y**2)
+                self._cal_point_entries['RC_2'].delete(0, tk.END)
+                self._cal_point_entries['RC_2'].insert(0, f"{rc2_dist:.1f}")
+
+        except ValueError:
+            pass  # Invalid input, don't update
+
+    def _update_rc_from_entries(self):
+        """Update calibration points when RC_1 or RC_2 entries change.
+
+        RC represents the Euclidean distance from the origin to the calibration point.
+        When RC changes, both X and Y are scaled proportionally to maintain the same
+        angle from the origin while achieving the new distance.
+        """
+        if not hasattr(self, '_cal_point_entries') or not self._cal_point_entries:
+            return
+
+        try:
+            # Get current calibration points
+            cal_p1 = list(self.settings_module.cal_point_1)
+            cal_p2 = list(self.settings_module.cal_point_2)
+
+            # Get RC values from entries
+            rc1_val = float(self._cal_point_entries['RC_1'].get())
+            rc2_val = float(self._cal_point_entries['RC_2'].get())
+
+            # Update cal_point_1 based on RC_1
+            # Scale both X and Y to maintain same angle while achieving new distance
+            current_dist_1 = math.sqrt(cal_p1[0]**2 + cal_p1[1]**2)
+            if current_dist_1 > 0.001:  # Avoid division by zero
+                scale_1 = rc1_val / current_dist_1
+                cal_p1[0] = cal_p1[0] * scale_1
+                cal_p1[1] = cal_p1[1] * scale_1
+            else:
+                # If current distance is ~0, default to positive Y-axis
+                cal_p1[0] = 0.0
+                cal_p1[1] = rc1_val
+
+            # Update cal_point_2 based on RC_2
+            current_dist_2 = math.sqrt(cal_p2[0]**2 + cal_p2[1]**2)
+            if current_dist_2 > 0.001:  # Avoid division by zero
+                scale_2 = rc2_val / current_dist_2
+                cal_p2[0] = cal_p2[0] * scale_2
+                cal_p2[1] = cal_p2[1] * scale_2
+            else:
+                # If current distance is ~0, default to negative Y-axis
+                cal_p2[0] = 0.0
+                cal_p2[1] = -rc2_val
+
+            # Update settings module
+            self.settings_module.cal_point_1 = cal_p1
+            self.settings_module.cal_point_2 = cal_p2
+
+            # Update X,Y entry fields to reflect changes
+            self._cal_point_entries['Cal 1']['x'].delete(0, tk.END)
+            self._cal_point_entries['Cal 1']['x'].insert(0, f"{cal_p1[0]:.1f}")
+            self._cal_point_entries['Cal 1']['y'].delete(0, tk.END)
+            self._cal_point_entries['Cal 1']['y'].insert(0, f"{cal_p1[1]:.1f}")
+            self._cal_point_entries['Cal 2']['x'].delete(0, tk.END)
+            self._cal_point_entries['Cal 2']['x'].insert(0, f"{cal_p2[0]:.1f}")
+            self._cal_point_entries['Cal 2']['y'].delete(0, tk.END)
+            self._cal_point_entries['Cal 2']['y'].insert(0, f"{cal_p2[1]:.1f}")
+
+            # Update calibration points on the arena plot
+            if hasattr(self.arena_maker_window, 'update_calibration_points'):
+                self.arena_maker_window.update_calibration_points(cal_p1, cal_p2)
+
+            # Recalculate calibration distances for all receivers
+            for receiver_id in range(6):
+                pos = self.settings_module.get_receiver_position(receiver_id)
+                if pos:
+                    rx, ry = pos
+                    dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+                    dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+                    self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
+        except ValueError:
+            pass  # Invalid input, don't update
+
+    def _verify_and_save_settings(self):
+        """Verify all settings and save to toml file."""
+        # First, make sure all displayed values are saved to settings module
+        # This is already done by the entry field bindings, but let's be explicit
+        try:
+            # Update calibration points from entries
+            if self._cal_point_entries:
+                cal1_x = float(self._cal_point_entries['Cal 1']['x'].get())
+                cal1_y = float(self._cal_point_entries['Cal 1']['y'].get())
+                cal2_x = float(self._cal_point_entries['Cal 2']['x'].get())
+                cal2_y = float(self._cal_point_entries['Cal 2']['y'].get())
+                self.settings_module.cal_point_1 = [cal1_x, cal1_y]
+                self.settings_module.cal_point_2 = [cal2_x, cal2_y]
+
+            # Update receiver positions from current arena maker window state
+            if self.arena_maker_window:
+                for receiver_id, (x, y) in self.arena_maker_window.receiver_positions:
+                    self.settings_module.set_receiver_position(receiver_id, x, y)
+
+            # Recalculate calibration distances
+            cal_p1 = self.settings_module.cal_point_1
+            cal_p2 = self.settings_module.cal_point_2
+            for receiver_id in range(6):
+                pos = self.settings_module.get_receiver_position(receiver_id)
+                if pos:
+                    rx, ry = pos
+                    dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+                    dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+                    self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
+        except ValueError as e:
+            self._show_verify_result(False, [f"Invalid value in entry field: {e}"])
+            return
+
+        # Now verify settings
+        is_valid, errors = self.settings_module.verify_settings()
+
+        if is_valid:
+            # Set valid_settings flag to true (this also saves the config)
+            self.settings_module.valid_settings = True
+
+            # Transform the UI to normal operation mode:
+            # - Change top button from "Re-dimension Arena" to "Back"
+            # - Show the secondary re-dimension button
+            if self._arena_maker_top_button:
+                self._arena_maker_top_button.config(
+                    text="← Back",
+                    command=self.show_main_window,
+                    bg='#39FF14',  # Neon green
+                    activebackground='#2BCC10'
+                )
+            if self._arena_maker_redim_button:
+                self._arena_maker_redim_button.pack(side=tk.RIGHT, padx=5)
+
+            self._show_verify_result(True, ["All settings verified successfully!"])
+        else:
+            self._show_verify_result(False, errors)
+
+    def _show_verify_result(self, success, messages):
+        """Show a dialog with verification results."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Verification Result")
+        dialog.configure(bg='black')
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center the dialog
+        dialog.geometry("500x300")
+        dialog.resizable(False, False)
+
+        # Title
+        if success:
+            title_text = "Settings Verified!"
+            title_color = '#00FF00'
+        else:
+            title_text = "Verification Failed"
+            title_color = '#FF4444'
+
+        title_label = tk.Label(
+            dialog,
+            text=title_text,
+            bg='black',
+            fg=title_color,
+            font=('Arial', 16, 'bold')
+        )
+        title_label.pack(pady=10)
+
+        # Messages frame with scrollbar
+        msg_frame = tk.Frame(dialog, bg='black')
+        msg_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Text widget for messages
+        msg_text = tk.Text(
+            msg_frame,
+            bg='#222222',
+            fg='white',
+            font=('Arial', 11),
+            wrap=tk.WORD,
+            height=10
+        )
+        msg_text.pack(fill=tk.BOTH, expand=True)
+
+        for msg in messages:
+            msg_text.insert(tk.END, f"• {msg}\n")
+        msg_text.config(state=tk.DISABLED)
+
+        # OK button
+        ok_button = tk.Button(
+            dialog,
+            text="OK",
+            command=dialog.destroy,
+            bg='#00FFFF',
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#00CCCC',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=20,
+            pady=5
+        )
+        ok_button.pack(pady=10)
+
+        # Handle Enter key
+        dialog.bind('<Return>', lambda e: dialog.destroy())
 
     def _ask_arena_dimensions(self):
         """
@@ -983,6 +1252,28 @@ class GraphicsModule:
                     entry.delete(0, tk.END)
                     entry.insert(0, f"{current_distances[i]:.1f}")
 
+        # Update calibration point entry fields with new values
+        if self._cal_point_entries:
+            cal_p1 = self.settings_module.cal_point_1
+            cal_p2 = self.settings_module.cal_point_2
+            self._cal_point_entries['Cal 1']['x'].delete(0, tk.END)
+            self._cal_point_entries['Cal 1']['x'].insert(0, f"{cal_p1[0]:.1f}")
+            self._cal_point_entries['Cal 1']['y'].delete(0, tk.END)
+            self._cal_point_entries['Cal 1']['y'].insert(0, f"{cal_p1[1]:.1f}")
+            self._cal_point_entries['Cal 2']['x'].delete(0, tk.END)
+            self._cal_point_entries['Cal 2']['x'].insert(0, f"{cal_p2[0]:.1f}")
+            self._cal_point_entries['Cal 2']['y'].delete(0, tk.END)
+            self._cal_point_entries['Cal 2']['y'].insert(0, f"{cal_p2[1]:.1f}")
+            # Update RC entries
+            if 'RC_1' in self._cal_point_entries:
+                rc1_dist = math.sqrt(cal_p1[0]**2 + cal_p1[1]**2)
+                self._cal_point_entries['RC_1'].delete(0, tk.END)
+                self._cal_point_entries['RC_1'].insert(0, f"{rc1_dist:.1f}")
+            if 'RC_2' in self._cal_point_entries:
+                rc2_dist = math.sqrt(cal_p2[0]**2 + cal_p2[1]**2)
+                self._cal_point_entries['RC_2'].delete(0, tk.END)
+                self._cal_point_entries['RC_2'].insert(0, f"{rc2_dist:.1f}")
+
     def show_arena_maker_window(self):
         """
         Display the ArenaMakerWindow in a tkinter frame.
@@ -1048,16 +1339,26 @@ class GraphicsModule:
         # Hide all frames instead of destroying
         self._hide_all_frames()
 
+        # Update arena maker window with current settings from settings file (when settings are valid)
+        if not settings_invalid:
+            receiver_positions = self.settings_module.get_tower_coordinates()
+            grid_width, grid_height = self.settings_module.arena_size
+            self.arena_maker_window.update_arena(grid_width, grid_height, receiver_positions)
+
         # If arena maker frame already exists, update button visibility and show it
         if self._arena_maker_frame:
             # Update button based on settings validity
             if self._arena_maker_top_button:
                 if settings_invalid:
-                    # Show re-dimension button, hide back button
+                    # Show re-dimension button at top, hide secondary redim button
                     self._arena_maker_top_button.config(text="Re-dimension Arena", command=self._redimension_arena)
+                    if self._arena_maker_redim_button:
+                        self._arena_maker_redim_button.pack_forget()
                 else:
-                    # Show back button, hide re-dimension functionality
+                    # Show back button, show secondary redim button
                     self._arena_maker_top_button.config(text="← Back", command=self.show_main_window)
+                    if self._arena_maker_redim_button:
+                        self._arena_maker_redim_button.pack(side=tk.RIGHT, padx=5)
 
             # Update distance entry fields with current values
             if self._distance_entries:
@@ -1077,6 +1378,28 @@ class GraphicsModule:
                     self.settings_module.cal_point_1,
                     self.settings_module.cal_point_2
                 )
+
+            # Update calibration point entry fields with current values
+            if self._cal_point_entries:
+                cal_p1 = self.settings_module.cal_point_1
+                cal_p2 = self.settings_module.cal_point_2
+                self._cal_point_entries['Cal 1']['x'].delete(0, tk.END)
+                self._cal_point_entries['Cal 1']['x'].insert(0, f"{cal_p1[0]:.1f}")
+                self._cal_point_entries['Cal 1']['y'].delete(0, tk.END)
+                self._cal_point_entries['Cal 1']['y'].insert(0, f"{cal_p1[1]:.1f}")
+                self._cal_point_entries['Cal 2']['x'].delete(0, tk.END)
+                self._cal_point_entries['Cal 2']['x'].insert(0, f"{cal_p2[0]:.1f}")
+                self._cal_point_entries['Cal 2']['y'].delete(0, tk.END)
+                self._cal_point_entries['Cal 2']['y'].insert(0, f"{cal_p2[1]:.1f}")
+                # Update RC entries
+                if 'RC_1' in self._cal_point_entries:
+                    rc1_dist = math.sqrt(cal_p1[0]**2 + cal_p1[1]**2)
+                    self._cal_point_entries['RC_1'].delete(0, tk.END)
+                    self._cal_point_entries['RC_1'].insert(0, f"{rc1_dist:.1f}")
+                if 'RC_2' in self._cal_point_entries:
+                    rc2_dist = math.sqrt(cal_p2[0]**2 + cal_p2[1]**2)
+                    self._cal_point_entries['RC_2'].delete(0, tk.END)
+                    self._cal_point_entries['RC_2'].insert(0, f"{rc2_dist:.1f}")
 
             self._arena_maker_frame.pack(fill=tk.BOTH, expand=True)
             # Re-add canvas to active_animations
@@ -1129,6 +1452,26 @@ class GraphicsModule:
         
         top_button.pack(side=tk.RIGHT, padx=10)
         self._arena_maker_top_button = top_button
+
+        # Create re-dimension button (shown below Back button during normal operation)
+        redim_button = tk.Button(
+            top_bar,
+            text="Re-dimension",
+            command=self._redimension_arena,
+            bg='#00FFFF',  # Neon cyan
+            fg='black',
+            font=('Arial', 10, 'bold'),
+            activebackground='#00CCCC',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=8,
+            pady=3
+        )
+        self._arena_maker_redim_button = redim_button
+        # Only show redim button during normal operation (valid settings)
+        if not settings_invalid:
+            redim_button.pack(side=tk.RIGHT, padx=5)
 
         # Title label
         title_label = tk.Label(
@@ -1205,6 +1548,178 @@ class GraphicsModule:
             # Bind Enter key and focus-out to update
             entry.bind('<Return>', lambda e: self._update_arena_from_distances())
             entry.bind('<FocusOut>', lambda e: self._update_arena_from_distances())
+
+        # Create calibration point control panel below the distance panel
+        cal_point_frame = tk.Frame(self._arena_maker_frame, bg='black')
+        cal_point_frame.pack(fill=tk.X, pady=10)
+
+        # Title for calibration points section
+        cal_title = tk.Label(
+            cal_point_frame,
+            text="Calibration Points",
+            bg='black',
+            fg='#00FF00',
+            font=('Arial', 12, 'bold')
+        )
+        cal_title.pack(pady=5)
+
+        # Frame for calibration point entries
+        cal_entries_frame = tk.Frame(cal_point_frame, bg='black')
+        cal_entries_frame.pack()
+
+        # Get current calibration point values
+        cal_p1 = self.settings_module.cal_point_1
+        cal_p2 = self.settings_module.cal_point_2
+
+        # Calibration point entry info: (name, description, x_value, y_value)
+        cal_point_info = [
+            ('Cal 1', 'X', 'Y', cal_p1[0], cal_p1[1]),
+            ('Cal 2', 'X', 'Y', cal_p2[0], cal_p2[1])
+        ]
+
+        # Store calibration point entry references
+        self._cal_point_entries = {}
+
+        for name, x_label, y_label, x_val, y_val in cal_point_info:
+            point_frame = tk.Frame(cal_entries_frame, bg='black')
+            point_frame.pack(side=tk.LEFT, padx=20)
+
+            # Label for calibration point name
+            label = tk.Label(
+                point_frame,
+                text=name,
+                bg='black',
+                fg='#00FF00',
+                font=('Arial', 10, 'bold')
+            )
+            label.pack()
+
+            # X coordinate entry
+            x_frame = tk.Frame(point_frame, bg='black')
+            x_frame.pack()
+            tk.Label(
+                x_frame,
+                text="X:",
+                bg='black',
+                fg='#00FF00',
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            x_entry = tk.Entry(
+                x_frame,
+                font=('Arial', 12),
+                width=8,
+                justify='center'
+            )
+            x_entry.insert(0, f"{x_val:.1f}")
+            x_entry.pack(side=tk.LEFT, padx=2)
+
+            # Y coordinate entry
+            y_frame = tk.Frame(point_frame, bg='black')
+            y_frame.pack()
+            tk.Label(
+                y_frame,
+                text="Y:",
+                bg='black',
+                fg='#00FF00',
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            y_entry = tk.Entry(
+                y_frame,
+                font=('Arial', 12),
+                width=8,
+                justify='center'
+            )
+            y_entry.insert(0, f"{y_val:.1f}")
+            y_entry.pack(side=tk.LEFT, padx=2)
+
+            # Store references
+            self._cal_point_entries[name] = {'x': x_entry, 'y': y_entry}
+
+            # Bind Enter key and focus-out to update
+            x_entry.bind('<Return>', lambda e: self._update_calibration_points_from_entries())
+            x_entry.bind('<FocusOut>', lambda e: self._update_calibration_points_from_entries())
+            y_entry.bind('<Return>', lambda e: self._update_calibration_points_from_entries())
+            y_entry.bind('<FocusOut>', lambda e: self._update_calibration_points_from_entries())
+
+        # Add RC_1 and RC_2 controls (distance from origin to calibration points)
+        rc_frame = tk.Frame(cal_entries_frame, bg='black')
+        rc_frame.pack(side=tk.LEFT, padx=20)
+
+        # RC_1 entry
+        rc1_frame = tk.Frame(rc_frame, bg='black')
+        rc1_frame.pack()
+        tk.Label(
+            rc1_frame,
+            text="RC_1:",
+            bg='black',
+            fg='#00FF00',
+            font=('Arial', 10, 'bold')
+        ).pack(side=tk.LEFT)
+        rc1_entry = tk.Entry(
+            rc1_frame,
+            font=('Arial', 12),
+            width=8,
+            justify='center'
+        )
+        rc1_dist = math.sqrt(cal_p1[0]**2 + cal_p1[1]**2)
+        rc1_entry.insert(0, f"{rc1_dist:.1f}")
+        rc1_entry.pack(side=tk.LEFT, padx=2)
+
+        # RC_2 entry
+        rc2_frame = tk.Frame(rc_frame, bg='black')
+        rc2_frame.pack()
+        tk.Label(
+            rc2_frame,
+            text="RC_2:",
+            bg='black',
+            fg='#00FF00',
+            font=('Arial', 10, 'bold')
+        ).pack(side=tk.LEFT)
+        rc2_entry = tk.Entry(
+            rc2_frame,
+            font=('Arial', 12),
+            width=8,
+            justify='center'
+        )
+        rc2_dist = math.sqrt(cal_p2[0]**2 + cal_p2[1]**2)
+        rc2_entry.insert(0, f"{rc2_dist:.1f}")
+        rc2_entry.pack(side=tk.LEFT, padx=2)
+
+        # Store RC entry references
+        self._cal_point_entries['RC_1'] = rc1_entry
+        self._cal_point_entries['RC_2'] = rc2_entry
+
+        # Bind RC entries
+        rc1_entry.bind('<Return>', lambda e: self._update_rc_from_entries())
+        rc1_entry.bind('<FocusOut>', lambda e: self._update_rc_from_entries())
+        rc2_entry.bind('<Return>', lambda e: self._update_rc_from_entries())
+        rc2_entry.bind('<FocusOut>', lambda e: self._update_rc_from_entries())
+
+        # Add Verify Settings button
+        verify_frame = tk.Frame(cal_entries_frame, bg='black')
+        verify_frame.pack(side=tk.LEFT, padx=20)
+        verify_button = tk.Button(
+            verify_frame,
+            text="Verify Settings",
+            command=self._verify_and_save_settings,
+            bg='#FFD700',  # Gold
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#FFC000',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        verify_button.pack()
+
+        # Update calibration points display on the plot
+        if hasattr(self.arena_maker_window, 'update_calibration_points'):
+            self.arena_maker_window.update_calibration_points(
+                self.settings_module.cal_point_1,
+                self.settings_module.cal_point_2
+            )
 
         # Add canvas to active_animations for automatic refreshing
         if hasattr(self.arena_maker_window, 'canvas') and self.arena_maker_window.canvas in self.active_animations:
@@ -1479,6 +1994,82 @@ class PositionWindow:
         #self.stable_pos = StablePositionEstimator(self.receiver_positions)
         #receiver_coordinates = [cords for index,cords in receiver_positions]
         self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
+
+    def update_arena(self, grid_width, grid_height, receiver_positions):
+        """
+        Update the arena dimensions and receiver positions.
+        Axis limits are calculated from actual receiver positions, not grid dimensions.
+
+        Args:
+            grid_width (float): New width of the rectangular grid (used for reference)
+            grid_height (float): New height of the rectangular grid (used for reference)
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
+        """
+        self.receiver_positions = receiver_positions
+
+        # Calculate actual bounds from receiver positions
+        receiver_x = [pos[1][0] for pos in receiver_positions]
+        receiver_y = [pos[1][1] for pos in receiver_positions]
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
+        # Calculate actual width and height from positions
+        actual_width = max_x - min_x
+        actual_height = max_y - min_y
+
+        # Update stored dimensions to match actual bounds
+        self.grid_width = actual_width
+        self.grid_height = actual_height
+
+        # Update main arena axis limits based on actual receiver positions with padding
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
+
+        # Clear existing receiver scatter and labels from main axes
+        # We need to redraw receivers since scatter doesn't have set_offsets for easy update
+        # Remove old receiver elements (keep other elements like vehicle points)
+        for artist in self.ax.collections[:]:
+            # Only remove receiver scatter (first collection added)
+            if artist.get_label() == 'Receivers':
+                artist.remove()
+
+        # Remove old receiver labels (text elements with receiver IDs)
+        for text in self.ax.texts[:]:
+            txt = text.get_text()
+            if txt.isdigit() and 1 <= int(txt) <= 6:
+                text.remove()
+
+        # Remove old connection lines
+        for line in self.ax.lines[:]:
+            if line.get_label() == 'Receiver Connections':
+                line.remove()
+
+        # Redraw receivers
+        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
+
+        # Redraw receiver labels
+        for receiver_id, (x, y) in receiver_positions:
+            self.ax.text(x + 5, y + 5, str(receiver_id + 1), color='white',
+                        fontsize=10, fontweight='bold', zorder=6,
+                        ha='left', va='bottom')
+
+        # Redraw connection lines
+        connection_order = [0, 1, 2, 5, 4, 3, 0]
+        connected_x = [receiver_x[i] for i in connection_order]
+        connected_y = [receiver_y[i] for i in connection_order]
+        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
+
+        # Update CEP positioning with new receiver positions
+        from PositionModule import CEPPositioning
+        self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
+
+        # Clear position history for fresh start
+        self.position_history.clear()
+        self.cep_position_history.clear()
+
+        # Redraw canvas if available
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.draw()
 
     def update_cords(self, x, y):
         """
@@ -1849,6 +2440,74 @@ class CalibrationWindow:
 
         # Note: tight_layout() removed - not needed for single subplot layouts
 
+    def update_arena(self, grid_width, grid_height, receiver_positions):
+        """
+        Update the arena dimensions and receiver positions.
+        Axis limits are calculated from actual receiver positions, not grid dimensions.
+
+        Args:
+            grid_width (float): New width of the rectangular grid (used for reference)
+            grid_height (float): New height of the rectangular grid (used for reference)
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
+        """
+        self.receiver_positions = receiver_positions
+
+        # Calculate actual bounds from receiver positions
+        receiver_x = [pos[1][0] for pos in receiver_positions]
+        receiver_y = [pos[1][1] for pos in receiver_positions]
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
+        # Calculate actual width and height from positions
+        actual_width = max_x - min_x
+        actual_height = max_y - min_y
+
+        # Update stored dimensions to match actual bounds
+        self.grid_width = actual_width
+        self.grid_height = actual_height
+
+        # Update main arena axis limits based on actual receiver positions with padding
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
+
+        # Clear existing receiver scatter and labels
+        for artist in self.ax.collections[:]:
+            if artist.get_label() == 'Receivers':
+                artist.remove()
+
+        # Remove old receiver labels
+        for text in self.ax.texts[:]:
+            txt = text.get_text()
+            if txt.isdigit() and 1 <= int(txt) <= 6:
+                text.remove()
+
+        # Remove old connection lines
+        for line in self.ax.lines[:]:
+            if line.get_label() == 'Receiver Connections':
+                line.remove()
+
+        # Redraw receivers
+        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
+
+        # Redraw receiver labels
+        for receiver_id, (x, y) in receiver_positions:
+            self.ax.text(x + 5, y + 5, str(receiver_id + 1), color='white',
+                        fontsize=10, fontweight='bold', zorder=6,
+                        ha='left', va='bottom')
+
+        # Redraw connection lines
+        connection_order = [0, 1, 2, 5, 4, 3, 0]
+        connected_x = [receiver_x[i] for i in connection_order]
+        connected_y = [receiver_y[i] for i in connection_order]
+        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
+
+        # Clear position history for fresh start
+        self.position_history.clear()
+
+        # Redraw canvas if available
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.draw()
+
     def update_cords(self, x, y):
         """
         Update the vehicle coordinates of the plot
@@ -1951,6 +2610,10 @@ class ArenaMakerWindow:
         self.cal_point_1_label = None    # Calibration point 1 label
         self.cal_point_2_scatter = None  # Calibration point 2 marker
         self.cal_point_2_label = None    # Calibration point 2 label
+        self.rc1_line = None             # RC_1 dashed line from origin to cal_point_1
+        self.rc1_label = None            # RC_1 distance label
+        self.rc2_line = None             # RC_2 dashed line from origin to cal_point_2
+        self.rc2_label = None            # RC_2 distance label
         self._initialize_plot_elements()
 
         # Create legend after plot elements are initialized (so it includes the Receivers label)
@@ -2179,6 +2842,50 @@ class ArenaMakerWindow:
             self.cal_point_2_label.set_position((x2 + 8, y2))
             self.cal_point_2_label.set_visible(True)
 
+        # RC_1: Dashed line from origin to cal_point_1
+        rc1_dist = math.sqrt(x1**2 + y1**2)
+        if self.rc1_line is None:
+            self.rc1_line, = self.ax.plot([0, x1], [0, y1], color='#00FF00', linewidth=2,
+                                           linestyle='--', zorder=4)
+        else:
+            self.rc1_line.set_data([0, x1], [0, y1])
+            self.rc1_line.set_visible(True)
+
+        # RC_1 label at midpoint
+        rc1_mid_x, rc1_mid_y = x1 / 2, y1 / 2
+        if self.rc1_label is None:
+            self.rc1_label = self.ax.text(rc1_mid_x + 8, rc1_mid_y, f"RC_1\n{rc1_dist:.1f}",
+                        color='#00FF00',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='left', va='center',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF00'))
+        else:
+            self.rc1_label.set_text(f"RC_1\n{rc1_dist:.1f}")
+            self.rc1_label.set_position((rc1_mid_x + 8, rc1_mid_y))
+            self.rc1_label.set_visible(True)
+
+        # RC_2: Dashed line from origin to cal_point_2
+        rc2_dist = math.sqrt(x2**2 + y2**2)
+        if self.rc2_line is None:
+            self.rc2_line, = self.ax.plot([0, x2], [0, y2], color='#00FF00', linewidth=2,
+                                           linestyle='--', zorder=4)
+        else:
+            self.rc2_line.set_data([0, x2], [0, y2])
+            self.rc2_line.set_visible(True)
+
+        # RC_2 label at midpoint
+        rc2_mid_x, rc2_mid_y = x2 / 2, y2 / 2
+        if self.rc2_label is None:
+            self.rc2_label = self.ax.text(rc2_mid_x + 8, rc2_mid_y, f"RC_2\n{rc2_dist:.1f}",
+                        color='#00FF00',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='left', va='center',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF00'))
+        else:
+            self.rc2_label.set_text(f"RC_2\n{rc2_dist:.1f}")
+            self.rc2_label.set_position((rc2_mid_x + 8, rc2_mid_y))
+            self.rc2_label.set_visible(True)
+
         # Update legend to include calibration points
         handles, labels = self.ax.get_legend_handles_labels()
         if handles:
@@ -2188,6 +2895,18 @@ class ArenaMakerWindow:
         # Redraw canvas if available
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.draw()
+
+    def update_arena(self, grid_width, grid_height, receiver_positions):
+        """
+        Update the arena dimensions and receiver positions.
+        This is a convenience wrapper around update_receiver_positions for API consistency.
+
+        Args:
+            grid_width (float): New width of the rectangular grid
+            grid_height (float): New height of the rectangular grid
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
+        """
+        self.update_receiver_positions(receiver_positions, grid_width, grid_height)
 
     def update_receiver_positions(self, new_receiver_positions, width, height):
         """
