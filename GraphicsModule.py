@@ -54,20 +54,14 @@ class GraphicsModule:
 
         # Instantiate matplotlib window classes
         self.position_window = PositionWindow(
-                                grid_width=self.settings_module.arena_size[0],
-                                grid_height=self.settings_module.arena_size[1],
                                 receiver_positions=self.settings_module.get_tower_coordinates()
                                 )
 
         self.calibration_window = CalibrationWindow(
-                                grid_width=self.settings_module.arena_size[0],
-                                grid_height=self.settings_module.arena_size[1],
                                 receiver_positions=self.settings_module.get_tower_coordinates()
                                 )
 
         self.arena_maker_window = ArenaMakerWindow(
-                                grid_width=self.settings_module.arena_size[0],
-                                grid_height=self.settings_module.arena_size[1],
                                 receiver_positions=self.settings_module.get_tower_coordinates()
                                 )
 
@@ -228,8 +222,7 @@ class GraphicsModule:
 
         # Update position window with current settings from settings file
         receiver_positions = self.settings_module.get_tower_coordinates()
-        grid_width, grid_height = self.settings_module.arena_size
-        self.position_window.update_arena(grid_width, grid_height, receiver_positions)
+        self.position_window.update_arena(receiver_positions)
 
         # If position frame already exists, just show it
         if self._position_frame:
@@ -508,8 +501,7 @@ class GraphicsModule:
 
         # Update calibration window with current settings from settings file
         receiver_positions = self.settings_module.get_tower_coordinates()
-        grid_width, grid_height = self.settings_module.arena_size
-        self.calibration_window.update_arena(grid_width, grid_height, receiver_positions)
+        self.calibration_window.update_arena(receiver_positions)
 
         # If calibration frame already exists, just show it
         if self._calibration_frame:
@@ -643,7 +635,7 @@ class GraphicsModule:
             r10: Y-offset of receiver 5 from origin (default 0)
 
         Returns:
-            tuple: (positions, width, height) where positions is [(id, (x, y)), ...]
+            list: positions as [(id, (x, y)), ...]
         """
         # Default R7 and R8 to R6/2 if not specified
         if r7 is None:
@@ -676,13 +668,7 @@ class GraphicsModule:
             (5, (x6, y6))    # Receiver 6 (id 5): top right
         ]
 
-        # Calculate effective width and height
-        all_x = [x1, x2, x3, x4, x5, x6]
-        all_y = [y1, y2, y3, y4, y5, y6]
-        width = max(all_x) - min(all_x)
-        height = max(all_y) - min(all_y)
-
-        return positions, width, height
+        return positions
 
     def _calculate_distances_from_positions(self, positions):
         """
@@ -805,10 +791,10 @@ class GraphicsModule:
                 return  # Invalid input, don't update
 
             # Calculate new positions
-            new_positions, width, height = self._calculate_positions_from_distances(r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
+            new_positions = self._calculate_positions_from_distances(r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
 
             # Update arena maker window
-            self.arena_maker_window.update_receiver_positions(new_positions, width, height)
+            self.arena_maker_window.update_receiver_positions(new_positions)
 
             # Update settings module
             for receiver_id, (x, y) in new_positions:
@@ -1214,7 +1200,7 @@ class GraphicsModule:
         new_receiver_positions = self._calculate_receiver_positions_from_dimensions(width, height)
 
         # Update the arena maker window with new positions
-        self.arena_maker_window.update_receiver_positions(new_receiver_positions, width, height)
+        self.arena_maker_window.update_receiver_positions(new_receiver_positions)
 
         # Update settings module with new positions
         for receiver_id, (x, y) in new_receiver_positions:
@@ -1294,9 +1280,9 @@ class GraphicsModule:
             
             # Calculate receiver positions from dimensions
             new_receiver_positions = self._calculate_receiver_positions_from_dimensions(width, height)
-            
+
             # Update the arena maker window with new positions
-            self.arena_maker_window.update_receiver_positions(new_receiver_positions, width, height)
+            self.arena_maker_window.update_receiver_positions(new_receiver_positions)
             
             # Update settings module with new positions
             for receiver_id, (x, y) in new_receiver_positions:
@@ -1342,8 +1328,7 @@ class GraphicsModule:
         # Update arena maker window with current settings from settings file (when settings are valid)
         if not settings_invalid:
             receiver_positions = self.settings_module.get_tower_coordinates()
-            grid_width, grid_height = self.settings_module.arena_size
-            self.arena_maker_window.update_arena(grid_width, grid_height, receiver_positions)
+            self.arena_maker_window.update_arena(receiver_positions)
 
         # If arena maker frame already exists, update button visibility and show it
         if self._arena_maker_frame:
@@ -1806,22 +1791,18 @@ class GraphicsModule:
 
 
 class PositionWindow:
-    def __init__(self, grid_width=10, grid_height=10, receiver_positions=None):
+    def __init__(self, receiver_positions=None):
         """
         Initialize the PositionWindow with matplotlib.
-        
+
         Args:
-            grid_width (float): Width of the rectangular grid
-            grid_height (float): Height of the rectangular grid
-            receiver_positions (list of tuples, optional): List of (id, (x, y)) positions for 6 receivers.
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
         """
-        self.grid_width = grid_width
-        self.grid_height = grid_height
         self.grid_padding = 20 # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
-        
+
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
         if receiver_positions is None:
             raise ValueError("Must provide receiver positions!")
@@ -1829,7 +1810,13 @@ class PositionWindow:
             if len(receiver_positions) != 6:
                 raise ValueError("Must provide exactly 6 receiver positions")
             self.receiver_positions = receiver_positions
-        
+
+        # Calculate axis limits from receiver positions
+        receiver_x = [pos[1][0] for pos in receiver_positions]
+        receiver_y = [pos[1][1] for pos in receiver_positions]
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
         # Initialize matplotlib figure with GridSpec layout
         # Layout: [distance_text_left, left_plots, main_arena, right_plots, distance_text_right]
         from matplotlib.gridspec import GridSpec
@@ -1841,8 +1828,8 @@ class PositionWindow:
         # Create main arena axes in center (spans rows 0-2)
         self.ax = self.fig.add_subplot(gs[0:3, 1])
         self.ax.set_facecolor('black')
-        self.ax.set_xlim(-grid_width/2-self.grid_padding, grid_width/2+self.grid_padding)
-        self.ax.set_ylim(-grid_height/2-self.grid_padding, grid_height/2+self.grid_padding)
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
         self.ax.set_aspect('equal')
         self.ax.grid(True, alpha=0.3, color='gray')
         self.ax.set_xlabel('X Position', color='white')
@@ -1995,31 +1982,21 @@ class PositionWindow:
         #receiver_coordinates = [cords for index,cords in receiver_positions]
         self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
 
-    def update_arena(self, grid_width, grid_height, receiver_positions):
+    def update_arena(self, receiver_positions):
         """
         Update the arena dimensions and receiver positions.
-        Axis limits are calculated from actual receiver positions, not grid dimensions.
+        Axis limits are calculated from actual receiver positions.
 
         Args:
-            grid_width (float): New width of the rectangular grid (used for reference)
-            grid_height (float): New height of the rectangular grid (used for reference)
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
         """
         self.receiver_positions = receiver_positions
 
-        # Calculate actual bounds from receiver positions
+        # Calculate bounds from receiver positions
         receiver_x = [pos[1][0] for pos in receiver_positions]
         receiver_y = [pos[1][1] for pos in receiver_positions]
         min_x, max_x = min(receiver_x), max(receiver_x)
         min_y, max_y = min(receiver_y), max(receiver_y)
-
-        # Calculate actual width and height from positions
-        actual_width = max_x - min_x
-        actual_height = max_y - min_y
-
-        # Update stored dimensions to match actual bounds
-        self.grid_width = actual_width
-        self.grid_height = actual_height
 
         # Update main arena axis limits based on actual receiver positions with padding
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
@@ -2349,20 +2326,16 @@ class PositionWindow:
 
 
 class CalibrationWindow:
-    def __init__(self, grid_width=10, grid_height=10, receiver_positions=None):
+    def __init__(self, receiver_positions=None):
         """
         Initialize the CalibrationWindow with matplotlib.
         Contains only the X/Y position plot for calibration purposes.
 
         Args:
-            grid_width (float): Width of the rectangular grid
-            grid_height (float): Height of the rectangular grid
-            receiver_positions (list of tuples, optional): List of (id, (x, y)) positions for 6 receivers.
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
         """
-        self.grid_width = grid_width
-        self.grid_height = grid_height
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
 
@@ -2374,14 +2347,20 @@ class CalibrationWindow:
                 raise ValueError("Must provide exactly 6 receiver positions")
             self.receiver_positions = receiver_positions
 
+        # Calculate axis limits from receiver positions
+        receiver_x = [pos[1][0] for pos in receiver_positions]
+        receiver_y = [pos[1][1] for pos in receiver_positions]
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
         # Initialize matplotlib figure with single plot
         self.fig = plt.figure(figsize=(10, 10), facecolor='black')
 
         # Create main arena axes
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor('black')
-        self.ax.set_xlim(-grid_width/2 - self.grid_padding, grid_width/2 + self.grid_padding)
-        self.ax.set_ylim(-grid_height/2 - self.grid_padding, grid_height/2 + self.grid_padding)
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
         self.ax.set_aspect('equal')
         self.ax.grid(True, alpha=0.3, color='gray')
         self.ax.set_xlabel('X Position', color='white')
@@ -2440,31 +2419,21 @@ class CalibrationWindow:
 
         # Note: tight_layout() removed - not needed for single subplot layouts
 
-    def update_arena(self, grid_width, grid_height, receiver_positions):
+    def update_arena(self, receiver_positions):
         """
         Update the arena dimensions and receiver positions.
-        Axis limits are calculated from actual receiver positions, not grid dimensions.
+        Axis limits are calculated from actual receiver positions.
 
         Args:
-            grid_width (float): New width of the rectangular grid (used for reference)
-            grid_height (float): New height of the rectangular grid (used for reference)
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
         """
         self.receiver_positions = receiver_positions
 
-        # Calculate actual bounds from receiver positions
+        # Calculate bounds from receiver positions
         receiver_x = [pos[1][0] for pos in receiver_positions]
         receiver_y = [pos[1][1] for pos in receiver_positions]
         min_x, max_x = min(receiver_x), max(receiver_x)
         min_y, max_y = min(receiver_y), max(receiver_y)
-
-        # Calculate actual width and height from positions
-        actual_width = max_x - min_x
-        actual_height = max_y - min_y
-
-        # Update stored dimensions to match actual bounds
-        self.grid_width = actual_width
-        self.grid_height = actual_height
 
         # Update main arena axis limits based on actual receiver positions with padding
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
@@ -2537,20 +2506,16 @@ class CalibrationWindow:
 
 
 class ArenaMakerWindow:
-    def __init__(self, grid_width=10, grid_height=10, receiver_positions=None):
+    def __init__(self, receiver_positions=None):
         """
         Initialize the ArenaMakerWindow with matplotlib.
         Contains only the X/Y position plot for arena setup purposes.
 
         Args:
-            grid_width (float): Width of the rectangular grid
-            grid_height (float): Height of the rectangular grid
-            receiver_positions (list of tuples, optional): List of (id, (x, y)) positions for 6 receivers.
+            receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
         """
-        self.grid_width = grid_width
-        self.grid_height = grid_height
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
 
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
@@ -2561,14 +2526,20 @@ class ArenaMakerWindow:
                 raise ValueError("Must provide exactly 6 receiver positions")
             self.receiver_positions = receiver_positions
 
+        # Calculate axis limits from receiver positions
+        receiver_x = [pos[1][0] for pos in receiver_positions]
+        receiver_y = [pos[1][1] for pos in receiver_positions]
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
         # Initialize matplotlib figure with single plot
         self.fig = plt.figure(figsize=(10, 10), facecolor='black')
 
         # Create main arena axes
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor('black')
-        self.ax.set_xlim(-grid_width/2 - self.grid_padding, grid_width/2 + self.grid_padding)
-        self.ax.set_ylim(-grid_height/2 - self.grid_padding, grid_height/2 + self.grid_padding)
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
         self.ax.set_aspect('equal')
         self.ax.grid(True, alpha=0.3, color='gray')
         self.ax.set_xlabel('X Position', color='white')
@@ -2896,26 +2867,22 @@ class ArenaMakerWindow:
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.draw()
 
-    def update_arena(self, grid_width, grid_height, receiver_positions):
+    def update_arena(self, receiver_positions):
         """
         Update the arena dimensions and receiver positions.
         This is a convenience wrapper around update_receiver_positions for API consistency.
 
         Args:
-            grid_width (float): New width of the rectangular grid
-            grid_height (float): New height of the rectangular grid
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers
         """
-        self.update_receiver_positions(receiver_positions, grid_width, grid_height)
+        self.update_receiver_positions(receiver_positions)
 
-    def update_receiver_positions(self, new_receiver_positions, width, height):
+    def update_receiver_positions(self, new_receiver_positions):
         """
         Update the receiver positions and redraw the plot.
 
         Args:
             new_receiver_positions: List of (id, (x, y)) tuples for 6 receivers
-            width: New arena width (may be recalculated from actual positions)
-            height: New arena height (may be recalculated from actual positions)
         """
         # Update stored positions
         self.receiver_positions = new_receiver_positions
@@ -2927,14 +2894,6 @@ class ArenaMakerWindow:
         # Calculate actual bounds from receiver positions
         min_x, max_x = min(receiver_x), max(receiver_x)
         min_y, max_y = min(receiver_y), max(receiver_y)
-
-        # Calculate actual width and height from positions
-        actual_width = max_x - min_x
-        actual_height = max_y - min_y
-
-        # Update stored dimensions to match actual bounds
-        self.grid_width = actual_width
-        self.grid_height = actual_height
 
         # Update axis limits based on actual receiver positions with padding
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
