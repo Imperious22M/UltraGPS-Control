@@ -36,6 +36,9 @@ class GraphicsModule:
         # Store reference to arena maker top bar button for conditional display
         self._arena_maker_top_button = None
 
+        # Store references to distance entry fields for arena maker
+        self._distance_entries = {}
+
         # Instantiate control module
         self.control_module = ControlModule("127.0.0.1")
 
@@ -557,20 +560,20 @@ class GraphicsModule:
         Calculate receiver positions in a rectangular pattern based on arena dimensions.
         Pattern: Left side (top to bottom) = Receivers 3, 2, 1
                  Right side (top to bottom) = Receivers 6, 5, 4
-        
+
         Args:
             width (float): Arena width in cm
             height (float): Arena height in cm
-            
+
         Returns:
             list of tuples: [(id, (x, y)), ...] for 6 receivers
         """
         # Left side (top to bottom): Receivers 3, 2, 1 (ids 2, 1, 0)
         # Right side (top to bottom): Receivers 6, 5, 4 (ids 5, 4, 3)
-        
+
         half_width = width / 2.0
         half_height = height / 2.0
-        
+
         positions = [
             (0, (-half_width, -half_height)),   # Receiver 1 (id 0): Left side, bottom
             (1, (-half_width, 0)),             # Receiver 2 (id 1): Left side, middle
@@ -579,8 +582,158 @@ class GraphicsModule:
             (4, (half_width, 0)),              # Receiver 5 (id 4): Right side, middle
             (5, (half_width, half_height))     # Receiver 6 (id 5): Right side, top
         ]
-        
+
         return positions
+
+    def _calculate_positions_from_distances(self, r1, r2, r3, r4, r5, r6, r7=None, r8=None, r9=0, r10=0):
+        """
+        Calculate receiver positions from inter-receiver distances.
+
+        Receivers 2 and 5 are at y = r9 and y = r10 respectively (default 0).
+        R1, R2, R4, R5 only affect the y-axis (vertical distances).
+        R3, R6 only affect the x-axis (horizontal distances, symmetric across y-axis).
+        R7, R8 control x-distance from origin to receivers 2 and 5.
+        R9, R10 control y-offset from origin for receivers 2 and 5.
+
+        Distance definitions:
+        - R1: vertical distance from receiver 2 to receiver 3 (y of receiver 3 relative to receiver 2)
+        - R2: vertical distance from receiver 2 to receiver 1 (y of receiver 1 relative to receiver 2)
+        - R3: horizontal distance from receiver 1 to receiver 4 (bottom width)
+        - R4: vertical distance from receiver 5 to receiver 4 (y of receiver 4 relative to receiver 5)
+        - R5: vertical distance from receiver 5 to receiver 6 (y of receiver 6 relative to receiver 5)
+        - R6: horizontal distance from receiver 3 to receiver 6 (top width)
+        - R7: x-distance from origin to receiver 2 (defaults to R6/2 if None)
+        - R8: x-distance from origin to receiver 5 (defaults to R6/2 if None)
+        - R9: y-offset of receiver 2 from origin (default 0)
+        - R10: y-offset of receiver 5 from origin (default 0)
+
+        Layout (when R9=R10=0):
+          3 ----R6---- 6
+          |            |
+          R1          R5
+          |            |
+     --R7-2            5-R8--  <- y = 0, origin in center
+          |            |
+          R2          R4
+          |            |
+          1 ----R3---- 4
+
+        Args:
+            r1-r6: Distances in cm
+            r7: X-distance from origin to receiver 2 (optional, defaults to r6/2)
+            r8: X-distance from origin to receiver 5 (optional, defaults to r6/2)
+            r9: Y-offset of receiver 2 from origin (default 0)
+            r10: Y-offset of receiver 5 from origin (default 0)
+
+        Returns:
+            tuple: (positions, width, height) where positions is [(id, (x, y)), ...]
+        """
+        # Default R7 and R8 to R6/2 if not specified
+        if r7 is None:
+            r7 = r6 / 2.0
+        if r8 is None:
+            r8 = r6 / 2.0
+
+        # X positions
+        x3 = -r6 / 2.0   # Receiver 3: left side, determined by R6
+        x2 = -r7         # Receiver 2: determined by R7 (distance from origin)
+        x1 = -r3 / 2.0   # Receiver 1: determined by R3
+        x4 = r3 / 2.0    # Receiver 4: symmetric to receiver 1
+        x5 = r8          # Receiver 5: determined by R8 (distance from origin)
+        x6 = r6 / 2.0    # Receiver 6: right side, determined by R6
+
+        # Y positions (receivers 2 and 5 offset by R9 and R10)
+        y2 = r9          # Receiver 2: y-offset from origin
+        y5 = r10         # Receiver 5: y-offset from origin
+        y3 = y2 + r1     # Receiver 3: R1 above receiver 2
+        y1 = y2 - r2     # Receiver 1: R2 below receiver 2
+        y6 = y5 + r5     # Receiver 6: R5 above receiver 5
+        y4 = y5 - r4     # Receiver 4: R4 below receiver 5
+
+        positions = [
+            (0, (x1, y1)),   # Receiver 1 (id 0): bottom left
+            (1, (x2, y2)),   # Receiver 2 (id 1): middle left
+            (2, (x3, y3)),   # Receiver 3 (id 2): top left
+            (3, (x4, y4)),   # Receiver 4 (id 3): bottom right
+            (4, (x5, y5)),   # Receiver 5 (id 4): middle right
+            (5, (x6, y6))    # Receiver 6 (id 5): top right
+        ]
+
+        # Calculate effective width and height
+        all_x = [x1, x2, x3, x4, x5, x6]
+        all_y = [y1, y2, y3, y4, y5, y6]
+        width = max(all_x) - min(all_x)
+        height = max(all_y) - min(all_y)
+
+        return positions, width, height
+
+    def _calculate_distances_from_positions(self, positions):
+        """
+        Calculate inter-receiver distances from positions.
+
+        Returns vertical distances for R1, R2, R4, R5, horizontal distances for R3, R6,
+        origin-to-receiver distances for R7, R8, and y-offsets for R9, R10.
+
+        Args:
+            positions: List of (id, (x, y)) tuples for 6 receivers
+
+        Returns:
+            tuple: (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) distances
+        """
+        # Create a dict for easy lookup by id
+        pos_dict = {p[0]: p[1] for p in positions}
+
+        # Vertical distances (y-axis only)
+        r1 = abs(pos_dict[2][1] - pos_dict[1][1])  # Receiver 3 to 2 (y difference)
+        r2 = abs(pos_dict[1][1] - pos_dict[0][1])  # Receiver 2 to 1 (y difference)
+        r4 = abs(pos_dict[4][1] - pos_dict[3][1])  # Receiver 5 to 4 (y difference)
+        r5 = abs(pos_dict[5][1] - pos_dict[4][1])  # Receiver 6 to 5 (y difference)
+
+        # Horizontal distances (x-axis only)
+        r3 = abs(pos_dict[3][0] - pos_dict[0][0])  # Receiver 4 to 1 (x difference)
+        r6 = abs(pos_dict[5][0] - pos_dict[2][0])  # Receiver 6 to 3 (x difference)
+
+        # Origin-to-receiver distances (x-distance from origin)
+        r7 = abs(pos_dict[1][0])  # Receiver 2 x-distance from origin
+        r8 = abs(pos_dict[4][0])  # Receiver 5 x-distance from origin
+
+        # Y-offsets from origin (can be positive or negative)
+        r9 = pos_dict[1][1]   # Receiver 2 y-offset from origin
+        r10 = pos_dict[4][1]  # Receiver 5 y-offset from origin
+
+        return r1, r2, r3, r4, r5, r6, r7, r8, r9, r10
+
+    def _update_arena_from_distances(self):
+        """Update arena positions when distance entries change."""
+        try:
+            # Get values from entry fields
+            r1 = float(self._distance_entries['R1'].get())
+            r2 = float(self._distance_entries['R2'].get())
+            r3 = float(self._distance_entries['R3'].get())
+            r4 = float(self._distance_entries['R4'].get())
+            r5 = float(self._distance_entries['R5'].get())
+            r6 = float(self._distance_entries['R6'].get())
+            r7 = float(self._distance_entries['R7'].get())
+            r8 = float(self._distance_entries['R8'].get())
+            r9 = float(self._distance_entries['R9'].get())
+            r10 = float(self._distance_entries['R10'].get())
+
+            # Validate positive values for R1-R8 (R9, R10 can be any value including 0 or negative)
+            if any(v <= 0 for v in [r1, r2, r3, r4, r5, r6, r7, r8]):
+                return  # Invalid input, don't update
+
+            # Calculate new positions
+            new_positions, width, height = self._calculate_positions_from_distances(r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
+
+            # Update arena maker window
+            self.arena_maker_window.update_receiver_positions(new_positions, width, height)
+
+            # Update settings module
+            for receiver_id, (x, y) in new_positions:
+                self.settings_module.set_receiver_position(receiver_id, x, y)
+
+        except ValueError:
+            pass  # Invalid input, don't update
 
     def _ask_arena_dimensions(self):
         """
@@ -721,16 +874,26 @@ class GraphicsModule:
         if width is None or height is None:
             # User cancelled, do nothing
             return
-        
+
         # Calculate receiver positions from dimensions
         new_receiver_positions = self._calculate_receiver_positions_from_dimensions(width, height)
-        
+
         # Update the arena maker window with new positions
         self.arena_maker_window.update_receiver_positions(new_receiver_positions, width, height)
-        
+
         # Update settings module with new positions
         for receiver_id, (x, y) in new_receiver_positions:
             self.settings_module.set_receiver_position(receiver_id, x, y)
+
+        # Update distance entry fields with new values
+        if self._distance_entries:
+            current_distances = self._calculate_distances_from_positions(new_receiver_positions)
+            distance_names = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10']
+            for i, name in enumerate(distance_names):
+                if name in self._distance_entries:
+                    entry = self._distance_entries[name]
+                    entry.delete(0, tk.END)
+                    entry.insert(0, f"{current_distances[i]:.1f}")
 
     def show_arena_maker_window(self):
         """
@@ -785,7 +948,19 @@ class GraphicsModule:
                 else:
                     # Show back button, hide re-dimension functionality
                     self._arena_maker_top_button.config(text="← Back", command=self.show_main_window)
-            
+
+            # Update distance entry fields with current values
+            if self._distance_entries:
+                current_distances = self._calculate_distances_from_positions(
+                    self.arena_maker_window.receiver_positions
+                )
+                distance_names = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10']
+                for i, name in enumerate(distance_names):
+                    if name in self._distance_entries:
+                        entry = self._distance_entries[name]
+                        entry.delete(0, tk.END)
+                        entry.insert(0, f"{current_distances[i]:.1f}")
+
             self._arena_maker_frame.pack(fill=tk.BOTH, expand=True)
             # Re-add canvas to active_animations
             if self.arena_maker_window.canvas not in self.active_animations:
@@ -856,6 +1031,78 @@ class GraphicsModule:
 
         # Store reference to graphics module for thread-safe updates
         self.arena_maker_window._graphics_module = self
+
+        # Create distance control panel below the canvas
+        distance_frame = tk.Frame(self._arena_maker_frame, bg='black')
+        distance_frame.pack(fill=tk.X, pady=10)
+
+        # Calculate current distances from receiver positions
+        current_distances = self._calculate_distances_from_positions(
+            self.arena_maker_window.receiver_positions
+        )
+
+        # Distance labels and descriptions
+        distance_info = [
+            ('R1', 'Rcvr 3→2', current_distances[0]),
+            ('R2', 'Rcvr 2→1', current_distances[1]),
+            ('R3', 'Rcvr 1→4', current_distances[2]),
+            ('R4', 'Rcvr 4→5', current_distances[3]),
+            ('R5', 'Rcvr 5→6', current_distances[4]),
+            ('R6', 'Rcvr 6→3', current_distances[5]),
+            ('R7', 'Origin→2 X', current_distances[6]),
+            ('R8', 'Origin→5 X', current_distances[7]),
+            ('R9', 'Rcvr2 Y-ofs', current_distances[8]),
+            ('R10', 'Rcvr5 Y-ofs', current_distances[9])
+        ]
+
+        # Create entry fields for each distance
+        self._distance_entries = {}
+
+        for name, desc, value in distance_info:
+            entry_frame = tk.Frame(distance_frame, bg='black')
+            entry_frame.pack(side=tk.LEFT, padx=10, expand=True)
+
+            # Label with distance name and description
+            label = tk.Label(
+                entry_frame,
+                text=f"{name}\n({desc})",
+                bg='black',
+                fg='#00FFFF',
+                font=('Arial', 10, 'bold')
+            )
+            label.pack()
+
+            # Entry field
+            entry = tk.Entry(
+                entry_frame,
+                font=('Arial', 12),
+                width=10,
+                justify='center'
+            )
+            entry.insert(0, f"{value:.1f}")
+            entry.pack(pady=2)
+
+            # Store reference
+            self._distance_entries[name] = entry
+
+            # Bind Enter key and focus-out to update
+            entry.bind('<Return>', lambda e: self._update_arena_from_distances())
+            entry.bind('<FocusOut>', lambda e: self._update_arena_from_distances())
+
+        # Add an "Apply" button
+        apply_button = tk.Button(
+            distance_frame,
+            text="Apply",
+            command=self._update_arena_from_distances,
+            bg='#39FF14',
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#2BCC10',
+            activeforeground='black',
+            padx=15,
+            pady=5
+        )
+        apply_button.pack(side=tk.LEFT, padx=20)
 
         # Add canvas to active_animations for automatic refreshing
         if hasattr(self.arena_maker_window, 'canvas') and self.arena_maker_window.canvas in self.active_animations:
@@ -1586,13 +1833,20 @@ class ArenaMakerWindow:
                     ha='left', va='bottom')
 
         # Note: tight_layout() removed - not needed for single subplot layouts
-        
+
         # Store plot elements for updating
         self.receiver_scatter = None
         self.receiver_labels = []
         self.connection_line = None
+        self.distance_labels = []  # R1-R6 distance labels
+        self.origin_lines = []     # R7, R8 dashed lines from origin
+        self.origin_labels = []    # R7, R8 distance labels
+        self.r9_line = None        # R9 vertical dashed line (shown only if non-zero)
+        self.r9_label = None       # R9 distance label
+        self.r10_line = None       # R10 vertical dashed line (shown only if non-zero)
+        self.r10_label = None      # R10 distance label
         self._initialize_plot_elements()
-        
+
         # Create legend after plot elements are initialized (so it includes the Receivers label)
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
@@ -1635,11 +1889,11 @@ class ArenaMakerWindow:
         """Initialize plot elements that can be updated."""
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
         receiver_y = [pos[1][1] for pos in self.receiver_positions]
-        
+
         # Store scatter plot
         scatter = self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
         self.receiver_scatter = scatter
-        
+
         # Store text labels
         self.receiver_labels = []
         for receiver_id, (x, y) in self.receiver_positions:
@@ -1648,7 +1902,7 @@ class ArenaMakerWindow:
                         fontsize=9, fontweight='bold', zorder=6,
                         ha='left', va='bottom')
             self.receiver_labels.append(label)
-        
+
         # Store connection line
         connection_order = [0, 1, 2, 5, 4, 3, 0]
         connected_x = [receiver_x[i] for i in connection_order]
@@ -1656,30 +1910,150 @@ class ArenaMakerWindow:
         line, = self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7)
         self.connection_line = line
 
+        # Create distance labels (R1-R6)
+        # R distances: R1(3→2), R2(2→1), R3(1→4), R4(4→5), R5(5→6), R6(6→3)
+        # Receiver IDs: 0=Rcvr1, 1=Rcvr2, 2=Rcvr3, 3=Rcvr4, 4=Rcvr5, 5=Rcvr6
+        self.distance_labels = []
+        pos_dict = {p[0]: p[1] for p in self.receiver_positions}
+
+        # Distance pairs: (name, from_id, to_id)
+        distance_pairs = [
+            ('R1', 2, 1),  # Receiver 3 to 2
+            ('R2', 1, 0),  # Receiver 2 to 1
+            ('R3', 0, 3),  # Receiver 1 to 4
+            ('R4', 3, 4),  # Receiver 4 to 5
+            ('R5', 4, 5),  # Receiver 5 to 6
+            ('R6', 5, 2),  # Receiver 6 to 3
+        ]
+
+        for name, from_id, to_id in distance_pairs:
+            x1, y1 = pos_dict[from_id]
+            x2, y2 = pos_dict[to_id]
+            # Midpoint
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            # Calculate distance
+            dist = abs(y2 - y1) if name in ['R1', 'R2', 'R4', 'R5'] else abs(x2 - x1)
+            label_text = f"{name}\n{dist:.1f}"
+
+            # Offset label to appear INSIDE the arena
+            # For vertical lines (R1, R2), offset to the right (inside)
+            # For vertical lines (R4, R5), offset to the left (inside)
+            # For horizontal lines (R3), offset above (inside)
+            # For horizontal lines (R6), offset below (inside)
+            if name in ['R1', 'R2']:
+                offset_x, offset_y = 15, 0   # Left side: offset right (inside)
+                ha = 'left'
+            elif name in ['R4', 'R5']:
+                offset_x, offset_y = -15, 0  # Right side: offset left (inside)
+                ha = 'right'
+            elif name == 'R3':
+                offset_x, offset_y = 0, 10   # Bottom: offset up (inside)
+                ha = 'center'
+            else:  # R6
+                offset_x, offset_y = 0, -10  # Top: offset down (inside)
+                ha = 'center'
+
+            label = self.ax.text(mid_x + offset_x, mid_y + offset_y, label_text,
+                        color='#FFFF00',  # Yellow for distance labels
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha=ha, va='center',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FFFF00'))
+            self.distance_labels.append(label)
+
+        # Create R7 and R8 dashed lines and labels (origin to receivers 2 and 5)
+        self.origin_lines = []
+        self.origin_labels = []
+
+        # R7: Origin to Receiver 2
+        x2, y2 = pos_dict[1]  # Receiver 2
+        r7_line, = self.ax.plot([0, x2], [0, 0], color='#FF8800', linewidth=2, linestyle='--', zorder=4)
+        self.origin_lines.append(r7_line)
+        r7_dist = abs(x2)
+        r7_label = self.ax.text(x2 / 2, 8, f"R7\n{r7_dist:.1f}",
+                    color='#FF8800',
+                    fontsize=9, fontweight='bold', zorder=8,
+                    ha='center', va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FF8800'))
+        self.origin_labels.append(r7_label)
+
+        # R8: Origin to Receiver 5
+        x5, y5 = pos_dict[4]  # Receiver 5
+        r8_line, = self.ax.plot([0, x5], [0, 0], color='#FF8800', linewidth=2, linestyle='--', zorder=4)
+        self.origin_lines.append(r8_line)
+        r8_dist = abs(x5)
+        r8_label = self.ax.text(x5 / 2, 8, f"R8\n{r8_dist:.1f}",
+                    color='#FF8800',
+                    fontsize=9, fontweight='bold', zorder=8,
+                    ha='center', va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FF8800'))
+        self.origin_labels.append(r8_label)
+
+        # R9: Y-offset of Receiver 2 from origin (vertical dashed line, only shown if non-zero)
+        # R10: Y-offset of Receiver 5 from origin (vertical dashed line, only shown if non-zero)
+        self.r9_line = None
+        self.r9_label = None
+        self.r10_line = None
+        self.r10_label = None
+
+        # R9: Origin to Receiver 2's Y position
+        if abs(y2) > 0.1:  # Only show if non-zero
+            r9_line, = self.ax.plot([x2, x2], [0, y2], color='#00FF88', linewidth=2, linestyle='--', zorder=4)
+            self.r9_line = r9_line
+            r9_dist = y2
+            r9_label = self.ax.text(x2 - 8, y2 / 2, f"R9\n{r9_dist:.1f}",
+                        color='#00FF88',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='right', va='center',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF88'))
+            self.r9_label = r9_label
+
+        # R10: Origin to Receiver 5's Y position
+        if abs(y5) > 0.1:  # Only show if non-zero
+            r10_line, = self.ax.plot([x5, x5], [0, y5], color='#00FF88', linewidth=2, linestyle='--', zorder=4)
+            self.r10_line = r10_line
+            r10_dist = y5
+            r10_label = self.ax.text(x5 + 8, y5 / 2, f"R10\n{r10_dist:.1f}",
+                        color='#00FF88',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='left', va='center',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF88'))
+            self.r10_label = r10_label
+
     def update_receiver_positions(self, new_receiver_positions, width, height):
         """
         Update the receiver positions and redraw the plot.
-        
+
         Args:
             new_receiver_positions: List of (id, (x, y)) tuples for 6 receivers
-            width: New arena width
-            height: New arena height
+            width: New arena width (may be recalculated from actual positions)
+            height: New arena height (may be recalculated from actual positions)
         """
         # Update stored positions
         self.receiver_positions = new_receiver_positions
-        self.grid_width = width
-        self.grid_height = height
-        
-        # Update axis limits
-        self.ax.set_xlim(-width/2 - self.grid_padding, width/2 + self.grid_padding)
-        self.ax.set_ylim(-height/2 - self.grid_padding, height/2 + self.grid_padding)
-        
-        # Redraw compass rose with new axis limits
-        self._draw_compass_rose()
-        
+
         # Get new positions
         receiver_x = [pos[1][0] for pos in new_receiver_positions]
         receiver_y = [pos[1][1] for pos in new_receiver_positions]
+
+        # Calculate actual bounds from receiver positions
+        min_x, max_x = min(receiver_x), max(receiver_x)
+        min_y, max_y = min(receiver_y), max(receiver_y)
+
+        # Calculate actual width and height from positions
+        actual_width = max_x - min_x
+        actual_height = max_y - min_y
+
+        # Update stored dimensions to match actual bounds
+        self.grid_width = actual_width
+        self.grid_height = actual_height
+
+        # Update axis limits based on actual receiver positions with padding
+        self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
+        self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
+
+        # Redraw compass rose with new axis limits
+        self._draw_compass_rose()
         
         # Update scatter plot offsets if it exists
         if self.receiver_scatter:
@@ -1716,12 +2090,160 @@ class ArenaMakerWindow:
         connection_order = [0, 1, 2, 5, 4, 3, 0]
         connected_x = [receiver_x[i] for i in connection_order]
         connected_y = [receiver_y[i] for i in connection_order]
-        
+
         if self.connection_line:
             self.connection_line.set_data(connected_x, connected_y)
         else:
             self.connection_line, = self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7)
-        
+
+        # Update distance labels (R1-R6)
+        pos_dict = {p[0]: p[1] for p in new_receiver_positions}
+        distance_pairs = [
+            ('R1', 2, 1),  # Receiver 3 to 2
+            ('R2', 1, 0),  # Receiver 2 to 1
+            ('R3', 0, 3),  # Receiver 1 to 4
+            ('R4', 3, 4),  # Receiver 4 to 5
+            ('R5', 4, 5),  # Receiver 5 to 6
+            ('R6', 5, 2),  # Receiver 6 to 3
+        ]
+
+        for i, (name, from_id, to_id) in enumerate(distance_pairs):
+            x1, y1 = pos_dict[from_id]
+            x2, y2 = pos_dict[to_id]
+            # Midpoint
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            # Calculate distance (vertical for R1,R2,R4,R5; horizontal for R3,R6)
+            dist = abs(y2 - y1) if name in ['R1', 'R2', 'R4', 'R5'] else abs(x2 - x1)
+            label_text = f"{name}\n{dist:.1f}"
+
+            # Offset label to appear INSIDE the arena
+            if name in ['R1', 'R2']:
+                offset_x, offset_y = 15, 0   # Left side: offset right (inside)
+                ha = 'left'
+            elif name in ['R4', 'R5']:
+                offset_x, offset_y = -15, 0  # Right side: offset left (inside)
+                ha = 'right'
+            elif name == 'R3':
+                offset_x, offset_y = 0, 10   # Bottom: offset up (inside)
+                ha = 'center'
+            else:  # R6
+                offset_x, offset_y = 0, -10  # Top: offset down (inside)
+                ha = 'center'
+
+            if i < len(self.distance_labels):
+                # Update existing label
+                self.distance_labels[i].set_text(label_text)
+                self.distance_labels[i].set_position((mid_x + offset_x, mid_y + offset_y))
+            else:
+                # Create new label if needed
+                label = self.ax.text(mid_x + offset_x, mid_y + offset_y, label_text,
+                            color='#FFFF00',
+                            fontsize=9, fontweight='bold', zorder=8,
+                            ha=ha, va='center',
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FFFF00'))
+                self.distance_labels.append(label)
+
+        # Update R7 and R8 dashed lines and labels
+        x2, y2 = pos_dict[1]  # Receiver 2
+        x5, y5 = pos_dict[4]  # Receiver 5
+
+        # R7: Origin to Receiver 2
+        r7_dist = abs(x2)
+        if len(self.origin_lines) > 0:
+            self.origin_lines[0].set_data([0, x2], [0, 0])
+        else:
+            r7_line, = self.ax.plot([0, x2], [0, 0], color='#FF8800', linewidth=2, linestyle='--', zorder=4)
+            self.origin_lines.append(r7_line)
+
+        if len(self.origin_labels) > 0:
+            self.origin_labels[0].set_text(f"R7\n{r7_dist:.1f}")
+            self.origin_labels[0].set_position((x2 / 2, 8))
+        else:
+            r7_label = self.ax.text(x2 / 2, 8, f"R7\n{r7_dist:.1f}",
+                        color='#FF8800',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='center', va='bottom',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FF8800'))
+            self.origin_labels.append(r7_label)
+
+        # R8: Origin to Receiver 5
+        r8_dist = abs(x5)
+        if len(self.origin_lines) > 1:
+            self.origin_lines[1].set_data([0, x5], [0, 0])
+        else:
+            r8_line, = self.ax.plot([0, x5], [0, 0], color='#FF8800', linewidth=2, linestyle='--', zorder=4)
+            self.origin_lines.append(r8_line)
+
+        if len(self.origin_labels) > 1:
+            self.origin_labels[1].set_text(f"R8\n{r8_dist:.1f}")
+            self.origin_labels[1].set_position((x5 / 2, 8))
+        else:
+            r8_label = self.ax.text(x5 / 2, 8, f"R8\n{r8_dist:.1f}",
+                        color='#FF8800',
+                        fontsize=9, fontweight='bold', zorder=8,
+                        ha='center', va='bottom',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#FF8800'))
+            self.origin_labels.append(r8_label)
+
+        # Update R9: Y-offset of Receiver 2 (only shown if non-zero)
+        r9_val = y2  # y2 is receiver 2's y-position (which is R9)
+        if abs(r9_val) > 0.1:
+            # Show R9 line and label
+            if self.r9_line is None:
+                r9_line, = self.ax.plot([x2, x2], [0, r9_val], color='#00FF88', linewidth=2, linestyle='--', zorder=4)
+                self.r9_line = r9_line
+            else:
+                self.r9_line.set_data([x2, x2], [0, r9_val])
+                self.r9_line.set_visible(True)
+
+            if self.r9_label is None:
+                r9_label = self.ax.text(x2 - 8, r9_val / 2, f"R9\n{r9_val:.1f}",
+                            color='#00FF88',
+                            fontsize=9, fontweight='bold', zorder=8,
+                            ha='right', va='center',
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF88'))
+                self.r9_label = r9_label
+            else:
+                self.r9_label.set_text(f"R9\n{r9_val:.1f}")
+                self.r9_label.set_position((x2 - 8, r9_val / 2))
+                self.r9_label.set_visible(True)
+        else:
+            # Hide R9 line and label if value is zero
+            if self.r9_line is not None:
+                self.r9_line.set_visible(False)
+            if self.r9_label is not None:
+                self.r9_label.set_visible(False)
+
+        # Update R10: Y-offset of Receiver 5 (only shown if non-zero)
+        r10_val = y5  # y5 is receiver 5's y-position (which is R10)
+        if abs(r10_val) > 0.1:
+            # Show R10 line and label
+            if self.r10_line is None:
+                r10_line, = self.ax.plot([x5, x5], [0, r10_val], color='#00FF88', linewidth=2, linestyle='--', zorder=4)
+                self.r10_line = r10_line
+            else:
+                self.r10_line.set_data([x5, x5], [0, r10_val])
+                self.r10_line.set_visible(True)
+
+            if self.r10_label is None:
+                r10_label = self.ax.text(x5 + 8, r10_val / 2, f"R10\n{r10_val:.1f}",
+                            color='#00FF88',
+                            fontsize=9, fontweight='bold', zorder=8,
+                            ha='left', va='center',
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF88'))
+                self.r10_label = r10_label
+            else:
+                self.r10_label.set_text(f"R10\n{r10_val:.1f}")
+                self.r10_label.set_position((x5 + 8, r10_val / 2))
+                self.r10_label.set_visible(True)
+        else:
+            # Hide R10 line and label if value is zero
+            if self.r10_line is not None:
+                self.r10_line.set_visible(False)
+            if self.r10_label is not None:
+                self.r10_label.set_visible(False)
+
         # Redraw canvas if available
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.draw()
@@ -1729,6 +2251,7 @@ class ArenaMakerWindow:
     def close(self):
         """Close the matplotlib window."""
         plt.close(self.fig)
+
 
 class MainWindow:
     def __init__(self):
