@@ -3210,6 +3210,12 @@ class CalibrationWindow:
             ax.set_xticks(range(len(values)))
             ax.set_xticklabels(values, rotation=45, ha='right', fontsize=5)
 
+            # Add label showing most common value below the plot
+            most_common_value = sorted_data[0][0]  # First item is most frequent
+            most_common_count = sorted_data[0][1]
+            ax.set_xlabel(f'Most Common: {int(most_common_value)} (n={most_common_count})',
+                         color='#39FF14', fontsize=7, fontweight='bold')
+
     def get_most_frequent_value(self, receiver_id, run_num):
         """
         Get the most frequent serial value for a receiver in a run.
