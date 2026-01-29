@@ -155,6 +155,12 @@ class GraphicsModule:
 
         # Skip refreshing if queue is paused during window changes
         if not self._queue_paused:
+            # Save current focus before drawing (canvas.draw() can steal focus)
+            try:
+                current_focus = self.root.focus_get()
+            except Exception:
+                current_focus = None
+
             # Refresh all active animation canvases
             for canvas in self.active_animations:
                 if canvas:
@@ -162,6 +168,13 @@ class GraphicsModule:
                         canvas.draw()
                     except Exception as e:
                         print(f"Error refreshing animation: {e}")
+
+            # Restore focus if it was on an entry widget
+            if current_focus is not None:
+                try:
+                    current_focus.focus_set()
+                except Exception:
+                    pass  # Widget may have been destroyed
 
         # Schedule next refresh only if still running and root exists
         if self.running and self.root:
@@ -274,7 +287,9 @@ class GraphicsModule:
         canvas = FigureCanvasTkAgg(self.position_window.fig, master=self._position_frame)
         self.position_window.canvas = canvas
         canvas.draw_idle()  # Non-blocking draw
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.configure(takefocus=False)  # Prevent canvas from stealing keyboard focus
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
 
         # Create control panel frame below the canvas
         control_frame = tk.Frame(self._position_frame, bg='black')
@@ -551,7 +566,9 @@ class GraphicsModule:
         canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=self._calibration_frame)
         self.calibration_window.canvas = canvas
         canvas.draw_idle()  # Non-blocking draw
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.configure(takefocus=False)  # Prevent canvas from stealing keyboard focus
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
 
         # Store reference to graphics module for thread-safe updates
         self.calibration_window._graphics_module = self
@@ -990,11 +1007,15 @@ class GraphicsModule:
 
     def _show_verify_result(self, success, messages):
         """Show a dialog with verification results."""
+        # Pause animations while dialog is open to prevent focus stealing
+        self._pause_process_queue()
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Verification Result")
         dialog.configure(bg='black')
         dialog.transient(self.root)
         dialog.grab_set()
+        dialog.focus_force()  # Ensure dialog has focus
 
         # Center the dialog
         dialog.geometry("500x300")
@@ -1036,11 +1057,16 @@ class GraphicsModule:
             msg_text.insert(tk.END, f"• {msg}\n")
         msg_text.config(state=tk.DISABLED)
 
+        def close_dialog():
+            dialog.destroy()
+            self._resume_process_queue()
+            self.root.focus_force()
+
         # OK button
         ok_button = tk.Button(
             dialog,
             text="OK",
-            command=dialog.destroy,
+            command=close_dialog,
             bg='#00FFFF',
             fg='black',
             font=('Arial', 12, 'bold'),
@@ -1054,21 +1080,25 @@ class GraphicsModule:
         ok_button.pack(pady=10)
 
         # Handle Enter key
-        dialog.bind('<Return>', lambda e: dialog.destroy())
+        dialog.bind('<Return>', lambda e: close_dialog())
 
     def _ask_arena_dimensions(self):
         """
         Show a dialog to ask the user for arena width and height.
-        
+
         Returns:
             tuple (width, height) or (None, None) if cancelled
         """
+        # Pause animations while dialog is open to prevent focus stealing
+        self._pause_process_queue()
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Arena Dimensions")
         dialog.configure(bg='black')
         dialog.transient(self.root)
         dialog.grab_set()
-        
+        dialog.focus_force()  # Ensure dialog has focus
+
         # Center the dialog
         dialog.geometry("400x200")
         dialog.resizable(False, False)
@@ -1143,6 +1173,7 @@ class GraphicsModule:
             except ValueError:
                 # Show error
                 error_label.config(text="Please enter valid numbers!")
+            #self.root.force_focus()
         
         def on_cancel():
             result['cancelled'] = True
@@ -1184,7 +1215,13 @@ class GraphicsModule:
         
         # Wait for dialog to close
         dialog.wait_window()
-        
+
+        # Resume animations after dialog closes
+        self._resume_process_queue()
+
+        # Return focus to main window
+        self.root.focus_force()
+
         if result['cancelled']:
             return None, None
         return result['width'], result['height']
@@ -1468,11 +1505,30 @@ class GraphicsModule:
         )
         title_label.pack(side=tk.LEFT, padx=10)
 
+        # Restore Focus button - workaround for when keyboard focus is lost
+        restore_focus_button = tk.Button(
+            top_bar,
+            text="Restore Keyboard",
+            command=lambda: self.root.focus_set(),
+            bg='#444444',
+            fg='white',
+            font=('Arial', 9),
+            activebackground='#666666',
+            activeforeground='white',
+            relief=tk.RAISED,
+            bd=1,
+            padx=5,
+            pady=2
+        )
+        restore_focus_button.pack(side=tk.LEFT, padx=10)
+
         # Embed the matplotlib figure in tkinter
         canvas = FigureCanvasTkAgg(self.arena_maker_window.fig, master=self._arena_maker_frame)
         self.arena_maker_window.canvas = canvas
         canvas.draw_idle()  # Non-blocking draw
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.configure(takefocus=False)  # Prevent canvas from stealing keyboard focus
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
 
         # Store reference to graphics module for thread-safe updates
         self.arena_maker_window._graphics_module = self
@@ -1777,7 +1833,7 @@ class GraphicsModule:
 
         # Resume queue processing after window change is complete
         self._resume_process_queue()
-    
+
     def show_stats_window(self):
         """Show the stats window."""
         pass
@@ -2863,9 +2919,9 @@ class ArenaMakerWindow:
             self.ax.legend(handles, labels, loc='upper right', facecolor='#222222',
                           edgecolor='white', labelcolor='white')
 
-        # Redraw canvas if available
+        # Redraw canvas if available (use draw_idle to avoid stealing focus)
         if hasattr(self, 'canvas') and self.canvas:
-            self.canvas.draw()
+            self.canvas.draw_idle()
 
     def update_arena(self, receiver_positions):
         """
@@ -3091,9 +3147,9 @@ class ArenaMakerWindow:
             if self.r10_label is not None:
                 self.r10_label.set_visible(False)
 
-        # Redraw canvas if available
+        # Redraw canvas if available (use draw_idle to avoid stealing focus)
         if hasattr(self, 'canvas') and self.canvas:
-            self.canvas.draw()
+            self.canvas.draw_idle()
 
     def close(self):
         """Close the matplotlib window."""
