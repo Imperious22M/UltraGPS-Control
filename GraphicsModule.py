@@ -718,6 +718,71 @@ class GraphicsModule:
             r9 = float(self._distance_entries['R9'].get())
             r10 = float(self._distance_entries['R10'].get())
 
+            # Initialize previous R9/R10 tracking if not exists
+            if not hasattr(self, '_prev_r9'):
+                self._prev_r9 = 0.0
+            if not hasattr(self, '_prev_r10'):
+                self._prev_r10 = 0.0
+
+            prev_r9 = self._prev_r9
+            prev_r10 = self._prev_r10
+
+            # Handle R9 changes - adjust both R1 and R2 to keep receivers 1 and 3 in place
+            # When R9 > 0: add R9 to R2, subtract R9 from R1
+            # When R9 < 0: subtract R9 from R2, add R9 to R1
+            if r9 != prev_r9:
+                # Restore previous adjustment
+                if prev_r9 > 0:
+                    r2 = r2 - prev_r9  # Remove what was added to R2
+                    r1 = r1 + prev_r9  # Remove what was subtracted from R1
+                elif prev_r9 < 0:
+                    r2 = r2 - prev_r9  # Remove what was subtracted from R2 (add negative)
+                    r1 = r1 + prev_r9  # Remove what was added to R1 (subtract negative)
+
+                # Apply new adjustment
+                if r9 > 0:
+                    r2 = r2 + r9  # Add R9 to R2
+                    r1 = r1 - r9  # Subtract R9 from R1
+                elif r9 < 0:
+                    r2 = r2 + r9  # Add R9 to R2 (because of negative r2)
+                    r1 = r1 - r9  # Substract R1 and R9
+
+                # Update entry fields
+                self._distance_entries['R1'].delete(0, 'end')
+                self._distance_entries['R1'].insert(0, f"{r1:.1f}")
+                self._distance_entries['R2'].delete(0, 'end')
+                self._distance_entries['R2'].insert(0, f"{r2:.1f}")
+
+                self._prev_r9 = r9
+
+            # Handle R10 changes - adjust both R4 and R5 to keep receivers 4 and 6 in place
+            # When R10 > 0: add R10 to R4, subtract R10 from R5
+            # When R10 < 0: subtract R10 from R4, add R10 to R5
+            if r10 != prev_r10:
+                # Restore previous adjustment
+                if prev_r10 > 0:
+                    r4 = r4 - prev_r10  # Remove what was added to R4
+                    r5 = r5 + prev_r10  # Remove what was subtracted from R5
+                elif prev_r10 < 0:
+                    r4 = r4 - prev_r10  # Remove what was subtracted from R4 (add negative)
+                    r5 = r5 + prev_r10  # Remove what was added to R5 (subtract negative)
+
+                # Apply new adjustment
+                if r10 > 0:
+                    r4 = r4 + r10  # Add R10 to R4
+                    r5 = r5 - r10  # Subtract R10 from R5
+                elif r10 < 0:
+                    r4 = r4 + r10  # Subtract R10 from R4 (subtracting negative = add)
+                    r5 = r5 - r10  # Add R10 to R5 (adding negative = subtract)
+
+                # Update entry fields
+                self._distance_entries['R4'].delete(0, 'end')
+                self._distance_entries['R4'].insert(0, f"{r4:.1f}")
+                self._distance_entries['R5'].delete(0, 'end')
+                self._distance_entries['R5'].insert(0, f"{r5:.1f}")
+
+                self._prev_r10 = r10
+
             # Validate positive values for R1-R8 (R9, R10 can be any value including 0 or negative)
             if any(v <= 0 for v in [r1, r2, r3, r4, r5, r6, r7, r8]):
                 return  # Invalid input, don't update
