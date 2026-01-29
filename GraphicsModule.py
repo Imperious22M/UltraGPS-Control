@@ -1859,6 +1859,12 @@ class PositionWindow:
         self.grid_padding = 20 # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
 
+        # Store compass rose elements for updating
+        self.compass_x_arrow = None
+        self.compass_x_text = None
+        self.compass_y_arrow = None
+        self.compass_y_text = None
+
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
         if receiver_positions is None:
             raise ValueError("Must provide receiver positions!")
@@ -1970,29 +1976,9 @@ class PositionWindow:
             self.distance_windows.append(distance_window)
             self.sane_leds.append(led)
 
-        # Add X/Y compass rose in top left corner
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        compass_x = 0#x_min + (x_max - x_min) * 0.1  # 10% from left edge
-        compass_y = 0#y_max - (y_max - y_min) * 0.1  # 10% from top edge
-        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
-        
-        # Draw X axis arrow (pointing right)
-        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
-                        xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
-                    'X', color='white', fontsize=12, fontweight='bold',
-                    ha='center', va='top', zorder=7)
+        # Initialize compass rose
+        self._draw_compass_rose()
 
-        # Draw Y axis arrow (pointing up)
-        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
-                        xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
-                    'Y', color='white', fontsize=12, fontweight='bold',
-                    ha='right', va='center', zorder=7)
-        
         # Draw receivers (neon magenta dots)
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
         receiver_y = [pos[1][1] for pos in self.receiver_positions]
@@ -2058,6 +2044,9 @@ class PositionWindow:
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
         self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
 
+        # Redraw compass rose with new axis limits
+        self._draw_compass_rose()
+
         # Clear existing receiver scatter and labels from main axes
         # We need to redraw receivers since scatter doesn't have set_offsets for easy update
         # Remove old receiver elements (keep other elements like vehicle points)
@@ -2103,6 +2092,41 @@ class PositionWindow:
         # Redraw canvas if available
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.draw()
+
+    def _draw_compass_rose(self):
+        """Draw or update the X/Y compass rose in the center of the plot."""
+        # Remove existing compass rose elements if they exist
+        if self.compass_x_arrow:
+            self.compass_x_arrow.remove()
+        if self.compass_x_text:
+            self.compass_x_text.remove()
+        if self.compass_y_arrow:
+            self.compass_y_arrow.remove()
+        if self.compass_y_text:
+            self.compass_y_text.remove()
+
+        # Calculate arrow length based on current axis limits
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        compass_x = 0
+        compass_y = 0
+        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
+
+        # Draw X axis arrow (pointing right)
+        self.compass_x_arrow = self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.compass_x_text = self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
+                    'X', color='white', fontsize=12, fontweight='bold',
+                    ha='center', va='top', zorder=7)
+
+        # Draw Y axis arrow (pointing up)
+        self.compass_y_arrow = self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.compass_y_text = self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
+                    'Y', color='white', fontsize=12, fontweight='bold',
+                    ha='right', va='center', zorder=7)
 
     def update_cords(self, x, y):
         """
@@ -2395,6 +2419,12 @@ class CalibrationWindow:
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
 
+        # Store compass rose elements for updating
+        self.compass_x_arrow = None
+        self.compass_x_text = None
+        self.compass_y_arrow = None
+        self.compass_y_text = None
+
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
         if receiver_positions is None:
             raise ValueError("Must provide receiver positions!")
@@ -2426,28 +2456,8 @@ class CalibrationWindow:
         for spine in self.ax.spines.values():
             spine.set_color('white')
 
-        # Add X/Y compass rose in center
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        compass_x = 0
-        compass_y = 0
-        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
-
-        # Draw X axis arrow (pointing right)
-        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
-                        xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
-                    'X', color='white', fontsize=12, fontweight='bold',
-                    ha='center', va='top', zorder=7)
-
-        # Draw Y axis arrow (pointing up)
-        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
-                        xytext=(compass_x, compass_y),
-                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
-                    'Y', color='white', fontsize=12, fontweight='bold',
-                    ha='right', va='center', zorder=7)
+        # Initialize compass rose
+        self._draw_compass_rose()
 
         # Draw receivers (neon magenta dots)
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
@@ -2495,6 +2505,9 @@ class CalibrationWindow:
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
         self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
 
+        # Redraw compass rose with new axis limits
+        self._draw_compass_rose()
+
         # Clear existing receiver scatter and labels
         for artist in self.ax.collections[:]:
             if artist.get_label() == 'Receivers':
@@ -2532,6 +2545,41 @@ class CalibrationWindow:
         # Redraw canvas if available
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.draw()
+
+    def _draw_compass_rose(self):
+        """Draw or update the X/Y compass rose in the center of the plot."""
+        # Remove existing compass rose elements if they exist
+        if self.compass_x_arrow:
+            self.compass_x_arrow.remove()
+        if self.compass_x_text:
+            self.compass_x_text.remove()
+        if self.compass_y_arrow:
+            self.compass_y_arrow.remove()
+        if self.compass_y_text:
+            self.compass_y_text.remove()
+
+        # Calculate arrow length based on current axis limits
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        compass_x = 0
+        compass_y = 0
+        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
+
+        # Draw X axis arrow (pointing right)
+        self.compass_x_arrow = self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.compass_x_text = self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
+                    'X', color='white', fontsize=12, fontweight='bold',
+                    ha='center', va='top', zorder=7)
+
+        # Draw Y axis arrow (pointing up)
+        self.compass_y_arrow = self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
+                        xytext=(compass_x, compass_y),
+                        arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
+        self.compass_y_text = self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
+                    'Y', color='white', fontsize=12, fontweight='bold',
+                    ha='right', va='center', zorder=7)
 
     def update_cords(self, x, y):
         """
