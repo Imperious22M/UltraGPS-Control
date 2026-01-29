@@ -58,7 +58,8 @@ class GraphicsModule:
                                 )
 
         self.calibration_window = CalibrationWindow(
-                                receiver_positions=self.settings_module.get_tower_coordinates()
+                                receiver_positions=self.settings_module.get_tower_coordinates(),
+                                settings_module=self.settings_module
                                 )
 
         self.arena_maker_window = ArenaMakerWindow(
@@ -524,6 +525,8 @@ class GraphicsModule:
             # Re-add canvas to active_animations
             if self.calibration_window.canvas not in self.active_animations:
                 self.active_animations.append(self.calibration_window.canvas)
+            # Update offset display with current values
+            self._update_offset_display()
             self._resume_process_queue()
             return
 
@@ -531,7 +534,7 @@ class GraphicsModule:
         self._calibration_frame = tk.Frame(self.root, bg='black')
         self._calibration_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Create a top bar frame for the back button
+        # Create a top bar frame for the back button and start calibration button
         top_bar = tk.Frame(self._calibration_frame, bg='black')
         top_bar.pack(fill=tk.X, pady=5)
 
@@ -562,13 +565,88 @@ class GraphicsModule:
         )
         title_label.pack(side=tk.LEFT, padx=10)
 
+        # Start Calibration button (centered)
+        start_cal_button = tk.Button(
+            top_bar,
+            text="Start Calibration",
+            command=self._start_calibration,
+            bg='#FFD700',  # Gold
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#FFC000',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=15,
+            pady=5
+        )
+        start_cal_button.pack(side=tk.LEFT, padx=50)
+
+        # Create main content frame (canvas + offset panel)
+        content_frame = tk.Frame(self._calibration_frame, bg='black')
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
         # Embed the matplotlib figure in tkinter
-        canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=self._calibration_frame)
+        canvas = FigureCanvasTkAgg(self.calibration_window.fig, master=content_frame)
         self.calibration_window.canvas = canvas
         canvas.draw_idle()  # Non-blocking draw
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.configure(takefocus=False)  # Prevent canvas from stealing keyboard focus
         canvas_widget.pack(fill=tk.BOTH, expand=True)
+
+        # Create Ax + b Receiver Offsets panel below the canvas
+        offset_panel = tk.Frame(self._calibration_frame, bg='#222222', relief=tk.RAISED, bd=2)
+        offset_panel.pack(fill=tk.X, pady=5, padx=10)
+
+        # Offset panel title
+        offset_title = tk.Label(
+            offset_panel,
+            text="Ax + b Receiver Offsets",
+            bg='#222222',
+            fg='#FFD700',  # Gold
+            font=('Arial', 12, 'bold')
+        )
+        offset_title.pack(pady=5)
+
+        # Create offset labels frame with 2 columns
+        offset_labels_frame = tk.Frame(offset_panel, bg='#222222')
+        offset_labels_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Store offset labels for updating
+        self._offset_labels = {}
+
+        # Left column: Receivers 3, 2, 1 (from top to bottom)
+        left_column = tk.Frame(offset_labels_frame, bg='#222222')
+        left_column.pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        for recv_id in [2, 1, 0]:  # Receivers 3, 2, 1
+            label = tk.Label(
+                left_column,
+                text=f"Receiver {recv_id + 1} Offset: 0.0x + 0.0",
+                bg='#222222',
+                fg='white',
+                font=('Arial', 10)
+            )
+            label.pack(anchor='w', pady=2)
+            self._offset_labels[recv_id] = label
+
+        # Right column: Receivers 6, 5, 4 (from top to bottom)
+        right_column = tk.Frame(offset_labels_frame, bg='#222222')
+        right_column.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+
+        for recv_id in [5, 4, 3]:  # Receivers 6, 5, 4
+            label = tk.Label(
+                right_column,
+                text=f"Receiver {recv_id + 1} Offset: 0.0x + 0.0",
+                bg='#222222',
+                fg='white',
+                font=('Arial', 10)
+            )
+            label.pack(anchor='w', pady=2)
+            self._offset_labels[recv_id] = label
+
+        # Update offset display with current values from settings
+        self._update_offset_display()
 
         # Store reference to graphics module for thread-safe updates
         self.calibration_window._graphics_module = self
@@ -579,6 +657,386 @@ class GraphicsModule:
         self.active_animations.append(canvas)
 
         # Resume queue processing after window change is complete
+        self._resume_process_queue()
+
+    def _update_offset_display(self):
+        """Update the offset display labels with current values from settings."""
+        if not hasattr(self, '_offset_labels'):
+            return
+
+        for recv_id in range(6):
+            if recv_id in self._offset_labels:
+                offset = self.settings_module.get_receiver_offset(recv_id)
+                if offset:
+                    slope = offset.get('slope', 0.0)
+                    intercept = offset.get('intercept', 0.0)
+                    self._offset_labels[recv_id].config(
+                        text=f"Receiver {recv_id + 1} Offset: {slope:.4f}x + {intercept:.4f}"
+                    )
+
+    def _start_calibration(self):
+        """Start the calibration process with popup dialogs."""
+        # Get calibration point 1 coordinates
+        cal_point_1 = self.settings_module.cal_point_1
+        min_reads = self.settings_module.calibration_reads
+
+        # Show calibration point 1 on arena
+        self.calibration_window.show_calibration_point(cal_point_1, 1)
+
+        # Pause queue processing for dialog
+        self._pause_process_queue()
+
+        # Create popup dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Calibration - Run 1")
+        dialog.geometry("400x200")
+        dialog.configure(bg='black')
+        dialog.transient(self.root)
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass  # Grab failed, continue without it
+        dialog.focus_force()
+
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+
+        # Instructions
+        instructions = tk.Label(
+            dialog,
+            text=f"Place the transmitter at Calibration Point 1\n\nCoordinates: ({cal_point_1[0]:.1f}, {cal_point_1[1]:.1f})\n\nMinimum reads required: {min_reads}",
+            bg='black',
+            fg='#00FFFF',
+            font=('Arial', 12),
+            justify=tk.CENTER
+        )
+        instructions.pack(pady=20)
+
+        # Button frame
+        button_frame = tk.Frame(dialog, bg='black')
+        button_frame.pack(pady=20)
+
+        result = {'ready': False}
+
+        def on_ready():
+            result['ready'] = True
+            dialog.destroy()
+
+        def on_cancel():
+            result['ready'] = False
+            dialog.destroy()
+
+        ready_button = tk.Button(
+            button_frame,
+            text="Ready",
+            command=on_ready,
+            bg='#39FF14',
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=5
+        )
+        ready_button.pack(side=tk.LEFT, padx=20)
+
+        cancel_button = tk.Button(
+            button_frame,
+            text="Cancel",
+            command=on_cancel,
+            bg='#FF4444',
+            fg='white',
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=5
+        )
+        cancel_button.pack(side=tk.LEFT, padx=20)
+
+        dialog.wait_window()
+
+        self._resume_process_queue()
+
+        if not result['ready']:
+            # User cancelled
+            self.calibration_window.hide_calibration_point()
+            return
+
+        # Clear run 1 data
+        self.calibration_window.clear_histogram_data(1)
+
+        # Start calibration run 1
+        self._run_calibration(1, min_reads)
+
+    def _run_calibration(self, run_num, min_reads):
+        """
+        Run the calibration process for a specific run.
+
+        Args:
+            run_num: 1 or 2 for which calibration run
+            min_reads: Minimum number of reads required for each receiver
+        """
+        self.calibration_window.calibration_running = True
+        self.calibration_window.current_run = run_num
+
+        # Start calibration thread
+        cal_thread = threading.Thread(
+            target=self._calibration_thread,
+            args=(run_num, min_reads),
+            daemon=True,
+            name=f'calibration_run_{run_num}'
+        )
+        cal_thread.start()
+        self.active_threads.append(cal_thread)
+
+    def _calibration_thread(self, run_num, min_reads):
+        """
+        Thread function for calibration run.
+        Collects serial messages until min_reads threshold is met for all receivers.
+        """
+        # Initial read to clear network
+        try:
+            self.control_module.update()
+            _ = self.control_module.get_serial_message()
+        except Exception as e:
+            print(f"Error clearing network: {e}")
+
+        # Track when to update histograms (every N reads instead of every read)
+        read_count = 0
+        histogram_update_interval = 5  # Update histograms every 5 reads
+
+        # Keep reading until all receivers have met min_reads threshold
+        while self.calibration_window.calibration_running:
+            try:
+                # Request new reading
+                self.control_module.update()
+                serial_msg = self.control_module.get_serial_message()
+
+                # Parse serial message - assume space-separated values, one per receiver
+                try:
+                    serial_values = serial_msg.strip().split()
+                    if len(serial_values) >= 6:
+                        for recv_id in range(6):
+                            try:
+                                value = float(serial_values[recv_id])
+                                self.calibration_window.add_serial_reading(recv_id, value, run_num)
+                            except (ValueError, IndexError):
+                                pass
+                        read_count += 1
+                except Exception as e:
+                    print(f"Error parsing serial message: {e}")
+                    continue
+
+                # Update histograms periodically instead of every read
+                if read_count % histogram_update_interval == 0:
+                    self.root.after(0, lambda n=run_num: self._update_all_histograms(n))
+
+                # Check if all receivers have met min_reads threshold
+                all_met = True
+                for recv_id in range(6):
+                    if self.calibration_window.get_max_count(recv_id, run_num) < min_reads:
+                        all_met = False
+                        break
+
+                if all_met:
+                    break
+
+            except Exception as e:
+                print(f"Error in calibration thread: {e}")
+                break
+
+        # Final histogram update
+        self.root.after(0, lambda n=run_num: self._update_all_histograms(n))
+
+        self.calibration_window.calibration_running = False
+        # Schedule next step on main thread
+        self.root.after(0, lambda: self._calibration_run_complete(run_num, min_reads))
+
+    def _update_all_histograms(self, run_num):
+        """Update all histograms for a given run."""
+        for recv_id in range(6):
+            self.calibration_window.update_histogram(recv_id, run_num)
+
+
+    def _calibration_run_complete(self, run_num, min_reads):
+        """Called when a calibration run is complete."""
+        if run_num == 1:
+            # Run 1 complete, start Run 2
+            cal_point_2 = self.settings_module.cal_point_2
+
+            # Show calibration point 2 on arena
+            self.calibration_window.show_calibration_point(cal_point_2, 2)
+
+            # Pause queue processing for dialog
+            self._pause_process_queue()
+
+            # Create popup dialog for Run 2
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Calibration - Run 2")
+            dialog.geometry("400x200")
+            dialog.configure(bg='black')
+            dialog.transient(self.root)
+            try:
+                dialog.grab_set()
+            except tk.TclError:
+                pass  # Grab failed, continue without it
+            dialog.focus_force()
+
+            dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+
+            instructions = tk.Label(
+                dialog,
+                text=f"Run 1 Complete!\n\nPlace the transmitter at Calibration Point 2\n\nCoordinates: ({cal_point_2[0]:.1f}, {cal_point_2[1]:.1f})",
+                bg='black',
+                fg='#00FFFF',
+                font=('Arial', 12),
+                justify=tk.CENTER
+            )
+            instructions.pack(pady=20)
+
+            button_frame = tk.Frame(dialog, bg='black')
+            button_frame.pack(pady=20)
+
+            result = {'ready': False}
+
+            def on_ready():
+                result['ready'] = True
+                dialog.destroy()
+
+            def on_cancel():
+                result['ready'] = False
+                dialog.destroy()
+
+            ready_button = tk.Button(
+                button_frame,
+                text="Ready",
+                command=on_ready,
+                bg='#39FF14',
+                fg='black',
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=5
+            )
+            ready_button.pack(side=tk.LEFT, padx=20)
+
+            cancel_button = tk.Button(
+                button_frame,
+                text="Cancel",
+                command=on_cancel,
+                bg='#FF4444',
+                fg='white',
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=5
+            )
+            cancel_button.pack(side=tk.LEFT, padx=20)
+
+            dialog.wait_window()
+
+            self._resume_process_queue()
+
+            if not result['ready']:
+                self.calibration_window.hide_calibration_point()
+                return
+
+            # Clear run 2 data
+            self.calibration_window.clear_histogram_data(2)
+
+            # Start calibration run 2
+            self._run_calibration(2, min_reads)
+
+        else:
+            # Run 2 complete, calculate offsets
+            self.calibration_window.hide_calibration_point()
+            self._calculate_and_save_offsets()
+
+    def _calculate_and_save_offsets(self):
+        """
+        Calculate and save the offset values for all receivers.
+        a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
+        b = known_dist_1 - (a * valid_count_1)
+        """
+        for recv_id in range(6):
+            # Get known distances from settings
+            cal_distances = self.settings_module.get_receiver_cal_distances(recv_id)
+            if not cal_distances or len(cal_distances) < 2:
+                print(f"Missing calibration distances for receiver {recv_id}")
+                continue
+
+            known_dist_1 = cal_distances[0]  # Distance to cal_point_1
+            known_dist_2 = cal_distances[1]  # Distance to cal_point_2
+
+            # Get most frequent serial values from each run
+            valid_count_1 = self.calibration_window.get_most_frequent_value(recv_id, 1)
+            valid_count_2 = self.calibration_window.get_most_frequent_value(recv_id, 2)
+
+            if valid_count_1 is None or valid_count_2 is None:
+                print(f"Missing calibration data for receiver {recv_id}")
+                continue
+
+            # Calculate slope (a) and intercept (b)
+            try:
+                if valid_count_1 == valid_count_2:
+                    print(f"Warning: Same serial value for both runs on receiver {recv_id}")
+                    continue
+
+                a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
+                b = known_dist_1 - (a * valid_count_1)
+
+                # Save to settings (note: per task doc, slope=a, intercept=b)
+                self.settings_module.set_receiver_offset(recv_id, a, b)
+
+                print(f"Receiver {recv_id + 1}: a={a:.4f}, b={b:.4f}")
+
+            except Exception as e:
+                print(f"Error calculating offset for receiver {recv_id}: {e}")
+
+        # Update the offset display
+        self._update_offset_display()
+
+        # Show completion dialog with a small delay to allow previous grabs to release
+        self.root.after(100, self._show_calibration_complete_dialog)
+
+    def _show_calibration_complete_dialog(self):
+        """Show the calibration complete dialog."""
+        self._pause_process_queue()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Calibration Complete")
+        dialog.geometry("300x150")
+        dialog.configure(bg='black')
+        dialog.transient(self.root)
+
+        # Try to grab, but don't fail if another grab is active
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass  # Grab failed, continue without it
+
+        dialog.focus_force()
+
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 300, self.root.winfo_rooty() + 250))
+
+        msg = tk.Label(
+            dialog,
+            text="Calibration Complete!\n\nOffset values have been calculated\nand saved to the configuration file.",
+            bg='black',
+            fg='#39FF14',
+            font=('Arial', 12),
+            justify=tk.CENTER
+        )
+        msg.pack(pady=30)
+
+        ok_button = tk.Button(
+            dialog,
+            text="OK",
+            command=dialog.destroy,
+            bg='#39FF14',
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            padx=30,
+            pady=5
+        )
+        ok_button.pack()
+
+        dialog.wait_window()
         self._resume_process_queue()
 
     def _calculate_receiver_positions_from_dimensions(self, width, height):
@@ -2322,8 +2780,17 @@ class PositionWindow:
         graphics_module = getattr(self, '_graphics_module', None)
         print(f"Position update thread started. Graphics module running: {graphics_module.running if graphics_module else 'None'}")
 
-        # Instantiate the position module with the array of all receiver positions
-        pos_module = PositionModule(self.receiver_positions)
+        # Load receiver offsets from settings module if available
+        receiver_offsets = {}
+        if graphics_module and hasattr(graphics_module, 'settings_module'):
+            settings = graphics_module.settings_module
+            for recv_id in range(6):
+                offset = settings.get_receiver_offset(recv_id)
+                if offset:
+                    receiver_offsets[recv_id] = offset
+
+        # Instantiate the position module with the array of all receiver positions and offsets
+        pos_module = PositionModule(self.receiver_positions, receiver_offsets=receiver_offsets)
 
         while self.update_thread_run and (graphics_module is None or graphics_module.running):
             try:
@@ -2333,10 +2800,13 @@ class PositionWindow:
 
                 # Request the system to send a pulse and calculate the distances
                 control_module.update()
-                raw_distances = control_module.get_receiver_distances()
+                # Old method: get pre-calculated distances from server
+                # raw_distances = control_module.get_receiver_distances()
+                # New method: use serial messages and convert using calibrated offsets
                 serial_messages = control_module.get_serial_message()
+                raw_distances = pos_module.serial_to_distances(serial_messages)
                 print(f"Serial Message: {serial_messages}")
-                print(f"Raw Distances: {raw_distances}")
+                print(f"Raw Distances (from serial): {raw_distances}")
 
                 # Apply median filter to reduce noise and outliers
                 #filtered_distances = self.apply_median_filter(raw_distances)
@@ -2404,24 +2874,38 @@ class PositionWindow:
         plt.close(self.fig)
 
 class CalibrationWindow:
-    def __init__(self, receiver_positions=None):
+    def __init__(self, receiver_positions=None, settings_module=None):
         """
         Initialize the CalibrationWindow with matplotlib.
-        Contains only the X/Y position plot for calibration purposes.
+        Contains position arena, histogram plots for Run 1 and Run 2, and offset display.
 
         Args:
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
+            settings_module: Reference to SettingsModule for reading/saving offsets
         """
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
+        self.settings_module = settings_module
 
         # Store compass rose elements for updating
         self.compass_x_arrow = None
         self.compass_x_text = None
         self.compass_y_arrow = None
         self.compass_y_text = None
+
+        # Calibration state
+        self.calibration_running = False
+        self.current_run = 0  # 0 = not running, 1 = run 1, 2 = run 2
+
+        # Histogram data storage: {receiver_id: {serial_value: count}}
+        self.run1_data = {i: {} for i in range(6)}
+        self.run2_data = {i: {} for i in range(6)}
+
+        # Calibration point display elements
+        self.cal_point_scatter = None
+        self.cal_point_label = None
 
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
         if receiver_positions is None:
@@ -2437,11 +2921,14 @@ class CalibrationWindow:
         min_x, max_x = min(receiver_x), max(receiver_x)
         min_y, max_y = min(receiver_y), max(receiver_y)
 
-        # Initialize matplotlib figure with single plot
-        self.fig = plt.figure(figsize=(10, 10), facecolor='black')
+        # Initialize matplotlib figure with complex layout using GridSpec
+        # Layout: Position arena on left, Run1 histograms in middle, Run2 histograms on right
+        self.fig = plt.figure(figsize=(18, 10), facecolor='black')
+        gs = self.fig.add_gridspec(4, 7, width_ratios=[3, 1, 1, 0.2, 1, 1, 0.2],
+                                   height_ratios=[0.1, 1, 1, 1], hspace=0.3, wspace=0.3)
 
-        # Create main arena axes
-        self.ax = self.fig.add_subplot(111)
+        # Create main arena axes (spans left column, rows 1-3)
+        self.ax = self.fig.add_subplot(gs[1:4, 0])
         self.ax.set_facecolor('black')
         self.ax.set_xlim(min_x - self.grid_padding, max_x + self.grid_padding)
         self.ax.set_ylim(min_y - self.grid_padding, max_y + self.grid_padding)
@@ -2449,7 +2936,7 @@ class CalibrationWindow:
         self.ax.grid(True, alpha=0.3, color='gray')
         self.ax.set_xlabel('X Position', color='white')
         self.ax.set_ylabel('Y Position', color='white')
-        self.ax.set_title('Vehicle Position Tracking', color='white')
+        self.ax.set_title('Calibration Arena', color='white')
         self.ax.tick_params(colors='white')
         for spine in self.ax.spines.values():
             spine.set_color('white')
@@ -2460,7 +2947,7 @@ class CalibrationWindow:
         # Draw receivers (neon magenta dots)
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
         receiver_y = [pos[1][1] for pos in self.receiver_positions]
-        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')  # Neon magenta
+        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
 
         # Add ID labels next to each receiver+1 (to match real-life labeling)
         for receiver_id, (x, y) in self.receiver_positions:
@@ -2468,20 +2955,76 @@ class CalibrationWindow:
                         fontsize=10, fontweight='bold', zorder=6,
                         ha='left', va='bottom')
 
-        # Draw neon cyan line connecting receivers (connect in order, then close the loop)
-        # Connect receivers in a rectangular pattern
-        connection_order = [0, 1, 2, 5, 4, 3, 0]  # Connect around the rectangle
+        # Draw neon cyan line connecting receivers
+        connection_order = [0, 1, 2, 5, 4, 3, 0]
         connected_x = [receiver_x[i] for i in connection_order]
         connected_y = [receiver_y[i] for i in connection_order]
-        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')  # Neon cyan
+        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
 
         # Initialize vehicle position plot (neon green)
-        self.vehicle_point, = self.ax.plot([], [], 'o', color='#39FF14', markersize=10, zorder=6, label='Position')  # Neon green
+        self.vehicle_point, = self.ax.plot([], [], 'o', color='#39FF14', markersize=10, zorder=6, label='Position')
         self.vehicle_trail, = self.ax.plot([], [], '-', color='#39FF14', linewidth=1, alpha=0.5, label='Trail')
 
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
-        # Note: tight_layout() removed - not needed for single subplot layouts
+        # Create Run 1 histogram axes (columns 1-2, rows 1-3)
+        # Layout: 3,6 top row; 2,5 middle row; 1,4 bottom row
+        self.run1_axes = {}
+        run1_positions = [(2, 1), (1, 2), (0, 3)]  # (receiver_id, row) for left column
+        run1_positions_right = [(5, 1), (4, 2), (3, 3)]  # (receiver_id, row) for right column
+
+        for recv_id, row in run1_positions:
+            ax = self.fig.add_subplot(gs[row, 1])
+            self._setup_histogram_axis(ax, f"Receiver {recv_id + 1} Serial")
+            self.run1_axes[recv_id] = ax
+
+        for recv_id, row in run1_positions_right:
+            ax = self.fig.add_subplot(gs[row, 2])
+            self._setup_histogram_axis(ax, f"Receiver {recv_id + 1} Serial")
+            self.run1_axes[recv_id] = ax
+
+        # Run 1 title
+        run1_title_ax = self.fig.add_subplot(gs[0, 1:3])
+        run1_title_ax.set_facecolor('black')
+        run1_title_ax.axis('off')
+        run1_title_ax.text(0.5, 0.5, 'Run 1', color='#00FFFF', fontsize=14, fontweight='bold',
+                          ha='center', va='center', transform=run1_title_ax.transAxes)
+
+        # Create Run 2 histogram axes (columns 4-5, rows 1-3)
+        self.run2_axes = {}
+        run2_positions = [(2, 1), (1, 2), (0, 3)]  # (receiver_id, row) for left column
+        run2_positions_right = [(5, 1), (4, 2), (3, 3)]  # (receiver_id, row) for right column
+
+        for recv_id, row in run2_positions:
+            ax = self.fig.add_subplot(gs[row, 4])
+            self._setup_histogram_axis(ax, f"Receiver {recv_id + 1} Serial")
+            self.run2_axes[recv_id] = ax
+
+        for recv_id, row in run2_positions_right:
+            ax = self.fig.add_subplot(gs[row, 5])
+            self._setup_histogram_axis(ax, f"Receiver {recv_id + 1} Serial")
+            self.run2_axes[recv_id] = ax
+
+        # Run 2 title
+        run2_title_ax = self.fig.add_subplot(gs[0, 4:6])
+        run2_title_ax.set_facecolor('black')
+        run2_title_ax.axis('off')
+        run2_title_ax.text(0.5, 0.5, 'Run 2', color='#00FFFF', fontsize=14, fontweight='bold',
+                          ha='center', va='center', transform=run2_title_ax.transAxes)
+
+        # Store histogram bar containers for updates
+        self.run1_bars = {i: None for i in range(6)}
+        self.run2_bars = {i: None for i in range(6)}
+
+    def _setup_histogram_axis(self, ax, title):
+        """Setup a histogram axis with consistent styling."""
+        ax.set_facecolor('black')
+        ax.set_title(title, color='white', fontsize=8)
+        ax.tick_params(colors='white', labelsize=6)
+        for spine in ax.spines.values():
+            spine.set_color('white')
+        ax.set_xlabel('Serial Value', color='white', fontsize=6)
+        ax.set_ylabel('Count', color='white', fontsize=6)
 
     def update_arena(self, receiver_positions):
         """
@@ -2561,7 +3104,7 @@ class CalibrationWindow:
         y_min, y_max = self.ax.get_ylim()
         compass_x = 0
         compass_y = 0
-        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
+        arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08
 
         # Draw X axis arrow (pointing right)
         self.compass_x_arrow = self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
@@ -2578,6 +3121,136 @@ class CalibrationWindow:
         self.compass_y_text = self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
                     'Y', color='white', fontsize=12, fontweight='bold',
                     ha='right', va='center', zorder=7)
+
+    def show_calibration_point(self, point_coords, point_num):
+        """
+        Display a calibration point on the arena as a green diamond.
+
+        Args:
+            point_coords: (x, y) coordinates of the calibration point
+            point_num: 1 or 2 indicating which calibration point
+        """
+        # Remove existing calibration point display
+        self.hide_calibration_point()
+
+        x, y = point_coords
+        self.cal_point_scatter = self.ax.scatter([x], [y], c='#39FF14', s=200, marker='D',
+                                                  zorder=8, label=f'Cal Point {point_num}')
+        self.cal_point_label = self.ax.text(x + 10, y + 10, f'Cal {point_num}',
+                                            color='#39FF14', fontsize=10, fontweight='bold',
+                                            zorder=8)
+
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.draw_idle()
+
+    def hide_calibration_point(self):
+        """Remove calibration point display from arena."""
+        if self.cal_point_scatter:
+            self.cal_point_scatter.remove()
+            self.cal_point_scatter = None
+        if self.cal_point_label:
+            self.cal_point_label.remove()
+            self.cal_point_label = None
+
+    def clear_histogram_data(self, run_num):
+        """Clear histogram data for a specific run."""
+        if run_num == 1:
+            self.run1_data = {i: {} for i in range(6)}
+        elif run_num == 2:
+            self.run2_data = {i: {} for i in range(6)}
+
+    def add_serial_reading(self, receiver_id, serial_value, run_num):
+        """
+        Add a serial reading to the histogram data.
+
+        Args:
+            receiver_id: Receiver ID (0-5)
+            serial_value: The serial value read
+            run_num: 1 or 2 for which run
+        """
+        if run_num == 1:
+            data = self.run1_data
+        else:
+            data = self.run2_data
+
+        if serial_value in data[receiver_id]:
+            data[receiver_id][serial_value] += 1
+        else:
+            data[receiver_id][serial_value] = 1
+
+    def update_histogram(self, receiver_id, run_num):
+        """
+        Update the histogram display for a specific receiver.
+
+        Args:
+            receiver_id: Receiver ID (0-5)
+            run_num: 1 or 2 for which run
+        """
+        if run_num == 1:
+            ax = self.run1_axes[receiver_id]
+            data = self.run1_data[receiver_id]
+        else:
+            ax = self.run2_axes[receiver_id]
+            data = self.run2_data[receiver_id]
+
+        # Clear existing bars
+        ax.clear()
+        self._setup_histogram_axis(ax, f"Receiver {receiver_id + 1} Serial")
+
+        if not data:
+            return
+
+        # Sort by count (descending) to show most frequent at left
+        sorted_data = sorted(data.items(), key=lambda x: x[1], reverse=True)
+        values = [str(int(v[0])) for v in sorted_data[:10]]  # Show top 10
+        counts = [v[1] for v in sorted_data[:10]]
+
+        if values:
+            bars = ax.bar(range(len(values)), counts, color='#00FFFF', alpha=0.7)
+            ax.set_xticks(range(len(values)))
+            ax.set_xticklabels(values, rotation=45, ha='right', fontsize=5)
+
+    def get_most_frequent_value(self, receiver_id, run_num):
+        """
+        Get the most frequent serial value for a receiver in a run.
+
+        Args:
+            receiver_id: Receiver ID (0-5)
+            run_num: 1 or 2 for which run
+
+        Returns:
+            The serial value with the highest count, or None if no data
+        """
+        if run_num == 1:
+            data = self.run1_data[receiver_id]
+        else:
+            data = self.run2_data[receiver_id]
+
+        if not data:
+            return None
+
+        return max(data.items(), key=lambda x: x[1])[0]
+
+    def get_max_count(self, receiver_id, run_num):
+        """
+        Get the maximum count for any serial value for a receiver in a run.
+
+        Args:
+            receiver_id: Receiver ID (0-5)
+            run_num: 1 or 2 for which run
+
+        Returns:
+            The maximum count, or 0 if no data
+        """
+        if run_num == 1:
+            data = self.run1_data[receiver_id]
+        else:
+            data = self.run2_data[receiver_id]
+
+        if not data:
+            return 0
+
+        return max(data.values())
 
     def update_cords(self, x, y):
         """
@@ -2598,9 +3271,6 @@ class CalibrationWindow:
             trail_x = [pos[0] for pos in self.position_history]
             trail_y = [pos[1] for pos in self.position_history]
             self.vehicle_trail.set_data(trail_x, trail_y)
-
-        # Note: Canvas will be automatically redrawn by _refresh_animations()
-        # which runs every 10ms and calls canvas.draw() on all active_animations
 
     def close(self):
         """Close the matplotlib window."""

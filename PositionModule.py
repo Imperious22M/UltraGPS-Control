@@ -5,7 +5,7 @@ from scipy.optimize import least_squares
 
 
 class PositionModule:
-    def __init__(self, receiver_positions, max_differential=30):
+    def __init__(self, receiver_positions, max_differential=30, receiver_offsets=None):
         """
         Helper class that contains all the methods for calculating transmitter position
         using the receiver known coordinates and receiver measured distances
@@ -15,6 +15,8 @@ class PositionModule:
                 Must be in order (index 0 -> Receiver 1)
             max_differential (float): Maximum allowed change in distance (cm/s) for a
                 receiver to be considered "sane". Default is 30.
+            receiver_offsets (dict): Optional dictionary of receiver offsets
+                {receiver_id: {'slope': a, 'intercept': b}}
         """
 
         # Sort incoming position array by the embedded tower id
@@ -25,11 +27,75 @@ class PositionModule:
         self.last_good_position = None
         self.last_sane_indices = None
 
+        # Store receiver offsets for serial-to-distance conversion
+        self.receiver_offsets = receiver_offsets or {}
+
         # Calculate maximum distance between any two receivers
         # This is used to validate that reported distances are within arena bounds
         self.max_receiver_distance = self._calculate_max_receiver_distance()
         #print(self.receiver_coordinates)
         #print(self.receiver_count)
+
+    def set_receiver_offsets(self, offsets):
+        """
+        Set the receiver offsets for serial-to-distance conversion.
+
+        Args:
+            offsets (dict): {receiver_id: {'slope': a, 'intercept': b}}
+        """
+        self.receiver_offsets = offsets
+
+    def serial_to_distances(self, serial_message):
+        """
+        Convert serial message values to distances using calibrated offsets.
+
+        For each receiver: distance = ticks * a + b
+        where a = slope and b = intercept from calibration.
+
+        This method is compatible with the same format returned by
+        ControlModule.get_receiver_distances().
+
+        Args:
+            serial_message (str): Space-separated serial values from receivers,
+                or list of serial values
+
+        Returns:
+            tuple: Distances for each receiver in the same format as get_receiver_distances()
+        """
+        # Parse serial message if it's a string
+        if isinstance(serial_message, str):
+            serial_values = serial_message.strip().split()
+            try:
+                serial_values = [float(v) for v in serial_values]
+            except ValueError as e:
+                print(f"Error parsing serial message: {e}")
+                return tuple([0.0] * self.receiver_count)
+        else:
+            serial_values = list(serial_message)
+
+        # Ensure we have enough values
+        if len(serial_values) < self.receiver_count:
+            print(f"Not enough serial values: got {len(serial_values)}, expected {self.receiver_count}")
+            return tuple([0.0] * self.receiver_count)
+
+        distance_list = []
+        for recv_id in range(self.receiver_count):
+            ticks = serial_values[recv_id]
+
+            # Get offset parameters for this receiver
+            if recv_id in self.receiver_offsets:
+                a = self.receiver_offsets[recv_id].get('slope', 1.0)
+                b = self.receiver_offsets[recv_id].get('intercept', 0.0)
+            else:
+                # Default: no calibration (distance = ticks)
+                a = 1.0
+                b = 0.0
+
+            # Calculate distance
+            distance = ticks * a + b
+            distance_list.append(distance)
+
+        return tuple(distance_list)
 
     def _calculate_max_receiver_distance(self):
         """

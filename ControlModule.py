@@ -380,5 +380,178 @@ class NetworkClass:
         self.close()
 
 class CalibrateSystem:
-    def __init__(self):
-        pass
+    """
+    Standalone calibration system that can run calibration without graphical elements.
+    Collects serial messages and calculates offset values for each receiver.
+    """
+
+    def __init__(self, control_module: ControlModule):
+        """
+        Initialize the CalibrateSystem with a control module for communication.
+
+        Args:
+            control_module: ControlModule instance for UDP communication
+        """
+        self.control_module = control_module
+        self.receiver_count = control_module.receiver_count
+
+    def run_calibration(self, min_reads):
+        """
+        Perform a single calibration run, collecting serial messages until
+        min_reads threshold is met for all receivers.
+
+        This is a standalone function that does not use any graphical elements.
+
+        Args:
+            min_reads: Minimum number of identical readings required for each receiver
+
+        Returns:
+            dict: {receiver_id: most_frequent_serial_value} for each receiver
+        """
+        # Data storage: {receiver_id: {serial_value: count}}
+        data = {i: {} for i in range(self.receiver_count)}
+
+        # Initial read to clear network
+        try:
+            self.control_module.update()
+            _ = self.control_module.get_serial_message()
+        except Exception as e:
+            print(f"Error clearing network: {e}")
+
+        # Keep reading until all receivers have met min_reads threshold
+        while True:
+            try:
+                # Request new reading
+                self.control_module.update()
+                serial_msg = self.control_module.get_serial_message()
+
+                # Parse serial message - assume space-separated values, one per receiver
+                try:
+                    serial_values = serial_msg.strip().split()
+                    if len(serial_values) >= self.receiver_count:
+                        for recv_id in range(self.receiver_count):
+                            try:
+                                value = float(serial_values[recv_id])
+                                if value in data[recv_id]:
+                                    data[recv_id][value] += 1
+                                else:
+                                    data[recv_id][value] = 1
+                            except (ValueError, IndexError):
+                                pass
+                except Exception as e:
+                    print(f"Error parsing serial message: {e}")
+                    continue
+
+                # Check if all receivers have met min_reads threshold
+                all_met = True
+                for recv_id in range(self.receiver_count):
+                    if not data[recv_id]:
+                        all_met = False
+                        break
+                    max_count = max(data[recv_id].values())
+                    if max_count < min_reads:
+                        all_met = False
+                        break
+
+                if all_met:
+                    break
+
+            except Exception as e:
+                print(f"Error in calibration run: {e}")
+                break
+
+        # Return most frequent value for each receiver
+        result = {}
+        for recv_id in range(self.receiver_count):
+            if data[recv_id]:
+                most_frequent = max(data[recv_id].items(), key=lambda x: x[1])[0]
+                result[recv_id] = most_frequent
+            else:
+                result[recv_id] = None
+
+        return result
+
+    def calculate_offsets(self, run1_values, run2_values, known_distances):
+        """
+        Calculate slope (a) and intercept (b) offsets for each receiver.
+
+        Formula:
+            a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
+            b = known_dist_1 - (a * valid_count_1)
+
+        Args:
+            run1_values: dict {receiver_id: serial_value} from run 1
+            run2_values: dict {receiver_id: serial_value} from run 2
+            known_distances: dict {receiver_id: (dist_to_cal_point_1, dist_to_cal_point_2)}
+
+        Returns:
+            dict: {receiver_id: {'slope': a, 'intercept': b}} for each receiver
+        """
+        offsets = {}
+
+        for recv_id in range(self.receiver_count):
+            if recv_id not in run1_values or recv_id not in run2_values:
+                print(f"Missing calibration data for receiver {recv_id}")
+                continue
+
+            if recv_id not in known_distances:
+                print(f"Missing known distances for receiver {recv_id}")
+                continue
+
+            valid_count_1 = run1_values[recv_id]
+            valid_count_2 = run2_values[recv_id]
+
+            if valid_count_1 is None or valid_count_2 is None:
+                print(f"Missing serial values for receiver {recv_id}")
+                continue
+
+            known_dist_1, known_dist_2 = known_distances[recv_id]
+
+            try:
+                if valid_count_1 == valid_count_2:
+                    print(f"Warning: Same serial value for both runs on receiver {recv_id}")
+                    continue
+
+                a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
+                b = known_dist_1 - (a * valid_count_1)
+
+                offsets[recv_id] = {'slope': a, 'intercept': b}
+
+            except Exception as e:
+                print(f"Error calculating offset for receiver {recv_id}: {e}")
+
+        return offsets
+
+    def full_calibration(self, min_reads, known_distances):
+        """
+        Perform a complete two-run calibration and calculate offsets.
+
+        Note: This is a blocking operation that requires user interaction
+        to position the transmitter between runs. For automated testing,
+        use run_calibration() and calculate_offsets() separately.
+
+        Args:
+            min_reads: Minimum number of identical readings required for each receiver
+            known_distances: dict {receiver_id: (dist_to_cal_point_1, dist_to_cal_point_2)}
+
+        Returns:
+            dict: {receiver_id: {'slope': a, 'intercept': b}} for each receiver
+        """
+        print("Starting calibration run 1...")
+        print("Please place transmitter at calibration point 1")
+        input("Press Enter when ready...")
+
+        run1_values = self.run_calibration(min_reads)
+        print(f"Run 1 complete: {run1_values}")
+
+        print("\nStarting calibration run 2...")
+        print("Please place transmitter at calibration point 2")
+        input("Press Enter when ready...")
+
+        run2_values = self.run_calibration(min_reads)
+        print(f"Run 2 complete: {run2_values}")
+
+        offsets = self.calculate_offsets(run1_values, run2_values, known_distances)
+        print(f"\nCalculated offsets: {offsets}")
+
+        return offsets
