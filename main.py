@@ -1,6 +1,6 @@
 from ControlModule import CommsModule, ControlModule
 from ControlModule import NetworkClass
-from GraphicsModule import PositionWindow
+from GraphicsModule import PositionWindow, MainWindow
 from GraphicsModule import GraphicsModule
 
 import time
@@ -11,7 +11,7 @@ def main():
     testGraphics = GraphicsModule()
 
     testGraphics.start_tk_window()
-    testGraphics.show_position_window()
+    testGraphics.show_main_window()  # Show main menu first
 
     # Main loop will block all execution. All async tasks should begin prior to this call
     testGraphics.tkinter_main()

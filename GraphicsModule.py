@@ -27,10 +27,14 @@ class GraphicsModule:
         self.active_animations = [] #FIFO list of active animations that need refreshing
 
         # Cached frames for fast window switching (show/hide instead of destroy/recreate)
+        self._main_frame = None
         self._position_frame = None
         self._calibration_frame = None
         self._arena_maker_frame = None
         self._frames_initialized = False
+        
+        # Store reference to arena maker top bar button for conditional display
+        self._arena_maker_top_button = None
 
         # Instantiate control module
         self.control_module = ControlModule("127.0.0.1")
@@ -57,6 +61,9 @@ class GraphicsModule:
                                 receiver_positions=self.settings_module.get_tower_coordinates()
                                 )
 
+        # Instantiate the main window (tkinter-only, no matplotlib)
+        self.main_window = MainWindow()
+
     def start_tk_window(self):
         """ 
         Setup the tk window and necessary hooks
@@ -64,6 +71,10 @@ class GraphicsModule:
         self.root = tk.Tk()
         self.root.title("UltraGPS Control")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        # Set minimum window size to ensure visibility
+        self.root.minsize(1000, 1000)
+        # Ensure window is visible
+        self.root.deiconify()
 
     def tkinter_main(self):
         """
@@ -169,6 +180,8 @@ class GraphicsModule:
 
     def _hide_all_frames(self):
         """Hide all cached frames."""
+        if self._main_frame:
+            self._main_frame.pack_forget()
         if self._position_frame:
             self._position_frame.pack_forget()
         if self._calibration_frame:
@@ -215,8 +228,39 @@ class GraphicsModule:
             return
 
         # First time setup - create the frame
-        self._position_frame = tk.Frame(self.root)
+        self._position_frame = tk.Frame(self.root, bg='black')
         self._position_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create a top bar frame for the back button
+        top_bar = tk.Frame(self._position_frame, bg='black')
+        top_bar.pack(fill=tk.X, pady=5)
+
+        # Back button in top right
+        back_button = tk.Button(
+            top_bar,
+            text="← Back",
+            command=self.show_main_window,
+            bg='#39FF14',  # Neon green
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            activebackground='#2BCC10',
+            activeforeground='black',
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        back_button.pack(side=tk.RIGHT, padx=10)
+
+        # Title label
+        title_label = tk.Label(
+            top_bar,
+            text="Position Tracking",
+            bg='black',
+            fg='#39FF14',  # Neon green
+            font=('Arial', 16, 'bold')
+        )
+        title_label.pack(side=tk.LEFT, padx=10)
 
         # Embed the matplotlib figure in tkinter
         canvas = FigureCanvasTkAgg(self.position_window.fig, master=self._position_frame)
@@ -468,7 +512,7 @@ class GraphicsModule:
         back_button = tk.Button(
             top_bar,
             text="← Back",
-            command=self.show_position_window,
+            command=self.show_main_window,
             bg='#39FF14',  # Neon green
             fg='black',
             font=('Arial', 12, 'bold'),
@@ -508,13 +552,213 @@ class GraphicsModule:
         # Resume queue processing after window change is complete
         self._resume_process_queue()
 
+    def _calculate_receiver_positions_from_dimensions(self, width, height):
+        """
+        Calculate receiver positions in a rectangular pattern based on arena dimensions.
+        Pattern: Left side (top to bottom) = Receivers 3, 2, 1
+                 Right side (top to bottom) = Receivers 6, 5, 4
+        
+        Args:
+            width (float): Arena width in cm
+            height (float): Arena height in cm
+            
+        Returns:
+            list of tuples: [(id, (x, y)), ...] for 6 receivers
+        """
+        # Left side (top to bottom): Receivers 3, 2, 1 (ids 2, 1, 0)
+        # Right side (top to bottom): Receivers 6, 5, 4 (ids 5, 4, 3)
+        
+        half_width = width / 2.0
+        half_height = height / 2.0
+        
+        positions = [
+            (0, (-half_width, -half_height)),   # Receiver 1 (id 0): Left side, bottom
+            (1, (-half_width, 0)),             # Receiver 2 (id 1): Left side, middle
+            (2, (-half_width, half_height)),   # Receiver 3 (id 2): Left side, top
+            (3, (half_width, -half_height)),   # Receiver 4 (id 3): Right side, bottom
+            (4, (half_width, 0)),              # Receiver 5 (id 4): Right side, middle
+            (5, (half_width, half_height))     # Receiver 6 (id 5): Right side, top
+        ]
+        
+        return positions
+
+    def _ask_arena_dimensions(self):
+        """
+        Show a dialog to ask the user for arena width and height.
+        
+        Returns:
+            tuple (width, height) or (None, None) if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Arena Dimensions")
+        dialog.configure(bg='black')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        
+        result = {'width': None, 'height': None, 'cancelled': False}
+        
+        # Title
+        title_label = tk.Label(
+            dialog,
+            text="Enter Arena Dimensions",
+            bg='black',
+            fg='#00FFFF',
+            font=('Arial', 16, 'bold')
+        )
+        title_label.pack(pady=10)
+        
+        # Width input
+        width_frame = tk.Frame(dialog, bg='black')
+        width_frame.pack(pady=5)
+        tk.Label(
+            width_frame,
+            text="Width (cm):",
+            bg='black',
+            fg='white',
+            font=('Arial', 12),
+            width=15
+        ).pack(side=tk.LEFT, padx=5)
+        width_entry = tk.Entry(width_frame, font=('Arial', 12), width=15)
+        width_entry.pack(side=tk.LEFT, padx=5)
+        width_entry.focus()
+        
+        # Height input
+        height_frame = tk.Frame(dialog, bg='black')
+        height_frame.pack(pady=5)
+        tk.Label(
+            height_frame,
+            text="Height (cm):",
+            bg='black',
+            fg='white',
+            font=('Arial', 12),
+            width=15
+        ).pack(side=tk.LEFT, padx=5)
+        height_entry = tk.Entry(height_frame, font=('Arial', 12), width=15)
+        height_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Error message frame (initially empty)
+        error_frame = tk.Frame(dialog, bg='black')
+        error_frame.pack(pady=5)
+        error_label = tk.Label(
+            error_frame,
+            text="",
+            bg='black',
+            fg='red',
+            font=('Arial', 10)
+        )
+        error_label.pack()
+        
+        def on_ok():
+            # Clear any previous error
+            error_label.config(text="")
+            
+            try:
+                width = float(width_entry.get())
+                height = float(height_entry.get())
+                if width > 0 and height > 0:
+                    result['width'] = width
+                    result['height'] = height
+                    dialog.destroy()
+                else:
+                    # Show error
+                    error_label.config(text="Dimensions must be positive numbers!")
+            except ValueError:
+                # Show error
+                error_label.config(text="Please enter valid numbers!")
+        
+        def on_cancel():
+            result['cancelled'] = True
+            dialog.destroy()
+        
+        # Buttons
+        button_frame = tk.Frame(dialog, bg='black')
+        button_frame.pack(pady=10)
+        
+        ok_button = tk.Button(
+            button_frame,
+            text="OK",
+            command=on_ok,
+            bg='#39FF14',
+            fg='black',
+            font=('Arial', 12, 'bold'),
+            width=10,
+            padx=10,
+            pady=5
+        )
+        ok_button.pack(side=tk.LEFT, padx=10)
+        
+        cancel_button = tk.Button(
+            button_frame,
+            text="Cancel",
+            command=on_cancel,
+            bg='#FF0000',
+            fg='white',
+            font=('Arial', 12, 'bold'),
+            width=10,
+            padx=10,
+            pady=5
+        )
+        cancel_button.pack(side=tk.LEFT, padx=10)
+        
+        # Handle Enter key
+        width_entry.bind('<Return>', lambda e: height_entry.focus())
+        height_entry.bind('<Return>', lambda e: on_ok())
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        if result['cancelled']:
+            return None, None
+        return result['width'], result['height']
+
+    def _redimension_arena(self):
+        """Handle re-dimension button click - ask for new dimensions and redraw arena."""
+        width, height = self._ask_arena_dimensions()
+        if width is None or height is None:
+            # User cancelled, do nothing
+            return
+        
+        # Calculate receiver positions from dimensions
+        new_receiver_positions = self._calculate_receiver_positions_from_dimensions(width, height)
+        
+        # Update the arena maker window with new positions
+        self.arena_maker_window.update_receiver_positions(new_receiver_positions, width, height)
+        
+        # Update settings module with new positions
+        for receiver_id, (x, y) in new_receiver_positions:
+            self.settings_module.set_receiver_position(receiver_id, x, y)
+
     def show_arena_maker_window(self):
         """
         Display the ArenaMakerWindow in a tkinter frame.
         Frees resources from PositionWindow and shows the arena maker view.
+        If settings are not valid, prompts user for arena dimensions and recalculates receiver positions.
         """
         if not self.root:
             return
+
+        # Check if settings are not valid - if so, ask for dimensions and recalculate
+        settings_invalid = not self.settings_module.valid_settings
+        if settings_invalid:
+            width, height = self._ask_arena_dimensions()
+            if width is None or height is None:
+                # User cancelled, go back to main window (which will redirect back here)
+                self._resume_process_queue()
+                return
+            
+            # Calculate receiver positions from dimensions
+            new_receiver_positions = self._calculate_receiver_positions_from_dimensions(width, height)
+            
+            # Update the arena maker window with new positions
+            self.arena_maker_window.update_receiver_positions(new_receiver_positions, width, height)
+            
+            # Update settings module with new positions
+            for receiver_id, (x, y) in new_receiver_positions:
+                self.settings_module.set_receiver_position(receiver_id, x, y)
 
         # Pause queue processing during window change
         self._pause_process_queue()
@@ -531,8 +775,17 @@ class GraphicsModule:
         # Hide all frames instead of destroying
         self._hide_all_frames()
 
-        # If arena maker frame already exists, just show it
+        # If arena maker frame already exists, update button visibility and show it
         if self._arena_maker_frame:
+            # Update button based on settings validity
+            if self._arena_maker_top_button:
+                if settings_invalid:
+                    # Show re-dimension button, hide back button
+                    self._arena_maker_top_button.config(text="Re-dimension Arena", command=self._redimension_arena)
+                else:
+                    # Show back button, hide re-dimension functionality
+                    self._arena_maker_top_button.config(text="← Back", command=self.show_main_window)
+            
             self._arena_maker_frame.pack(fill=tk.BOTH, expand=True)
             # Re-add canvas to active_animations
             if self.arena_maker_window.canvas not in self.active_animations:
@@ -544,26 +797,46 @@ class GraphicsModule:
         self._arena_maker_frame = tk.Frame(self.root, bg='black')
         self._arena_maker_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Create a top bar frame for the back button
+        # Create a top bar frame for the button
         top_bar = tk.Frame(self._arena_maker_frame, bg='black')
         top_bar.pack(fill=tk.X, pady=5)
 
-        # Back button in top right
-        back_button = tk.Button(
-            top_bar,
-            text="← Back",
-            command=self.show_position_window,
-            bg='#39FF14',  # Neon green
-            fg='black',
-            font=('Arial', 12, 'bold'),
-            activebackground='#2BCC10',
-            activeforeground='black',
-            relief=tk.RAISED,
-            bd=2,
-            padx=10,
-            pady=5
-        )
-        back_button.pack(side=tk.RIGHT, padx=10)
+        # Create button based on settings validity
+        if settings_invalid:
+            # Show re-dimension button when settings are invalid
+            top_button = tk.Button(
+                top_bar,
+                text="Re-dimension Arena",
+                command=self._redimension_arena,
+                bg='#00FFFF',  # Neon cyan
+                fg='black',
+                font=('Arial', 12, 'bold'),
+                activebackground='#00CCCC',
+                activeforeground='black',
+                relief=tk.RAISED,
+                bd=2,
+                padx=10,
+                pady=5
+            )
+        else:
+            # Show back button when settings are valid
+            top_button = tk.Button(
+                top_bar,
+                text="← Back",
+                command=self.show_main_window,
+                bg='#39FF14',  # Neon green
+                fg='black',
+                font=('Arial', 12, 'bold'),
+                activebackground='#2BCC10',
+                activeforeground='black',
+                relief=tk.RAISED,
+                bd=2,
+                padx=10,
+                pady=5
+            )
+        
+        top_button.pack(side=tk.RIGHT, padx=10)
+        self._arena_maker_top_button = top_button
 
         # Title label
         title_label = tk.Label(
@@ -593,8 +866,68 @@ class GraphicsModule:
         self._resume_process_queue()
 
     def show_main_window(self):
-        """Show the main tkinter window."""
-        pass  # Placeholder for now
+        """
+        Display the MainWindow with navigation buttons.
+        Shows title "Ultra GPS Control" and three buttons: Position, Calibration, Setup.
+        If settings are not valid, shows the Arena Maker window instead.
+        """
+        if not self.root:
+            return
+
+        # Check if settings are valid before showing main window
+        if not self.settings_module.valid_settings:
+            # Settings are not valid, show arena maker window instead
+            self.show_arena_maker_window()
+            return
+
+        # Pause queue processing during window change
+        self._pause_process_queue()
+
+        # Stop the position update thread
+        if self.position_window:
+            self.position_window.update_thread_run = False
+
+        # Remove all canvases from active_animations
+        if self.position_window and hasattr(self.position_window, 'canvas'):
+            if self.position_window.canvas in self.active_animations:
+                self.active_animations.remove(self.position_window.canvas)
+        if self.calibration_window and hasattr(self.calibration_window, 'canvas'):
+            if self.calibration_window.canvas in self.active_animations:
+                self.active_animations.remove(self.calibration_window.canvas)
+        if self.arena_maker_window and hasattr(self.arena_maker_window, 'canvas'):
+            if self.arena_maker_window.canvas in self.active_animations:
+                self.active_animations.remove(self.arena_maker_window.canvas)
+
+        # Hide all frames instead of destroying
+        self._hide_all_frames()
+
+        # If main frame already exists, just show it
+        if self._main_frame:
+            self._main_frame.pack(fill=tk.BOTH, expand=True)
+            # Ensure root window is visible and updated
+            self.root.deiconify()
+            self.root.update()
+            self._resume_process_queue()
+            return
+
+        # First time setup - create the frame
+        self._main_frame = tk.Frame(self.root, bg='black')
+        self._main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Set up button callbacks before building
+        self.main_window.on_position_click = self.show_position_window
+        self.main_window.on_calibration_click = self.show_calibration_window
+        self.main_window.on_setup_click = self.show_arena_maker_window
+
+        # Build the MainWindow UI inside the frame
+        self.main_window.build(self._main_frame)
+
+        # Ensure root window is visible and updated
+        self.root.deiconify()
+        self.root.update()
+
+        # Resume queue processing after window change is complete
+        self._resume_process_queue()
     
     def show_stats_window(self):
         """Show the stats window."""
@@ -786,7 +1119,7 @@ class PositionWindow:
 
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
-        plt.tight_layout()
+        #plt.tight_layout()
 
         # Thread running variable
         self.update_thread_run = False
@@ -1165,7 +1498,7 @@ class CalibrationWindow:
 
         self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
 
-        plt.tight_layout()
+        # Note: tight_layout() removed - not needed for single subplot layouts
 
     def update_cords(self, x, y):
         """
@@ -1211,7 +1544,6 @@ class ArenaMakerWindow:
         self.grid_width = grid_width
         self.grid_height = grid_height
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
-        self.position_history = deque(maxlen=50)  # Store last 50 positions
 
         # Set receiver positions (6 receivers in a rectangular arrangement if not provided)
         if receiver_positions is None:
@@ -1238,7 +1570,45 @@ class ArenaMakerWindow:
         for spine in self.ax.spines.values():
             spine.set_color('white')
 
-        # Add X/Y compass rose in center
+        # Store compass rose elements for updating
+        self.compass_x_arrow = None
+        self.compass_x_text = None
+        self.compass_y_arrow = None
+        self.compass_y_text = None
+        
+        # Initialize compass rose
+        self._draw_compass_rose()
+
+        # Draw origin point (blue dot at 0,0)
+        self.ax.scatter([0], [0], c='#0080FF', s=120, zorder=5)  # Blue
+        self.ax.text(5, 5, '(0, 0)', color='#0080FF',
+                    fontsize=9, fontweight='bold', zorder=6,
+                    ha='left', va='bottom')
+
+        # Note: tight_layout() removed - not needed for single subplot layouts
+        
+        # Store plot elements for updating
+        self.receiver_scatter = None
+        self.receiver_labels = []
+        self.connection_line = None
+        self._initialize_plot_elements()
+        
+        # Create legend after plot elements are initialized (so it includes the Receivers label)
+        self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
+
+    def _draw_compass_rose(self):
+        """Draw or update the X/Y compass rose in the center of the plot."""
+        # Remove existing compass rose elements if they exist
+        if self.compass_x_arrow:
+            self.compass_x_arrow.remove()
+        if self.compass_x_text:
+            self.compass_x_text.remove()
+        if self.compass_y_arrow:
+            self.compass_y_arrow.remove()
+        if self.compass_y_text:
+            self.compass_y_text.remove()
+        
+        # Calculate arrow length based on current axis limits
         x_min, x_max = self.ax.get_xlim()
         y_min, y_max = self.ax.get_ylim()
         compass_x = 0
@@ -1246,70 +1616,228 @@ class ArenaMakerWindow:
         arrow_length = min((x_max - x_min), (y_max - y_min)) * 0.08  # 8% of smaller dimension
 
         # Draw X axis arrow (pointing right)
-        self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
+        self.compass_x_arrow = self.ax.annotate('', xy=(compass_x + arrow_length, compass_y),
                         xytext=(compass_x, compass_y),
                         arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
+        self.compass_x_text = self.ax.text(compass_x + arrow_length * 0.5, compass_y - arrow_length * 0.3,
                     'X', color='white', fontsize=12, fontweight='bold',
                     ha='center', va='top', zorder=7)
 
         # Draw Y axis arrow (pointing up)
-        self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
+        self.compass_y_arrow = self.ax.annotate('', xy=(compass_x, compass_y + arrow_length),
                         xytext=(compass_x, compass_y),
                         arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
+        self.compass_y_text = self.ax.text(compass_x - arrow_length * 0.3, compass_y + arrow_length * 0.5,
                     'Y', color='white', fontsize=12, fontweight='bold',
                     ha='right', va='center', zorder=7)
 
-        # Draw receivers (neon magenta dots)
+    def _initialize_plot_elements(self):
+        """Initialize plot elements that can be updated."""
         receiver_x = [pos[1][0] for pos in self.receiver_positions]
         receiver_y = [pos[1][1] for pos in self.receiver_positions]
-        self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')  # Neon magenta
-
-        # Add ID labels next to each receiver+1 (to match real-life labeling)
+        
+        # Store scatter plot
+        scatter = self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
+        self.receiver_scatter = scatter
+        
+        # Store text labels
+        self.receiver_labels = []
         for receiver_id, (x, y) in self.receiver_positions:
-            self.ax.text(x + 5, y + 5, str(receiver_id + 1), color='white',
-                        fontsize=10, fontweight='bold', zorder=6,
+            label_text = f"{receiver_id + 1}\n({x:.1f}, {y:.1f})"
+            label = self.ax.text(x + 5, y + 5, label_text, color='white',
+                        fontsize=9, fontweight='bold', zorder=6,
                         ha='left', va='bottom')
-
-        # Draw neon cyan line connecting receivers (connect in order, then close the loop)
-        # Connect receivers in a rectangular pattern
-        connection_order = [0, 1, 2, 5, 4, 3, 0]  # Connect around the rectangle
+            self.receiver_labels.append(label)
+        
+        # Store connection line
+        connection_order = [0, 1, 2, 5, 4, 3, 0]
         connected_x = [receiver_x[i] for i in connection_order]
         connected_y = [receiver_y[i] for i in connection_order]
-        self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')  # Neon cyan
+        line, = self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7)
+        self.connection_line = line
 
-        # Initialize vehicle position plot (neon green)
-        self.vehicle_point, = self.ax.plot([], [], 'o', color='#39FF14', markersize=10, zorder=6, label='Position')  # Neon green
-        self.vehicle_trail, = self.ax.plot([], [], '-', color='#39FF14', linewidth=1, alpha=0.5, label='Trail')
-
-        self.ax.legend(loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
-
-        plt.tight_layout()
-
-    def update_cords(self, x, y):
+    def update_receiver_positions(self, new_receiver_positions, width, height):
         """
-        Update the vehicle coordinates of the plot
-
+        Update the receiver positions and redraw the plot.
+        
         Args:
-            x (float): X coordinate of the vehicle
-            y (float): Y coordinate of the vehicle
+            new_receiver_positions: List of (id, (x, y)) tuples for 6 receivers
+            width: New arena width
+            height: New arena height
         """
-        # Add new position to history
-        self.position_history.append((x, y))
-
-        # Update current position (green dot)
-        self.vehicle_point.set_data([x], [y])
-
-        # Update position trail (green line showing last 50 positions)
-        if len(self.position_history) > 1:
-            trail_x = [pos[0] for pos in self.position_history]
-            trail_y = [pos[1] for pos in self.position_history]
-            self.vehicle_trail.set_data(trail_x, trail_y)
-
-        # Note: Canvas will be automatically redrawn by _refresh_animations()
-        # which runs every 10ms and calls canvas.draw() on all active_animations
+        # Update stored positions
+        self.receiver_positions = new_receiver_positions
+        self.grid_width = width
+        self.grid_height = height
+        
+        # Update axis limits
+        self.ax.set_xlim(-width/2 - self.grid_padding, width/2 + self.grid_padding)
+        self.ax.set_ylim(-height/2 - self.grid_padding, height/2 + self.grid_padding)
+        
+        # Redraw compass rose with new axis limits
+        self._draw_compass_rose()
+        
+        # Get new positions
+        receiver_x = [pos[1][0] for pos in new_receiver_positions]
+        receiver_y = [pos[1][1] for pos in new_receiver_positions]
+        
+        # Update scatter plot offsets if it exists
+        if self.receiver_scatter:
+            import numpy as np
+            offsets = np.column_stack([receiver_x, receiver_y])
+            self.receiver_scatter.set_offsets(offsets)
+            # Ensure label is set
+            if not self.receiver_scatter.get_label() or self.receiver_scatter.get_label().startswith('_'):
+                self.receiver_scatter.set_label('Receivers')
+        else:
+            # Create scatter plot if it doesn't exist
+            self.receiver_scatter = self.ax.scatter(receiver_x, receiver_y, c='#FF00FF', s=100, zorder=5, label='Receivers')
+        
+        # Update legend to include the scatter plot
+        handles, labels = self.ax.get_legend_handles_labels()
+        if handles:
+            self.ax.legend(handles, labels, loc='upper right', facecolor='#222222', edgecolor='white', labelcolor='white')
+        
+        # Update text labels
+        for i, (receiver_id, (x, y)) in enumerate(new_receiver_positions):
+            label_text = f"{receiver_id + 1}\n({x:.1f}, {y:.1f})"
+            if i < len(self.receiver_labels):
+                # Update existing label
+                self.receiver_labels[i].set_text(label_text)
+                self.receiver_labels[i].set_position((x + 5, y + 5))
+            else:
+                # Create new label if needed
+                label = self.ax.text(x + 5, y + 5, label_text, color='white',
+                            fontsize=9, fontweight='bold', zorder=6,
+                            ha='left', va='bottom')
+                self.receiver_labels.append(label)
+        
+        # Update connection line
+        connection_order = [0, 1, 2, 5, 4, 3, 0]
+        connected_x = [receiver_x[i] for i in connection_order]
+        connected_y = [receiver_y[i] for i in connection_order]
+        
+        if self.connection_line:
+            self.connection_line.set_data(connected_x, connected_y)
+        else:
+            self.connection_line, = self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7)
+        
+        # Redraw canvas if available
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.draw()
 
     def close(self):
         """Close the matplotlib window."""
         plt.close(self.fig)
+
+class MainWindow:
+    def __init__(self):
+        """
+        Initialize the MainWindow - the main menu for the application.
+        Contains title "Ultra GPS Control" and navigation buttons.
+
+        This is a tkinter-only window (no matplotlib).
+        The frame and widgets are created when build() is called with a parent frame.
+        """
+        self.frame = None
+        self.title_label = None
+        self.position_button = None
+        self.calibration_button = None
+        self.setup_button = None
+
+        # Button callbacks (set by GraphicsModule)
+        self.on_position_click = None
+        self.on_calibration_click = None
+        self.on_setup_click = None
+
+    def build(self, parent):
+        """
+        Build the MainWindow UI elements inside the given parent frame.
+
+        Args:
+            parent: The parent tkinter frame to build into
+        """
+        self.frame = parent
+
+        # Create a container frame for centering content
+        center_container = tk.Frame(self.frame, bg='black')
+        center_container.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        # Title label
+        self.title_label = tk.Label(
+            center_container,
+            text="Ultra GPS Control",
+            bg='black',
+            fg='#39FF14',  # Neon green
+            font=('Arial', 32, 'bold')
+        )
+        self.title_label.pack(pady=(0, 40))
+
+        # Button style configuration
+        button_config = {
+            'font': ('Arial', 16, 'bold'),
+            'width': 20,
+            'height': 2,
+            'relief': tk.RAISED,
+            'bd': 3,
+            'padx': 20,
+            'pady': 10
+        }
+
+        # Position button
+        self.position_button = tk.Button(
+            center_container,
+            text="Position",
+            command=self._on_position_click,
+            bg='#39FF14',  # Neon green
+            fg='black',
+            activebackground='#2BCC10',
+            activeforeground='black',
+            **button_config
+        )
+        self.position_button.pack(pady=10)
+
+        # Calibration button
+        self.calibration_button = tk.Button(
+            center_container,
+            text="Calibration",
+            command=self._on_calibration_click,
+            bg='#FF00FF',  # Neon magenta
+            fg='white',
+            activebackground='#CC00CC',
+            activeforeground='white',
+            **button_config
+        )
+        self.calibration_button.pack(pady=10)
+
+        # Setup button (goes to Arena Maker)
+        self.setup_button = tk.Button(
+            center_container,
+            text="Setup",
+            command=self._on_setup_click,
+            bg='#00FFFF',  # Neon cyan
+            fg='black',
+            activebackground='#00CCCC',
+            activeforeground='black',
+            **button_config
+        )
+        self.setup_button.pack(pady=10)
+
+    def _on_position_click(self):
+        """Handle Position button click."""
+        if self.on_position_click:
+            self.on_position_click()
+
+    def _on_calibration_click(self):
+        """Handle Calibration button click."""
+        if self.on_calibration_click:
+            self.on_calibration_click()
+
+    def _on_setup_click(self):
+        """Handle Setup button click."""
+        if self.on_setup_click:
+            self.on_setup_click()
+
+    def close(self):
+        """Clean up resources."""
+        pass  # No matplotlib resources to clean up

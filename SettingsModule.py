@@ -6,17 +6,79 @@ class SettingsModule:
     def __init__(self):
         """
         Initialize the SettingsModule by loading config.toml into memory.
+        If no config.toml exists, creates one with default empty values.
         All reads reference the internal copy, all writes immediately save to file.
         """
         # Get the config file path
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self._config_path = os.path.join(current_dir, 'config.toml')
 
-        # Load the config file into internal storage
+        # Load the config file into internal storage (or create default if missing)
         self._config = self._load_config()
 
-        # Arena size (calculated from receiver positions)
-        self.arena_size = self._calculate_arena_size()
+        # Verify the config file
+        self.valid_settings, err = self.verify_settings()
+
+        # Arena size (calculated from receiver positions if valid)
+        if self.valid_settings:
+            self.arena_size = self._calculate_arena_size()
+        else:
+            print("Config file settings not initialized, arena size set to 0")
+            if err:
+                print(err)
+            self.arena_size = (0.0, 0.0)
+
+    def _get_default_config(self):
+        """
+        Return a default configuration with empty/uninitialized values.
+        These values require initialization before the system can be used.
+        """
+        return {
+            'valid_settings': False,
+            'cal_state': 0,
+            'calibration_reads': 5,
+            'number_of_receivers': 6,
+            'serial_port': '/dev/ttyACM0',
+            'units': 'cm',
+            'receivers': [
+                {
+                    'id': 0,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                },
+                {
+                    'id': 1,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                },
+                {
+                    'id': 2,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                },
+                {
+                    'id': 3,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                },
+                {
+                    'id': 4,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                },
+                {
+                    'id': 5,
+                    'position': [0.0, 0.0],
+                    'cal_distances': [0.0, 0.0],
+                    'offset': {'slope': 0.0, 'intercept': 0.0}
+                }
+            ]
+        }
 
     def _calculate_arena_size(self):
         """
@@ -39,6 +101,10 @@ class SettingsModule:
         pos_4 = self.get_receiver_position(3)  # Receiver 4
         pos_6 = self.get_receiver_position(5)  # Receiver 6
 
+        # Return zero size if positions are not set
+        if not all([pos_1, pos_3, pos_4, pos_6]):
+            return (0.0, 0.0)
+
         # Calculate width (x-plane distances)
         width_3_6 = abs(pos_3[0] - pos_6[0])  # |receiver 3 x - receiver 6 x|
         width_1_4 = abs(pos_1[0] - pos_4[0])  # |receiver 1 x - receiver 4 x|
@@ -52,8 +118,20 @@ class SettingsModule:
         return (width, height)
 
     def _load_config(self):
-        """Load the TOML configuration file into memory."""
+        """
+        Load the TOML configuration file into memory.
+        If the file doesn't exist, create it with default values.
+        """
+        if not os.path.exists(self._config_path):
+            # Create default config and save it
+            config = self._get_default_config()
+            self._config = config
+            self._save_config()
+            print("Created config file, please initialize!")
+            return config
+
         with open(self._config_path, 'rb') as f:
+            print("Loaded config file...")
             return tomllib.load(f)
 
     def _save_config(self):
@@ -64,11 +142,13 @@ class SettingsModule:
     def _write_toml(self, f, config):
         """Write config dictionary to TOML format."""
         # Write top-level scalar values first
-        for key in ['cal_state', 'calibration_reads', 'number_of_receivers', 'serial_port', 'units']:
+        for key in ['valid_settings', 'cal_state', 'calibration_reads', 'number_of_receivers', 'serial_port', 'units']:
             if key in config:
                 value = config[key]
                 if isinstance(value, str):
                     f.write(f"{key} = '{value}'\n")
+                elif isinstance(value, bool):
+                    f.write(f"{key} = {str(value).lower()}\n")
                 else:
                     f.write(f"{key} = {value}\n")
 
@@ -93,8 +173,71 @@ class SettingsModule:
     def reload_config(self):
         """Reload the configuration from the file."""
         self._config = self._load_config()
+        # Recalculate arena size
+        if self.valid_settings:
+            self.arena_size = self._calculate_arena_size()
+        else:
+            self.arena_size = (0.0, 0.0)
+
+    def verify_settings(self):
+        """
+        Verify that all required settings have been initialized.
+
+        Checks:
+        - All 6 receivers exist
+        - All receiver positions are non-zero (at least one coordinate)
+        - All receiver offsets have been set
+
+        Returns:
+            tuple (is_valid: bool, errors: list of str)
+        """
+        errors = []
+
+        # Check number of receivers
+        receivers = self._config.get('receivers', [])
+        if len(receivers) != 6:
+            errors.append(f"Expected 6 receivers, found {len(receivers)}")
+
+        # Check each receiver
+        for i in range(6):
+            receiver = self.get_receiver(i)
+            if receiver is None:
+                errors.append(f"Receiver {i} (label {i+1}) not found")
+                continue
+
+            # Check position is set (not both zeros)
+            pos = receiver.get('position', [0.0, 0.0])
+            if pos[0] == 0.0 and pos[1] == 0.0:
+                errors.append(f"Receiver {i} (label {i+1}) position not initialized")
+
+            # Check calibration distances
+            cal_dist = receiver.get('cal_distances', [0.0, 0.0])
+            if all(d == 0.0 for d in cal_dist):
+                errors.append(f"Receiver {i} (label {i+1}) calibration distances not set")
+
+            # Check offset values exist
+            offset = receiver.get('offset', {})
+            if 'slope' not in offset or 'intercept' not in offset:
+                errors.append(f"Receiver {i} (label {i+1}) offset parameters missing")
+
+        is_valid = len(errors) == 0
+        return (is_valid, errors)
 
     # ==================== Top-level field accessors ====================
+
+    @property
+    def valid_settings(self):
+        """Get whether the settings have been validated/initialized."""
+        return self._config.get('valid_settings', False)
+
+    @valid_settings.setter
+    def valid_settings(self, value):
+        """Set the valid_settings flag and save to file."""
+        self._config['valid_settings'] = bool(value)
+        self._save_config()
+        # Recalculate arena size when settings become valid
+        if value:
+            self.arena_size = self._calculate_arena_size()
 
     @property
     def cal_state(self):
