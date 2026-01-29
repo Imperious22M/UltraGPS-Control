@@ -8,6 +8,7 @@ import tkinter as tk
 import threading
 import queue
 import time
+import math
 import numpy as np
 from ControlModule import ControlModule
 from PositionModule import PositionModule
@@ -950,6 +951,28 @@ class GraphicsModule:
         for receiver_id, (x, y) in new_receiver_positions:
             self.settings_module.set_receiver_position(receiver_id, x, y)
 
+        # Initialize calibration points: X=0, Y=±height/4
+        self.settings_module.cal_point_1 = [0.0, height / 4.0]
+        self.settings_module.cal_point_2 = [0.0, -height / 4.0]
+
+        # Update calibration points on the arena plot
+        if hasattr(self.arena_maker_window, 'update_calibration_points'):
+            self.arena_maker_window.update_calibration_points(
+                self.settings_module.cal_point_1,
+                self.settings_module.cal_point_2
+            )
+
+        # Calculate distances from calibration points to each receiver
+        cal_p1 = self.settings_module.cal_point_1
+        cal_p2 = self.settings_module.cal_point_2
+        for receiver_id, (rx, ry) in new_receiver_positions:
+            # Distance from cal_point_1 to this receiver
+            dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+            # Distance from cal_point_2 to this receiver
+            dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+            # Store in cal_distances array [dist_to_cal1, dist_to_cal2]
+            self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
         # Update distance entry fields with new values
         if self._distance_entries:
             current_distances = self._calculate_distances_from_positions(new_receiver_positions)
@@ -988,6 +1011,28 @@ class GraphicsModule:
             for receiver_id, (x, y) in new_receiver_positions:
                 self.settings_module.set_receiver_position(receiver_id, x, y)
 
+            # Initialize calibration points: X=0, Y=±height/4
+            self.settings_module.cal_point_1 = [0.0, height / 4.0]
+            self.settings_module.cal_point_2 = [0.0, -height / 4.0]
+
+            # Update calibration points on the arena plot
+            if hasattr(self.arena_maker_window, 'update_calibration_points'):
+                self.arena_maker_window.update_calibration_points(
+                    self.settings_module.cal_point_1,
+                    self.settings_module.cal_point_2
+                )
+
+            # Calculate distances from calibration points to each receiver
+            cal_p1 = self.settings_module.cal_point_1
+            cal_p2 = self.settings_module.cal_point_2
+            for receiver_id, (rx, ry) in new_receiver_positions:
+                # Distance from cal_point_1 to this receiver
+                dist_1 = math.sqrt((rx - cal_p1[0])**2 + (ry - cal_p1[1])**2)
+                # Distance from cal_point_2 to this receiver
+                dist_2 = math.sqrt((rx - cal_p2[0])**2 + (ry - cal_p2[1])**2)
+                # Store in cal_distances array [dist_to_cal1, dist_to_cal2]
+                self.settings_module.set_receiver_cal_distances(receiver_id, [dist_1, dist_2])
+
         # Pause queue processing during window change
         self._pause_process_queue()
 
@@ -1025,6 +1070,13 @@ class GraphicsModule:
                         entry = self._distance_entries[name]
                         entry.delete(0, tk.END)
                         entry.insert(0, f"{current_distances[i]:.1f}")
+
+            # Update calibration points display
+            if hasattr(self.arena_maker_window, 'update_calibration_points'):
+                self.arena_maker_window.update_calibration_points(
+                    self.settings_module.cal_point_1,
+                    self.settings_module.cal_point_2
+                )
 
             self._arena_maker_frame.pack(fill=tk.BOTH, expand=True)
             # Re-add canvas to active_animations
@@ -1153,21 +1205,6 @@ class GraphicsModule:
             # Bind Enter key and focus-out to update
             entry.bind('<Return>', lambda e: self._update_arena_from_distances())
             entry.bind('<FocusOut>', lambda e: self._update_arena_from_distances())
-
-        # Add an "Apply" button
-        apply_button = tk.Button(
-            distance_frame,
-            text="Apply",
-            command=self._update_arena_from_distances,
-            bg='#39FF14',
-            fg='black',
-            font=('Arial', 12, 'bold'),
-            activebackground='#2BCC10',
-            activeforeground='black',
-            padx=15,
-            pady=5
-        )
-        apply_button.pack(side=tk.LEFT, padx=20)
 
         # Add canvas to active_animations for automatic refreshing
         if hasattr(self.arena_maker_window, 'canvas') and self.arena_maker_window.canvas in self.active_animations:
@@ -1910,6 +1947,10 @@ class ArenaMakerWindow:
         self.r9_label = None       # R9 distance label
         self.r10_line = None       # R10 vertical dashed line (shown only if non-zero)
         self.r10_label = None      # R10 distance label
+        self.cal_point_1_scatter = None  # Calibration point 1 marker
+        self.cal_point_1_label = None    # Calibration point 1 label
+        self.cal_point_2_scatter = None  # Calibration point 2 marker
+        self.cal_point_2_label = None    # Calibration point 2 label
         self._initialize_plot_elements()
 
         # Create legend after plot elements are initialized (so it includes the Receivers label)
@@ -2084,6 +2125,69 @@ class ArenaMakerWindow:
                         ha='left', va='center',
                         bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='#00FF88'))
             self.r10_label = r10_label
+
+        # Initialize calibration point markers (hidden until set)
+        # Cal points will be shown as green diamonds
+        self.cal_point_1_scatter = None
+        self.cal_point_1_label = None
+        self.cal_point_2_scatter = None
+        self.cal_point_2_label = None
+
+    def update_calibration_points(self, cal_point_1, cal_point_2):
+        """
+        Update the calibration point markers on the plot.
+
+        Args:
+            cal_point_1: [x, y] coordinates of calibration point 1
+            cal_point_2: [x, y] coordinates of calibration point 2
+        """
+        # Calibration point 1 (green diamond)
+        x1, y1 = cal_point_1[0], cal_point_1[1]
+        if self.cal_point_1_scatter is None:
+            self.cal_point_1_scatter = self.ax.scatter([x1], [y1], c='#00FF00', s=150,
+                                                        marker='D', zorder=6, label='Cal Points')
+        else:
+            self.cal_point_1_scatter.set_offsets(np.array([[x1, y1]]))
+            self.cal_point_1_scatter.set_visible(True)
+
+        if self.cal_point_1_label is None:
+            self.cal_point_1_label = self.ax.text(x1 + 8, y1, f"Cal 1\n({x1:.1f}, {y1:.1f})",
+                        color='#00FF00',
+                        fontsize=9, fontweight='bold', zorder=6,
+                        ha='left', va='center')
+        else:
+            self.cal_point_1_label.set_text(f"Cal 1\n({x1:.1f}, {y1:.1f})")
+            self.cal_point_1_label.set_position((x1 + 8, y1))
+            self.cal_point_1_label.set_visible(True)
+
+        # Calibration point 2 (green diamond)
+        x2, y2 = cal_point_2[0], cal_point_2[1]
+        if self.cal_point_2_scatter is None:
+            self.cal_point_2_scatter = self.ax.scatter([x2], [y2], c='#00FF00', s=150,
+                                                        marker='D', zorder=6)
+        else:
+            self.cal_point_2_scatter.set_offsets(np.array([[x2, y2]]))
+            self.cal_point_2_scatter.set_visible(True)
+
+        if self.cal_point_2_label is None:
+            self.cal_point_2_label = self.ax.text(x2 + 8, y2, f"Cal 2\n({x2:.1f}, {y2:.1f})",
+                        color='#00FF00',
+                        fontsize=9, fontweight='bold', zorder=6,
+                        ha='left', va='center')
+        else:
+            self.cal_point_2_label.set_text(f"Cal 2\n({x2:.1f}, {y2:.1f})")
+            self.cal_point_2_label.set_position((x2 + 8, y2))
+            self.cal_point_2_label.set_visible(True)
+
+        # Update legend to include calibration points
+        handles, labels = self.ax.get_legend_handles_labels()
+        if handles:
+            self.ax.legend(handles, labels, loc='upper right', facecolor='#222222',
+                          edgecolor='white', labelcolor='white')
+
+        # Redraw canvas if available
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.draw()
 
     def update_receiver_positions(self, new_receiver_positions, width, height):
         """

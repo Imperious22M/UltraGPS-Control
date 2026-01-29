@@ -40,6 +40,8 @@ class SettingsModule:
             'number_of_receivers': 6,
             'serial_port': '/dev/ttyACM0',
             'units': 'cm',
+            'cal_point_1': [0.0, 0.0],
+            'cal_point_2': [0.0, 0.0],
             'receivers': [
                 {
                     'id': 0,
@@ -151,6 +153,12 @@ class SettingsModule:
                     f.write(f"{key} = {str(value).lower()}\n")
                 else:
                     f.write(f"{key} = {value}\n")
+
+        # Write calibration points (arrays)
+        for key in ['cal_point_1', 'cal_point_2']:
+            if key in config:
+                value = config[key]
+                f.write(f"{key} = {value}\n")
 
         f.write("\n")
 
@@ -292,6 +300,28 @@ class SettingsModule:
     def units(self, value):
         """Set the units string and save to file."""
         self._config['units'] = str(value)
+        self._save_config()
+
+    @property
+    def cal_point_1(self):
+        """Get calibration point 1 coordinates [x, y]."""
+        return self._config.get('cal_point_1', [0.0, 0.0])
+
+    @cal_point_1.setter
+    def cal_point_1(self, value):
+        """Set calibration point 1 coordinates and save to file."""
+        self._config['cal_point_1'] = [float(value[0]), float(value[1])]
+        self._save_config()
+
+    @property
+    def cal_point_2(self):
+        """Get calibration point 2 coordinates [x, y]."""
+        return self._config.get('cal_point_2', [0.0, 0.0])
+
+    @cal_point_2.setter
+    def cal_point_2(self, value):
+        """Set calibration point 2 coordinates and save to file."""
+        self._config['cal_point_2'] = [float(value[0]), float(value[1])]
         self._save_config()
 
     # ==================== Receivers accessors ====================
