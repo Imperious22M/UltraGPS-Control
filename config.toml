@@ -1,9 +1,11 @@
+valid_settings = true
 cal_state = 1
 calibration_reads = 5
 number_of_receivers = 6
 serial_port = '/dev/ttyACM0'
 units = 'cm'
-
+cal_point_1 = [0.0, 92.7]
+cal_point_2 = [0.0, -93.7]
 
 [[receivers]]
 cal_distances = [224.9, 185.8]
