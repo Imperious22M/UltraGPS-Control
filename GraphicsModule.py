@@ -2370,10 +2370,13 @@ class PositionWindow:
         self.sane_leds = []
 
         # Left column: receivers 1, 2, 3 (indices 0, 1, 2) - column 0
-        for row in range(3):
+        # Visual order (top to bottom): Receiver 3, 2, 1
+        left_rows = [2, 1, 0]  # Row positions for receivers 1, 2, 3 (R1 at bottom, R3 at top)
+        for idx, row in enumerate(left_rows):
+            receiver_num = idx + 1  # 1, 2, 3
             ax_dist = self.fig.add_subplot(gs[row, 0])
             ax_dist.set_facecolor('black')
-            ax_dist.set_title(f'Receiver {row + 1}', fontsize=10, color='white')
+            ax_dist.set_title(f'Receiver {receiver_num}', fontsize=10, color='white')
             ax_dist.tick_params(axis='both', labelsize=8, colors='white')
             ax_dist.set_xlim(0, 50)
             ax_dist.set_ylim(0, 500)
@@ -2402,10 +2405,13 @@ class PositionWindow:
             self.sane_leds.append(led)
 
         # Right column: receivers 4, 5, 6 (indices 3, 4, 5) - column 2
-        for row in range(3):
+        # Visual order (top to bottom): Receiver 6, 5, 4
+        right_rows = [2, 1, 0]  # Row positions for receivers 4, 5, 6 (R4 at bottom, R6 at top)
+        for idx, row in enumerate(right_rows):
+            receiver_num = idx + 4  # 4, 5, 6
             ax_dist = self.fig.add_subplot(gs[row, 2])
             ax_dist.set_facecolor('black')
-            ax_dist.set_title(f'Receiver {row + 4}', fontsize=10, color='white')
+            ax_dist.set_title(f'Receiver {receiver_num}', fontsize=10, color='white')
             ax_dist.tick_params(axis='both', labelsize=8, colors='white')
             ax_dist.set_xlim(0, 50)
             ax_dist.set_ylim(0, 500)
