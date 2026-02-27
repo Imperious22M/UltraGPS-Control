@@ -3,12 +3,15 @@ from ControlModule import NetworkClass
 from GraphicsModule import PositionWindow, MainWindow
 from GraphicsModule import GraphicsModule
 
+import argparse
 import time
 
 def main():
-    # C-like main class to test various position discrimination techniques
-    #    self.control_module = controlModule = ControlModule("127.0.0.1")
-    testGraphics = GraphicsModule()
+    parser = argparse.ArgumentParser(description="UltraGPS positioning system")
+    parser.add_argument("--ip", default="127.0.0.1", help="IP address of the UltraGPS server (default: 127.0.0.1)")
+    args = parser.parse_args()
+
+    testGraphics = GraphicsModule(ip_address=args.ip)
 
     testGraphics.start_tk_window()
     testGraphics.show_main_window()  # Show main menu first

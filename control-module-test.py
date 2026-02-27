@@ -1,16 +1,18 @@
 import time
 import statistics
+import argparse
 from ControlModule import ControlModule
 
-def test_receiver_distance_speed(num_iterations=100):
+def test_receiver_distance_speed(num_iterations=100, ip_address="127.0.0.1"):
     """
     Test how fast new receiver distances can be received.
-    
+
     Args:
         num_iterations (int): Number of update cycles to perform
+        ip_address (str): IP address of the UltraGPS server
     """
     print("Initializing ControlModule...")
-    control_module = ControlModule(ip_address="127.0.0.1", receiver_count=6)
+    control_module = ControlModule(ip_address=ip_address, receiver_count=6)
     
     # Warm-up: do a few updates to establish connection
     print("Warming up connection...")
@@ -98,6 +100,10 @@ def test_receiver_distance_speed(num_iterations=100):
     print("\nTest complete!")
 
 if __name__ == "__main__":
-    # Run the test with 100 iterations (adjust as needed)
-    test_receiver_distance_speed(num_iterations=100)
+    parser = argparse.ArgumentParser(description="UltraGPS control module speed test")
+    parser.add_argument("--ip", default="127.0.0.1", help="IP address of the UltraGPS server (default: 127.0.0.1)")
+    parser.add_argument("--iterations", type=int, default=100, help="Number of update cycles to perform (default: 100)")
+    args = parser.parse_args()
+
+    test_receiver_distance_speed(num_iterations=args.iterations, ip_address=args.ip)
 

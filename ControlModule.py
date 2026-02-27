@@ -17,16 +17,15 @@ class ControlModule:
 
         self.TIMEOUT  = None
         self.SEPARATOR = " "
-        self.CONTROL_PORT = 8000
-        self.DISTANCE_PORT = 8002
-        self.RAWSERIAL_PORT = 8003
-
+        self.CONTROL_PORT = 9000
+        self.DISTANCE_PORT = 9001  # Server (port 8002) sends distances here
+        self.SERIAL_PORT = 9002    # Server (port 8003) sends serial data here
 
         self.comms_module:CommsModule = CommsModule(self.ip_address)
 
-        # Start receiving on UltraGPS server ports
+        # Start receiving on separate ports for distances and serial data
         self.comms_module.start_receiving(self.DISTANCE_PORT)
-        self.comms_module.start_receiving(self.RAWSERIAL_PORT)
+        self.comms_module.start_receiving(self.SERIAL_PORT)
         #self.controlModule.queue_udp_message("P\n",8000,"127.0.0.1")
         #print(controlModule.receive_udp_message(8002))
 
@@ -40,11 +39,14 @@ class ControlModule:
 
         """
 
-        self.comms_module.queue_udp_message("P\n",self.CONTROL_PORT)
+        # Send command from our DISTANCE_PORT so server knows our IP
+        self.comms_module.send_from_port("P\n", self.DISTANCE_PORT, self.CONTROL_PORT)
+        # Distances arrive on DISTANCE_PORT (server sends from 8002 to 9001)
         distance_bytes = self.comms_module.receive_udp_message(self.DISTANCE_PORT)
         distances_str = distance_bytes[0].decode('utf-8').rstrip("\n").rstrip(" ").split(self.SEPARATOR)
-        self.distances = tuple(map(float, distances_str ))
-        self.serial_message = self.comms_module.receive_udp_message(self.RAWSERIAL_PORT)[0].decode('utf-8')
+        self.distances = tuple(map(float, distances_str))
+        # Serial data arrives on SERIAL_PORT (server sends from 8003 to 9002)
+        self.serial_message = self.comms_module.receive_udp_message(self.SERIAL_PORT)[0].decode('utf-8')
 
     def get_receiver_distances(self):
         """
@@ -150,7 +152,7 @@ class CommsModule:
     def queue_udp_message(self, message, port, ip_address=None):
         """
         Queue a UDP message for transmission.
-        
+
         Args:
             message (str or bytes): The message to send
             port (int): The port number to send to
@@ -159,8 +161,27 @@ class CommsModule:
         target_ip = ip_address or self.default_ip_address
         if target_ip is None:
             raise ValueError("IP address must be specified either in __init__ or as an argument to queue_udp_message")
-        
+
         self.send_queue.put((message, target_ip, port))
+
+    def send_from_port(self, message, from_port, to_port, ip_address=None):
+        """
+        Send a UDP message from a specific bound local port.
+        Uses the network instance already bound to from_port so the server
+        can track our source port and send responses back to it.
+
+        Args:
+            message (str or bytes): The message to send
+            from_port (int): The local port to send from (must already be receiving)
+            to_port (int): The destination port to send to
+            ip_address (str, optional): The IP address to send to (uses default if not specified)
+        """
+        target_ip = ip_address or self.default_ip_address
+        if target_ip is None:
+            raise ValueError("IP address must be specified either in __init__ or as an argument")
+
+        network = self._get_network_instance('0.0.0.0', from_port)
+        network.send_udp_message(message, ip_address=target_ip, port=to_port)
     
     def receive_udp_message(self, port, timeout=None):
         """
@@ -266,14 +287,6 @@ class NetworkClass:
         """Create and return a UDP socket if one doesn't exist."""
         if self.socket is None:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Enable SO_REUSEADDR to allow binding to shared ports
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # Enable SO_REUSEPORT if available (Linux)
-            try:
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                # SO_REUSEPORT not available on this platform, skip it
-                pass
         return self.socket
     
     def set_ip_address(self, ip_address):

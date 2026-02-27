@@ -15,7 +15,7 @@ from PositionModule import PositionModule
 from SettingsModule import SettingsModule
 
 class GraphicsModule:
-    def __init__(self):
+    def __init__(self, ip_address="127.0.0.1"):
         """
         Initialize the GraphicsModule with a tkinter root window running in a background thread.
         """
@@ -47,7 +47,7 @@ class GraphicsModule:
         self._cal_point_entries = {}
 
         # Instantiate control module
-        self.control_module = ControlModule("127.0.0.1")
+        self.control_module = ControlModule(ip_address)
 
         # Instantiate the settings module
         self.settings_module = SettingsModule()

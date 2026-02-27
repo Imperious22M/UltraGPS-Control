@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Test script for SettingsModule.
+Test script for SettingsModule and live serial value monitoring.
 Tests all getters and setters, verifying that changes persist to file.
+Also connects to the UltraGPS server and displays live serial values.
 """
 
 from SettingsModule import SettingsModule
+from ControlModule import ControlModule
 import copy
+import argparse
+import matplotlib.pyplot as plt
+from collections import deque
+
+PLOT_HISTORY = 100  # Number of data points to keep in the rolling plot
 
 
 def test_top_level_properties():
@@ -368,31 +375,111 @@ def test_reload_config():
     print("\nreload_config: ALL TESTS PASSED")
 
 
-def main():
-    """Run all tests."""
-    print("\n" + "#" * 60)
-    print("# SettingsModule Test Suite")
-    print("#" * 60)
+def plot_serial_values(ax, lines, data):
+    """
+    Update the live serial value plot with the current rolling data.
 
+    Args:
+        ax: Matplotlib Axes object
+        lines: List of Line2D objects, one per receiver
+        data: List of deques containing recent serial values per receiver
+    """
+    for line, values in zip(lines, data):
+        x = list(range(len(values)))
+        line.set_xdata(x)
+        line.set_ydata(list(values))
+    ax.relim()
+    ax.autoscale_view()
+    ax.figure.canvas.flush_events()
+    plt.pause(0.001)
+
+
+def run_serial_monitor(ip_address="127.0.0.1"):
+    """
+    Connect to the UltraGPS server and display incoming serial values live.
+
+    Each receiver's serial reading is shown as a separate line on a rolling
+    time-series plot. Press Ctrl+C to stop.
+
+    Args:
+        ip_address (str): IP address of the UltraGPS server
+    """
+    control = ControlModule(ip_address=ip_address)
+    receiver_count = control.receiver_count
+    data = [deque(maxlen=PLOT_HISTORY) for _ in range(receiver_count)]
+
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    lines = []
+    for i in range(receiver_count):
+        line, = ax.plot([], [], label=f"Receiver {i + 1}")
+        lines.append(line)
+
+    ax.set_xlabel("Sample")
+    ax.set_ylabel("Serial Value")
+    ax.set_title("Live Serial Values from UltraGPS")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print(f"Connected to UltraGPS server at {ip_address}. Reading serial values (Ctrl+C to stop)...")
     try:
-        test_top_level_properties()
-        test_receiver_getters()
-        test_receiver_setters()
-        test_legacy_methods()
-        test_calculate_arena_size()
-        test_error_handling()
-        test_reload_config()
+        while True:
+            control.update()
+            serial_msg = control.get_serial_message()
 
+            try:
+                values = serial_msg.strip().split()
+                if len(values) >= receiver_count:
+                    floats = [float(values[i]) for i in range(receiver_count)]
+                    print(serial_msg.strip())
+                    for i, v in enumerate(floats):
+                        data[i].append(v)
+                    plot_serial_values(ax, lines, data)
+            except (ValueError, AttributeError) as e:
+                print(f"Error parsing serial message '{serial_msg}': {e}")
+
+    except KeyboardInterrupt:
+        print("\nMonitor stopped.")
+    finally:
+        control.comms_module.close()
+        plt.ioff()
+        plt.show()
+
+
+def main():
+    """Run all tests, then start the live serial monitor."""
+    parser = argparse.ArgumentParser(description="SettingsModule tests + live serial monitor")
+    parser.add_argument("--ip", default="127.0.0.1", help="IP address of the UltraGPS server (default: 127.0.0.1)")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip settings tests and jump straight to serial monitor")
+    args = parser.parse_args()
+
+    if not args.skip_tests:
         print("\n" + "#" * 60)
-        print("# ALL TESTS PASSED!")
-        print("#" * 60 + "\n")
+        print("# SettingsModule Test Suite")
+        print("#" * 60)
 
-    except AssertionError as e:
-        print(f"\n!!! TEST FAILED: {e}")
-        raise
-    except Exception as e:
-        print(f"\n!!! UNEXPECTED ERROR: {e}")
-        raise
+        try:
+            test_top_level_properties()
+            test_receiver_getters()
+            test_receiver_setters()
+            test_legacy_methods()
+            test_calculate_arena_size()
+            test_error_handling()
+            test_reload_config()
+
+            print("\n" + "#" * 60)
+            print("# ALL TESTS PASSED!")
+            print("#" * 60 + "\n")
+
+        except AssertionError as e:
+            print(f"\n!!! TEST FAILED: {e}")
+            raise
+        except Exception as e:
+            print(f"\n!!! UNEXPECTED ERROR: {e}")
+            raise
+
+    run_serial_monitor(ip_address=args.ip)
 
 
 if __name__ == "__main__":
