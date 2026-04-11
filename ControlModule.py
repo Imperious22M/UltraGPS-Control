@@ -5,61 +5,37 @@ from collections import defaultdict
 
 
 class ControlModule:
-    def __init__(self, ip_address="127.0.0.1", receiver_count = 6):
+    def __init__(self, ip_address="127.0.0.1"):
         """
         Initializes the ControlModule with the networking needed to control the positioning system
 
         Args:
-            default_ip_address (str, optional): Default IP address of the UltraGPS server
+            ip_address (str, optional): IP address of the UltraGPS-Ground server
         """
         self.ip_address = ip_address
-        self.receiver_count = receiver_count
 
-        self.TIMEOUT  = None
         self.SEPARATOR = " "
-        self.CONTROL_PORT = 9000
-        self.DISTANCE_PORT = 9001  # Server (port 8002) sends distances here
-        self.SERIAL_PORT = 9002    # Server (port 8003) sends serial data here
+        self.TCP_PORT = 9000   # TCP: send commands (P/S/C), receive responses
+        self.UDP_PORT = 9001   # UDP: receive continuous streaming data
 
-        self.comms_module:CommsModule = CommsModule(self.ip_address)
+        self.comms_module: CommsModule = CommsModule(self.ip_address)
 
-        # Start receiving on separate ports for distances and serial data
-        self.comms_module.start_receiving(self.DISTANCE_PORT)
-        self.comms_module.start_receiving(self.SERIAL_PORT)
-        #self.controlModule.queue_udp_message("P\n",8000,"127.0.0.1")
-        #print(controlModule.receive_udp_message(8002))
-
-        # Information provided by the UltraGPS server every requeest
-        self.distances = None
         self.serial_message = None
 
     def update(self):
         """
-        Updates all the module information by requesting it from the server 
-
+        Sends a normal poll command to the server via TCP and stores the response.
         """
+        command = "P\n"
+        self.comms_module.send_from_port(command, self.TCP_PORT)
+        response_bytes = self.comms_module.receive_tcp_message(self.TCP_PORT)
+        if response_bytes:
+            self.serial_message = response_bytes.decode('utf-8')
+            # Strip the leading message response (e.g. "N: :) 
+            self.serial_message = self.serial_message[3:].strip()
+        else:
+            self.serial_message = None
 
-        # Send command from our DISTANCE_PORT so server knows our IP
-        self.comms_module.send_from_port("P\n", self.DISTANCE_PORT, self.CONTROL_PORT)
-        # Distances arrive on DISTANCE_PORT (server sends from 8002 to 9001)
-        distance_bytes = self.comms_module.receive_udp_message(self.DISTANCE_PORT)
-        distances_str = distance_bytes[0].decode('utf-8').rstrip("\n").rstrip(" ").split(self.SEPARATOR)
-        self.distances = tuple(map(float, distances_str))
-        # Serial data arrives on SERIAL_PORT (server sends from 8003 to 9002)
-        self.serial_message = self.comms_module.receive_udp_message(self.SERIAL_PORT)[0].decode('utf-8')
-
-    def get_receiver_distances(self):
-        """
-        Returns a list of all the distances received by the receivers
-        DOES NOT update the information of the system
-
-        """
-
-        if len(self.distances) != self.receiver_count:
-            print("Distances received from UltraGPS does not match number of receivers")
-            self.distances = []
-            return tuple()
-        return self.distances
 
     def get_serial_message(self):
         return self.serial_message
@@ -67,329 +43,261 @@ class ControlModule:
 class CommsModule:
     def __init__(self, default_ip_address=None):
         """
-        Initialize the CommsModule with threading and buffers for UDP communication.
-        
+        Initialize the CommsModule with threading and buffers for TCP and UDP communication.
+        Acts as a pure client: TCP connects to the server's command port, UDP sends to the
+        server's streaming port and receives responses on the same ephemeral socket.
+
         Args:
-            default_ip_address (str, optional): Default IP address for sending messages
+            default_ip_address (str, optional): Default IP address of the UltraGPS-Ground server
         """
         self.default_ip_address = default_ip_address
-        self.send_queue = queue.Queue()
-        self.receive_buffers = defaultdict(queue.Queue)  # port -> queue of (data, address) tuples
-        self.network_instances = {}  # (ip, port) -> NetworkClass instance
-        self.receive_threads = {}  # port -> thread
-        self.lock = threading.Lock()
-        
-        # Start the sending thread
-        self.send_thread = threading.Thread(target=self._send_worker, daemon=True)
         self.running = True
-        self.send_thread.start()
-    
-    def _get_network_instance(self, ip_address, port):
+        self.lock = threading.Lock()
+
+        # TCP
+        self.tcp_receive_buffers = defaultdict(queue.Queue)  # TCP port -> queue of bytes
+        self.tcp_instances = {}       # (ip, port) -> TCPNetworkClass
+        self.tcp_receive_threads = {}  # TCP port -> thread
+
+        # UDP client — single socket with an OS-assigned ephemeral local port
+        self.udp_socket = None
+        self.udp_socket_lock = threading.Lock()
+        self.udp_receive_buffer = queue.Queue()
+        self.udp_receive_thread = None
+
+    def _get_tcp_instance(self, ip_address, port):
         """
-        Get or create a NetworkClass instance for the given IP and port.
-        
+        Get or create a connected TCPNetworkClass instance for the given server IP/port.
+        Also starts a receive thread for incoming data on that connection.
+
         Args:
-            ip_address (str): IP address
-            port (int): Port number
-            
+            ip_address (str): Server IP address
+            port (int): Server TCP port
+
         Returns:
-            NetworkClass: Network instance for this IP/port combination
+            TCPNetworkClass: Connected TCP instance
         """
         key = (ip_address, port)
         with self.lock:
-            if key not in self.network_instances:
-                network = NetworkClass(ip_address=ip_address, port=port)
-                self.network_instances[key] = network
-        return self.network_instances[key]
-    
-    def _send_worker(self):
-        """Worker thread that processes the send queue."""
+            if key not in self.tcp_instances:
+                tcp = TCPNetworkClass(ip_address, port)
+                tcp.connect()
+                self.tcp_instances[key] = tcp
+                thread = threading.Thread(
+                    target=self._tcp_receive_worker,
+                    args=(tcp, port),
+                    daemon=True
+                )
+                thread.start()
+                self.tcp_receive_threads[port] = thread
+        return self.tcp_instances[key]
+
+    def _tcp_receive_worker(self, tcp_net, port):
+        """Worker thread that continuously reads from a TCP connection into a buffer."""
         while self.running:
             try:
-                # Get message from queue with timeout to allow checking self.running
-                item = self.send_queue.get(timeout=0.1)
-                message, ip_address, port = item
-                
-                try:
-                    network = self._get_network_instance(ip_address, port)
-                    network.send_udp_message(message, ip_address=ip_address, port=port)
-                except Exception as e:
-                    # Log error but continue processing
-                    print(f"Error sending UDP message: {e}")
-                finally:
-                    self.send_queue.task_done()
-            except queue.Empty:
-                continue
-    
-    def _receive_worker(self, port, ip_address=None):
-        """
-        Worker thread that receives UDP messages for a specific port.
-        
-        Args:
-            port (int): Port to receive on
-            ip_address (str, optional): IP address to bind to (None for any)
-        """
-        network = self._get_network_instance(ip_address or '0.0.0.0', port)
-        
-        # Bind to the port for receiving
-        try:
-            network.bind_to_port(port)
-        except Exception as e:
-            print(f"Error binding to port {port}: {e}")
-            return
-        
-        while self.running and port in self.receive_threads:
-            try:
-                data, address = network.receive_udp_message(timeout=0.1)
-                self.receive_buffers[port].put((data, address))
+                data = tcp_net.receive_tcp_message(timeout=0.1)
+                if data:
+                    self.tcp_receive_buffers[port].put(data)
             except socket.timeout:
                 continue
             except Exception as e:
-                # Log error but continue receiving
-                print(f"Error receiving UDP message on port {port}: {e}")
+                print(f"Error receiving TCP message on port {port}: {e}")
                 continue
-    
-    def queue_udp_message(self, message, port, ip_address=None):
+
+    def send_from_port(self, message, tcp_port, ip_address=None):
         """
-        Queue a UDP message for transmission.
+        Send a command to the server via TCP.
+        The server will respond on the same TCP connection; call receive_tcp_message()
+        to dequeue the response.
 
         Args:
-            message (str or bytes): The message to send
-            port (int): The port number to send to
-            ip_address (str, optional): The IP address to send to (uses default if not specified)
-        """
-        target_ip = ip_address or self.default_ip_address
-        if target_ip is None:
-            raise ValueError("IP address must be specified either in __init__ or as an argument to queue_udp_message")
-
-        self.send_queue.put((message, target_ip, port))
-
-    def send_from_port(self, message, from_port, to_port, ip_address=None):
-        """
-        Send a UDP message from a specific bound local port.
-        Uses the network instance already bound to from_port so the server
-        can track our source port and send responses back to it.
-
-        Args:
-            message (str or bytes): The message to send
-            from_port (int): The local port to send from (must already be receiving)
-            to_port (int): The destination port to send to
-            ip_address (str, optional): The IP address to send to (uses default if not specified)
+            message (str or bytes): The command to send (e.g. "P\\n", "S\\n", "C\\n")
+            tcp_port (int): The server's TCP command port (default 9000)
+            ip_address (str, optional): Server IP address (uses default if not specified)
         """
         target_ip = ip_address or self.default_ip_address
         if target_ip is None:
             raise ValueError("IP address must be specified either in __init__ or as an argument")
 
-        network = self._get_network_instance('0.0.0.0', from_port)
-        network.send_udp_message(message, ip_address=target_ip, port=to_port)
-    
-    def receive_udp_message(self, port, timeout=None):
+        tcp = self._get_tcp_instance(target_ip, tcp_port)
+        tcp.send_tcp_message(message)
+
+    def receive_tcp_message(self, tcp_port, timeout=None):
         """
-        Receive a UDP message from the buffer for the specified port.
-        Automatically starts receiving on the port if not already started.
-        
+        Dequeue the next TCP response received from the server on the given port.
+
         Args:
-            port (int): The port number to receive from
+            tcp_port (int): The TCP port the connection is on
             timeout (float, optional): Timeout in seconds (None for blocking)
-            
+
         Returns:
-            tuple: (data, address) where data is bytes and address is (ip, port)
-                   Returns None if timeout occurs
+            bytes: Response data, or None if timeout occurs
         """
-        # Automatically start receiving if not already started
-        if port not in self.receive_threads:
-            self.start_receiving(port)
-        
         try:
             if timeout is None:
-                data, address = self.receive_buffers[port].get()
+                return self.tcp_receive_buffers[tcp_port].get()
             else:
-                data, address = self.receive_buffers[port].get(timeout=timeout)
-            return data, address
+                return self.tcp_receive_buffers[tcp_port].get(timeout=timeout)
         except queue.Empty:
             return None
     
-    def start_receiving(self, port, ip_address=None):
+    def _get_udp_socket(self):
         """
-        Start a receive thread for the specified port.
-        
-        Args:
-            port (int): Port number to receive on
-            ip_address (str, optional): IP address to bind to (None for any)
+        Get or create the UDP client socket, starting the receive thread on first use.
+        The socket is not bound to any fixed local port; the OS assigns an ephemeral port
+        when the first sendto() call is made, and the server replies to that port.
         """
-        if port in self.receive_threads:
-            return  # Already receiving on this port
-        
-        with self.lock:
-            if port not in self.receive_threads:
-                thread = threading.Thread(
-                    target=self._receive_worker,
-                    args=(port, ip_address),
+        with self.udp_socket_lock:
+            if self.udp_socket is None:
+                self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.udp_receive_thread = threading.Thread(
+                    target=self._udp_receive_worker,
                     daemon=True
                 )
-                thread.start()
-                self.receive_threads[port] = thread
-    
-    def stop_receiving(self, port):
+                self.udp_receive_thread.start()
+        return self.udp_socket
+
+    def send_udp(self, message, server_port, ip_address=None):
         """
-        Stop receiving on the specified port.
-        
+        Send a UDP datagram to the server's streaming port.
+        The first call establishes our ephemeral local port; the server records it and
+        sends continuous data back to that port.
+
         Args:
-            port (int): Port number to stop receiving on
+            message (str or bytes): The datagram payload
+            server_port (int): The server's UDP port (default 9001)
+            ip_address (str, optional): Server IP address (uses default if not specified)
         """
-        with self.lock:
-            if port in self.receive_threads:
-                del self.receive_threads[port]
-    
+        target_ip = ip_address or self.default_ip_address
+        if target_ip is None:
+            raise ValueError("IP address must be specified either in __init__ or as an argument")
+        if isinstance(message, str):
+            message = message.encode('utf-8')
+        self._get_udp_socket().sendto(message, (target_ip, server_port))
+
+    def _udp_receive_worker(self):
+        """Receive UDP datagrams from the server on the client socket and buffer them."""
+        while self.running:
+            try:
+                self.udp_socket.settimeout(0.1)
+                data, addr = self.udp_socket.recvfrom(4096)
+                if data:
+                    self.udp_receive_buffer.put((data, addr))
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"Error receiving UDP message: {e}")
+                continue
+
+    def receive_udp_message(self, timeout=None):
+        """
+        Dequeue the next UDP datagram received from the server.
+
+        Args:
+            timeout (float, optional): Timeout in seconds (None for blocking)
+
+        Returns:
+            tuple: (data, address) where data is bytes and address is (ip, port),
+                   or None if timeout occurs
+        """
+        try:
+            if timeout is None:
+                return self.udp_receive_buffer.get()
+            else:
+                return self.udp_receive_buffer.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     def close(self):
-        """Stop all threads and close all network connections."""
+        """Stop all threads and close all connections."""
         self.running = False
-        
-        # Wait for send thread to finish
-        if self.send_thread.is_alive():
-            self.send_thread.join(timeout=1.0)
-        
-        # Stop all receive threads
-        ports_to_stop = list(self.receive_threads.keys())
-        for port in ports_to_stop:
-            self.stop_receiving(port)
-        
-        # Wait for receive threads to finish
-        for thread in list(self.receive_threads.values()):
+
+        # Wait for TCP receive threads
+        for thread in self.tcp_receive_threads.values():
             if thread.is_alive():
                 thread.join(timeout=1.0)
-        
-        # Close all network instances
-        for network in self.network_instances.values():
-            network.close()
-        
-        self.network_instances.clear()
-        self.receive_threads.clear()
+
+        # Close all TCP connections
+        for tcp in self.tcp_instances.values():
+            tcp.close()
+        self.tcp_instances.clear()
+        self.tcp_receive_threads.clear()
+
+        # Wait for UDP receive thread and close socket
+        if self.udp_receive_thread and self.udp_receive_thread.is_alive():
+            self.udp_receive_thread.join(timeout=1.0)
+        with self.udp_socket_lock:
+            if self.udp_socket is not None:
+                self.udp_socket.close()
+                self.udp_socket = None
     
     def __del__(self):
         """Clean up when object is destroyed."""
         self.close()
 
-class NetworkClass:
-    def __init__(self, ip_address=None, port=None):
+class TCPNetworkClass:
+    def __init__(self, ip_address, port):
         """
-        Initialize the ControlModule with optional IP address and port.
-        
+        Manages a persistent TCP connection to the UltraGPS-Ground server.
+
         Args:
-            ip_address (str, optional): The IP address to send UDP messages to
-            port (int, optional): The port number for UDP communication
+            ip_address (str): Server IP address
+            port (int): Server TCP port
         """
         self.ip_address = ip_address
         self.port = port
         self.socket = None
-        
-    def _get_socket(self):
-        """Create and return a UDP socket if one doesn't exist."""
-        if self.socket is None:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        return self.socket
-    
-    def set_ip_address(self, ip_address):
+        self.send_lock = threading.Lock()
+
+    def connect(self):
+        """Open a TCP connection to the server."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((self.ip_address, self.port))
+        self.socket = sock
+
+    def send_tcp_message(self, message):
         """
-        Set or update the IP address for sending UDP messages.
-        
-        Args:
-            ip_address (str): The IP address to send UDP messages to
-        """
-        self.ip_address = ip_address
-    
-    def set_port(self, port):
-        """
-        Set or update the port number for UDP communication.
-        
-        Args:
-            port (int): The port number for UDP communication
-        """
-        self.port = port
-    
-    def send_udp_message(self, message, ip_address=None, port=None):
-        """
-        Send a UDP message to the specified IP address and port.
-        
+        Send a message over the TCP connection.
+
         Args:
             message (str or bytes): The message to send
-            ip_address (str, optional): Override the IP address for this message
-            port (int, optional): Override the port for this message
-            
-        Returns:
-            int: Number of bytes sent
-            
-        Raises:
-            ValueError: If IP address or port is not specified
         """
-        target_ip = ip_address or self.ip_address
-        target_port = port or self.port
-        
-        if target_ip is None:
-            raise ValueError("IP address must be specified either in __init__, set_ip_address(), or as an argument")
-        if target_port is None:
-            raise ValueError("Port must be specified either in __init__, set_port(), or as an argument")
-        
-        sock = self._get_socket()
-        
-        # Convert string message to bytes if necessary
         if isinstance(message, str):
             message = message.encode('utf-8')
-        
-        bytes_sent = sock.sendto(message, (target_ip, target_port))
-        return bytes_sent
-    
-    def receive_udp_message(self, buffer_size=1024, timeout=None):
+        with self.send_lock:
+            self.socket.sendall(message)
+
+    def receive_tcp_message(self, buffer_size=4096, timeout=None):
         """
-        Receive a UDP message from any sender.
-        
+        Receive a message from the TCP connection.
+
         Args:
-            buffer_size (int): Maximum number of bytes to receive (default: 1024)
-            timeout (float, optional): Timeout in seconds for the receive operation
-            
+            buffer_size (int): Maximum bytes to read per call
+            timeout (float, optional): Socket timeout in seconds
+
         Returns:
-            tuple: (data, address) where data is bytes and address is (ip, port)
-            
+            bytes: Received data, or None if the connection was closed
+
         Raises:
-            socket.timeout: If timeout is set and no message is received
+            socket.timeout: If timeout is set and no data arrives in time
         """
-        sock = self._get_socket()
-        
         if timeout is not None:
-            sock.settimeout(timeout)
-        
+            self.socket.settimeout(timeout)
         try:
-            data, address = sock.recvfrom(buffer_size)
-            return data, address
+            data = self.socket.recv(buffer_size)
+            return data if data else None
         finally:
             if timeout is not None:
-                sock.settimeout(None)
-    
-    def bind_to_port(self, port=None):
-        """
-        Bind the socket to a specific port for receiving messages.
-        
-        Args:
-            port (int, optional): Port to bind to (uses self.port if not specified)
-            
-        Raises:
-            ValueError: If port is not specified
-        """
-        target_port = port or self.port
-        if target_port is None:
-            raise ValueError("Port must be specified either in __init__, set_port(), or as an argument")
-        
-        sock = self._get_socket()
-        sock.bind(('', target_port))
-    
+                self.socket.settimeout(None)
+
     def close(self):
-        """Close the UDP socket."""
+        """Close the TCP connection."""
         if self.socket is not None:
             self.socket.close()
             self.socket = None
-    
+
     def __del__(self):
-        """Clean up socket when object is destroyed."""
         self.close()
 
 class CalibrateSystem:
@@ -398,15 +306,16 @@ class CalibrateSystem:
     Collects serial messages and calculates offset values for each receiver.
     """
 
-    def __init__(self, control_module: ControlModule):
+    def __init__(self, control_module: ControlModule, receiver_count: int):
         """
         Initialize the CalibrateSystem with a control module for communication.
 
         Args:
-            control_module: ControlModule instance for UDP communication
+            control_module: ControlModule instance for communication
+            receiver_count: Number of receivers in the system
         """
         self.control_module = control_module
-        self.receiver_count = control_module.receiver_count
+        self.receiver_count = receiver_count
 
     def run_calibration(self, min_reads):
         """

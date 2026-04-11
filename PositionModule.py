@@ -64,7 +64,8 @@ class PositionModule:
         """
         # Parse serial message if it's a string
         if isinstance(serial_message, str):
-            serial_values = serial_message.strip().split()
+            serial_values = serial_message.strip().split(", ")
+            
             try:
                 serial_values = [float(v) for v in serial_values]
             except ValueError as e:
