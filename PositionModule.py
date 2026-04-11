@@ -188,7 +188,50 @@ class PositionModule:
 
         return (position_non_linear, result)
 
-    # ~~~~~~ Internal Math functions ~~~~~~~ 
+    def get_position(self, serial_message):
+        """
+        Full pipeline: convert a raw serial/UDP message into a 2D position.
+
+        Chains serial_to_distances() → multilateration_method_1() in one call,
+        running the differential filter and OLS-seeded Levenberg-Marquardt solver
+        internally.  All intermediate values are returned for diagnostics.
+
+        Args:
+            serial_message (str | list): Raw tick values from the UDP/TCP stream.
+                Accepts the already-stripped content (no "N: " or "C: " prefix)
+                or a plain list/tuple of float tick values.
+
+        Returns:
+            dict:
+                'position'     : np.ndarray [x, y] in cm, or None on failure
+                'distances'    : tuple of per-receiver distances (cm)
+                'sane_indices' : list[int] of receivers that passed sanity checks
+                'residual_rms' : float RMS of solver residuals (cm), or None
+                'success'      : bool — True when the solver converged with >= 3
+                                  sane receivers
+        """
+        distances = self.serial_to_distances(serial_message)
+        position, result = self.multilateration_method_1(
+            distances, list(range(self.receiver_count))
+        )
+
+        rms = (
+            float(np.sqrt(np.mean(result.fun ** 2)))
+            if result is not None
+            else None
+        )
+        success = result is not None and result.success
+
+        return {
+            "position":     position,
+            "distances":    distances,
+            "sane_indices": list(self.last_sane_indices)
+                            if self.last_sane_indices is not None else [],
+            "residual_rms": rms,
+            "success":      success,
+        }
+
+    # ~~~~~~ Internal Math functions ~~~~~~~
 
     # Ordinary Linear Least Squares Solution to the system of linear equations
     def ordinary_least_squares(self, receiver_distances, indices):
