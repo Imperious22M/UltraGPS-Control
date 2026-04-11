@@ -1,7 +1,7 @@
 """
 position-lib-test.py
 ====================
-Performance and accuracy test for position_lib.UltraGPSLib.
+Performance and accuracy test for ultragps_position.UltraGPSLib.
 
 Two test modes:
 
@@ -34,7 +34,7 @@ Usage examples
 
 Options
 -------
-    --config          Path to config.toml              (default: ./config.toml)
+    --config          Path to config.toml              (default: ../config.toml)
     --ip              UltraGPS-Ground server IP         (default: 127.0.0.1)
     --tcp-port        TCP command port                  (default: 9000)
     --udp-port        UDP continuous-stream port        (default: 9001)
@@ -46,11 +46,15 @@ Options
 """
 
 import argparse
+import os
 import socket
 import statistics
 import time
 
-from position_lib import UltraGPSLib
+from ultragps_position import UltraGPSLib
+
+# Project root — one level up from tests/
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Server protocol constants ────────────────────────────────────────────────
 TCP_POLL_CMD       = b"P\n"   # single-shot poll (Normal command)
@@ -425,12 +429,12 @@ def run_udp_test(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="UltraGPS position_lib performance and accuracy test",
+        description="UltraGPS ultragps_position performance and accuracy test",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--config",
-        default="config.toml",
+        default=os.path.join(_PROJECT_ROOT, "config.toml"),
         help="Path to config.toml",
     )
     parser.add_argument(

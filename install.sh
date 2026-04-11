@@ -75,6 +75,10 @@ pip install --upgrade pip
 echo "Installing dependencies..."
 pip install numpy scipy matplotlib filterpy
 
+# Install local libraries
+echo "Installing local libraries..."
+pip install -e libs/ultragps_position
+
 echo
 echo "=== Installation Complete ==="
 echo

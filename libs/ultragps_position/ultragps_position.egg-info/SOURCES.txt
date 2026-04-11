@@ -1,0 +1,8 @@
+pyproject.toml
+ultragps_position/__init__.py
+ultragps_position/core.py
+ultragps_position.egg-info/PKG-INFO
+ultragps_position.egg-info/SOURCES.txt
+ultragps_position.egg-info/dependency_links.txt
+ultragps_position.egg-info/requires.txt
+ultragps_position.egg-info/top_level.txt

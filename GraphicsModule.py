@@ -11,11 +11,11 @@ import time
 import math
 import numpy as np
 from ControlModule import ControlModule
-from PositionModule import PositionModule
 from SettingsModule import SettingsModule
+from ultragps_position import UltraGPSLib
 
 class GraphicsModule:
-    def __init__(self, ip_address="127.0.0.1"):
+    def __init__(self, ip_address="127.0.0.1", config_path=None):
         """
         Initialize the GraphicsModule with a tkinter root window running in a background thread.
         """
@@ -52,9 +52,15 @@ class GraphicsModule:
         # Instantiate the settings module
         self.settings_module = SettingsModule()
 
+        # Instantiate position library (use settings module path if none supplied)
+        if config_path is None:
+            config_path = self.settings_module._config_path
+        self.position_lib = UltraGPSLib(config_path)
+
         # Instantiate matplotlib window classes
         self.position_window = PositionWindow(
-                                receiver_positions=self.settings_module.get_tower_coordinates()
+                                receiver_positions=self.settings_module.get_tower_coordinates(),
+                                position_lib=self.position_lib,
                                 )
 
         self.calibration_window = CalibrationWindow(
@@ -2304,7 +2310,7 @@ class GraphicsModule:
             #self._schedule_update(lambda: (self.root.quit() if self.root else None))
 
 class PositionWindow:
-    def __init__(self, receiver_positions=None):
+    def __init__(self, receiver_positions=None, position_lib=None):
         """
         Initialize the PositionWindow with matplotlib.
 
@@ -2312,7 +2318,12 @@ class PositionWindow:
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
+            position_lib (UltraGPSLib): Shared position library instance used for all
+                position calculations.
         """
+        if position_lib is None:
+            raise ValueError("Must provide a UltraGPSLib instance via position_lib=")
+        self.position_lib = position_lib
         self.grid_padding = 20 # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
 
@@ -2480,13 +2491,6 @@ class PositionWindow:
         # Thread running variable
         self.update_thread_run = False
 
-        # EXPERIMENTAL
-        from PositionModule import StablePositionEstimator
-        from PositionModule import CEPPositioning
-        #self.stable_pos = StablePositionEstimator(self.receiver_positions)
-        #receiver_coordinates = [cords for index,cords in receiver_positions]
-        self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
-
     def update_arena(self, receiver_positions):
         """
         Update the arena dimensions and receiver positions.
@@ -2544,9 +2548,8 @@ class PositionWindow:
         connected_y = [receiver_y[i] for i in connection_order]
         self.ax.plot(connected_x, connected_y, color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
 
-        # Update CEP positioning with new receiver positions
-        from PositionModule import CEPPositioning
-        self.stable_pos = CEPPositioning(receiver_positions, min_transmitters=3)
+        # Reload position library so it picks up the updated config
+        self.position_lib.reload()
 
         # Clear position history for fresh start
         self.position_history.clear()
@@ -2707,8 +2710,8 @@ class PositionWindow:
         red otherwise.
 
         Args:
-            multilat_sane_indices: Array of indices considered sane by PositionModule
-            cep_sane_indices: Array of indices considered sane by CEPPositioning
+            multilat_sane_indices: Array of indices considered sane by the LM solver
+            cep_sane_indices: Array of indices considered sane by the CEP solver
         """
         for i in range(6):
             # Receiver is sane if it appears in both sane indices lists
@@ -2775,104 +2778,76 @@ class PositionWindow:
 
         return filtered_distances
 
-    def update_cords_thread(self, control_module:ControlModule):
+    def update_cords_thread(self, control_module: ControlModule):
         """
-        Thread function to update the position data asyncronously
-        Must be instantiated from the graphical thread
-        Continuously updates the position until the graphics module stops running
+        Thread function to update the position data asyncronously.
+        Must be instantiated from the graphical thread.
+        Continuously updates the position until the graphics module stops running.
         """
         self.update_thread_run = True
-        # Check if graphics module is available
         graphics_module = getattr(self, '_graphics_module', None)
         print(f"Position update thread started. Graphics module running: {graphics_module.running if graphics_module else 'None'}")
 
-        # Load receiver offsets from settings module if available
-        receiver_offsets = {}
-        if graphics_module and hasattr(graphics_module, 'settings_module'):
-            settings = graphics_module.settings_module
-            for recv_id in range(6):
-                offset = settings.get_receiver_offset(recv_id)
-                if offset:
-                    receiver_offsets[recv_id] = offset
-
-        # Instantiate the position module with the array of all receiver positions and offsets
-        pos_module = PositionModule(self.receiver_positions, receiver_offsets=receiver_offsets)
+        # Reset library state so differential filter starts clean each session
+        self.position_lib.reset_state()
 
         while self.update_thread_run and (graphics_module is None or graphics_module.running):
             try:
                 time_start = time.time()
-                # Update position with random values (replace with actual position data)
-                #x, y = randint(1, 5), randint(1, 5)
 
-                # Request the system to send a pulse and calculate the distances
+                # Request a pulse and retrieve the raw tick message
                 control_module.update()
-                # Old method: get pre-calculated distances from server
-                # raw_distances = control_module.get_receiver_distances()
-                # New method: use serial messages and convert using calibrated offsets
-                serial_messages = control_module.get_serial_message()
-                raw_distances = pos_module.serial_to_distances(serial_messages)
-                print(f"Serial Message: {serial_messages}")
-                print(f"Raw Distances (from serial): {raw_distances}")
+                serial_message = control_module.get_serial_message()
+                ticks = UltraGPSLib.parse_message(serial_message)
+                print(f"Serial Message: {serial_message}")
 
-                # Apply median filter to reduce noise and outliers
-                #filtered_distances = self.apply_median_filter(raw_distances)
-                #print(f"Filtered Distances: {filtered_distances}")
-                filtered_distances = raw_distances
+                # Compute both LM and CEP positions in a single filter pass
+                result = self.position_lib.get_position_full(ticks)
 
-                # Use filtered distances for position calculation
-                pos, result = pos_module.multilateration_method_1(filtered_distances, [0,1,2,3,4,5])
-                x_calc = pos[0]
-                y_calc = pos[1]
-                print(f"tick Pos: ({x_calc}, {y_calc})")
+                raw_distances = result["distances"]
+                sane_indices  = result["sane_indices"]
+                lm_pos        = result["lm_position"]
+                cep_pos       = result["cep_position"]
+                invalid_pos   = not result["cep_success"]
 
-                best_pos, best_cep, best_indices, cov, all_results = \
-                        self.stable_pos.find_best_subset(filtered_distances, max_subsets_to_try=15)
-                print(f"CEP Position: {best_pos}, CEP: {best_cep}, Indices: {best_indices}")
+                print(f"Raw Distances: {raw_distances}")
 
-                # Validate that CEP position is within receiver bounds
-                validated_pos, invalid_position = self.stable_pos.validate_position(best_pos)
-                if invalid_position:
-                    print(f"CEP position invalid (outside bounds), using last good position")
-                best_pos = validated_pos
+                if lm_pos is not None:
+                    print(f"LM Pos: ({lm_pos[0]:.1f}, {lm_pos[1]:.1f})")
+                    self.update_cords(lm_pos[0], lm_pos[1])
 
-                #weighted_cep, final_cep, recv_weights, best_indices = \
-                    #self.stable_pos.adaptive_weighted_solution(filtered_distances)
+                if cep_pos is not None:
+                    print(f"CEP Pos: ({cep_pos[0]:.1f}, {cep_pos[1]:.1f})  "
+                          f"CEP: {result['cep']:.1f}  Indices: {result['best_indices']}")
+                    self.update_cep_cords(cep_pos[0], cep_pos[1])
 
-                # OVERRIDE CEP CORDS TO TEST OTHER TACTICS
-                #best_pos = weighted_cep
+                if invalid_pos:
+                    print("CEP position invalid (outside bounds), using last good position")
 
-                # Update multilateration position (blue dot)
-                self.update_cords(x_calc, y_calc)
-                # Update CEP position (orange dot)
-                self.update_cep_cords(best_pos[0], best_pos[1])
-                # Update distance graphs for all receivers (show raw distances)
+                # Update distance graphs
                 self.update_distances(raw_distances)
 
-                # Update LED indicators based on sane indices from both modules
-                multilat_sane = pos_module.last_sane_indices if pos_module.last_sane_indices is not None else []
-                cep_sane = self.stable_pos.last_sane_indices if self.stable_pos.last_sane_indices is not None else []
-                self.update_sane_leds(multilat_sane, cep_sane)
-                print(f"Sane indices - Multilat: {multilat_sane}, CEP: {cep_sane}")
+                # Update LED indicators (same sane set drives both multilat and CEP displays)
+                self.update_sane_leds(sane_indices, sane_indices)
+                print(f"Sane indices: {sane_indices}")
 
-                # Check for insufficient receivers (< 3 sane in either module)
-                insufficient_receivers = (len(multilat_sane) < 3) or (len(cep_sane) < 3)
+                insufficient_receivers = len(sane_indices) < 3
                 self.update_insufficient_receivers_led(insufficient_receivers)
                 if insufficient_receivers:
-                    print(f"WARNING: Insufficient receivers - Multilat: {len(multilat_sane)}, CEP: {len(cep_sane)}")
+                    print(f"WARNING: Insufficient receivers ({len(sane_indices)} sane)")
 
-                # Update CEP validity LED (green = valid, red = invalid position)
-                self.update_cep_validity_led(invalid_position)
+                self.update_cep_validity_led(invalid_pos)
 
                 print(f"~~~~~~~~~~~")
-                print(time.time()-time_start) 
+                print(time.time() - time_start)
+
                 # Re-check graphics module status
                 graphics_module = getattr(self, '_graphics_module', None)
-                #time.sleep(10)
 
             except Exception as e:
                 print(f"Error in update_cords_thread: {e}")
                 break
-        
+
         print("Position update thread stopped")
 
     def close(self):

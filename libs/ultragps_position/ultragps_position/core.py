@@ -1,6 +1,6 @@
 """
-UltraGPS Position Library
-=========================
+UltraGPS Position Library — core module
+========================================
 Standalone 2D-position computation library for the UltraGPS system.
 
 Parses the distance-tick messages produced by the UltraGPS-Ground server,
@@ -12,7 +12,7 @@ transmitter position using two methods:
 
 Quick-start
 -----------
-    from position_lib import UltraGPSLib
+    from ultragps_position import UltraGPSLib
 
     lib = UltraGPSLib("path/to/config.toml")
 
@@ -104,32 +104,17 @@ class UltraGPSLib:
     """
 
     def __init__(self, config_path: str, max_differential: float = 30.0):
-        config = load_config(config_path)
-
-        # Sort receivers by id so index == id throughout
-        receivers = sorted(config["receivers"], key=lambda r: r["id"])
-        self._receiver_count: int = len(receivers)
-
-        # (N, 2) float array  —  receiver positions in cm
-        self._receiver_coords: np.ndarray = np.array(
-            [r["position"] for r in receivers], dtype=float
-        )
-
-        # Per-receiver calibration parameters  {id: {slope, intercept}}
-        self._offsets: dict[int, dict] = {}
-        for r in receivers:
-            rid = int(r["id"])
-            off = r.get("offset", {})
-            self._offsets[rid] = {
-                "slope":     float(off.get("slope",     1.0)),
-                "intercept": float(off.get("intercept", 0.0)),
-            }
-
-        # Maximum pairwise receiver distance — used as arena-bounds gate
-        self._max_receiver_dist: float = self._calc_max_receiver_dist()
-
+        self._config_path: str = os.path.abspath(config_path)
         self.max_differential: float = max_differential
-        self.units: str = str(config.get("units", "cm"))
+
+        # ── Geometry / calibration (populated by _init_from_config) ──────────
+        self._receiver_count: int = 0
+        self._receiver_coords: np.ndarray = np.empty((0, 2))
+        self._offsets: dict[int, dict] = {}
+        self._max_receiver_dist: float = 0.0
+        self.units: str = "cm"
+
+        self._init_from_config()
 
         # ── Differential-filter state ────────────────────────────────────────
         self._last_distances:     Optional[np.ndarray] = None
@@ -143,6 +128,33 @@ class UltraGPSLib:
         self._cep_last_good_cep:     float                = float("inf")
         self._cep_last_good_indices: Optional[list]       = None
         self._cep_last_good_cov:     Optional[np.ndarray] = None
+
+    def _init_from_config(self) -> None:
+        """(Re-)load receiver geometry and calibration from the config file."""
+        config = load_config(self._config_path)
+
+        # Sort receivers by id so index == id throughout
+        receivers = sorted(config["receivers"], key=lambda r: r["id"])
+        self._receiver_count = len(receivers)
+
+        # (N, 2) float array  —  receiver positions in cm
+        self._receiver_coords = np.array(
+            [r["position"] for r in receivers], dtype=float
+        )
+
+        # Per-receiver calibration parameters  {id: {slope, intercept}}
+        self._offsets = {}
+        for r in receivers:
+            rid = int(r["id"])
+            off = r.get("offset", {})
+            self._offsets[rid] = {
+                "slope":     float(off.get("slope",     1.0)),
+                "intercept": float(off.get("intercept", 0.0)),
+            }
+
+        # Maximum pairwise receiver distance — used as arena-bounds gate
+        self._max_receiver_dist = self._calc_max_receiver_dist()
+        self.units = str(config.get("units", "cm"))
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -301,6 +313,107 @@ class UltraGPSLib:
         self._cep_last_good_indices = None
         self._cep_last_good_cov     = None
 
+    def reload(self, config_path: str | None = None) -> None:
+        """Reload receiver geometry and calibration from config, then reset state.
+
+        Call this whenever the arena map / calibration data changes on disk so
+        that subsequent ``get_position*`` calls use the updated settings.
+
+        Args:
+            config_path: Path to the config.toml to load.  If ``None``,
+                         reloads from the path given at construction time.
+        """
+        if config_path is not None:
+            self._config_path = os.path.abspath(config_path)
+        self._init_from_config()
+        self.reset_state()
+
+    def get_position_full(
+        self,
+        ticks: list | np.ndarray,
+        max_subsets: int = 15,
+    ) -> dict:
+        """Compute both OLS+LM and CEP positions in a single filter pass.
+
+        Runs the receiver sanity filter exactly once so the differential
+        history is updated consistently, then computes both the
+        Levenberg-Marquardt position and the CEP best-subset position from
+        the same filtered set.
+
+        Args:
+            ticks:       Integer tick values, one per receiver in id order.
+            max_subsets: Maximum receiver subsets to try for CEP.
+
+        Returns:
+            dict with keys:
+
+            ``'lm_position'``   — ``np.ndarray([x, y])`` or ``None``
+            ``'lm_rms'``        — float RMS residual (cm) or ``None``
+            ``'lm_success'``    — bool
+            ``'cep_position'``  — ``np.ndarray([x, y])`` or ``None``
+            ``'cep'``           — float CEP radius (cm)
+            ``'best_indices'``  — list[int] winning receiver subset
+            ``'cov'``           — 2×2 covariance array or ``None``
+            ``'cep_success'``   — bool (in-bounds valid solution found)
+            ``'distances'``     — tuple of calibrated distances (cm)
+            ``'sane_indices'``  — list[int] receivers that passed the filter
+        """
+        distances = self._ticks_to_distances(ticks)
+        sane_idx  = self._filter_receivers(distances)
+
+        # ── OLS + Levenberg-Marquardt ─────────────────────────────────────────
+        lm_pos     = self._lm_last_good_pos
+        lm_rms     = None
+        lm_success = False
+
+        if len(sane_idx) >= 3:
+            position, result = self._multilaterate(distances, sane_idx)
+            lm_rms     = float(np.sqrt(np.mean(result.fun ** 2))) if result is not None else None
+            lm_success = result is not None and result.success
+            if lm_success:
+                self._lm_last_good_pos = position.copy()
+                lm_pos = position
+            else:
+                lm_pos = position  # still use even if not converged
+
+        # ── CEP subset selection ──────────────────────────────────────────────
+        cep_pos     = self._cep_last_good_pos
+        cep_val     = self._cep_last_good_cep
+        cep_idx     = self._cep_last_good_indices
+        cep_cov     = self._cep_last_good_cov
+        cep_success = False
+
+        if len(sane_idx) >= 3:
+            best_pos, best_cep, best_idx, best_cov = self._find_best_subset(
+                distances, list(sane_idx), max_subsets
+            )
+            best_pos, invalid = self._validate_position(best_pos)
+
+            if not invalid and best_pos is not None:
+                self._cep_last_good_pos     = best_pos.copy()
+                self._cep_last_good_cep     = best_cep
+                self._cep_last_good_indices = best_idx
+                self._cep_last_good_cov     = best_cov
+
+            cep_pos     = best_pos
+            cep_val     = best_cep
+            cep_idx     = best_idx
+            cep_cov     = best_cov
+            cep_success = not invalid and best_pos is not None
+
+        return {
+            "lm_position":  lm_pos,
+            "lm_rms":       lm_rms,
+            "lm_success":   lm_success,
+            "cep_position": cep_pos,
+            "cep":          cep_val,
+            "best_indices": cep_idx,
+            "cov":          cep_cov,
+            "cep_success":  cep_success,
+            "distances":    distances,
+            "sane_indices": list(sane_idx),
+        }
+
     # ─── Properties ──────────────────────────────────────────────────────────
 
     @property
@@ -420,30 +533,13 @@ class UltraGPSLib:
         distances: tuple,
         indices: np.ndarray,
     ) -> tuple:
-        """Run OLS initial estimate followed by Levenberg-Marquardt refinement.
-
-        Args:
-            distances: Full per-receiver distance tuple (cm).
-            indices:   Indices of sane receivers to use.
-
-        Returns:
-            ``(position, result)`` — ``np.ndarray([x, y])`` and the scipy
-            ``OptimizeResult`` (or ``None`` on failure).
-        """
+        """Run OLS initial estimate followed by Levenberg-Marquardt refinement."""
         d_arr   = np.array(distances, dtype=float)
         initial = self._ols(d_arr, indices)
         return self._nlls(d_arr, initial, indices)
 
     def _ols(self, distances: np.ndarray, indices: np.ndarray) -> np.ndarray:
-        """Ordinary Least Squares linearisation of the multilateration system.
-
-        Picks receiver ``indices[0]`` as the reference anchor, then builds the
-        standard linearised A·x = b formulation and solves via
-        ``np.linalg.lstsq``.  This gives a fast (though approximate) initial
-        position estimate for the non-linear solver.
-
-        See: Foy 1976, Knapp & Carter 1976 for derivation.
-        """
+        """Ordinary Least Squares linearisation of the multilateration system."""
         coords = self._receiver_coords[indices]
         dists  = distances[indices]
 
@@ -468,23 +564,7 @@ class UltraGPSLib:
         initial: np.ndarray,
         indices: np.ndarray,
     ) -> tuple:
-        """Levenberg-Marquardt non-linear least squares refinement.
-
-        Minimises the sum of squared residuals:
-
-            r_i = ||receiver_i − x|| − distance_i
-
-        Uses the OLS estimate as the starting point, so convergence is fast
-        even for poor initial geometries.
-
-        Args:
-            distances: Full per-receiver distance array.
-            initial:   Initial [x, y] estimate from OLS.
-            indices:   Receiver indices to include in the fit.
-
-        Returns:
-            ``(position, OptimizeResult)``
-        """
+        """Levenberg-Marquardt non-linear least squares refinement."""
         coords = self._receiver_coords[indices]
         dists  = distances[indices]
 
@@ -501,23 +581,7 @@ class UltraGPSLib:
         distances: tuple,
         indices: list,
     ) -> tuple:
-        """Solve for position and compute the Circular Error Probable (CEP).
-
-        CEP approximation for a 2D Gaussian uncertainty:
-
-            CEP ≈ 0.59 · √(σ_x² + σ_y²) · √2
-
-        where (σ_x, σ_y) come from the Jacobian-based covariance estimate:
-
-            Cov = (Jᵀ W J)⁻¹,   W = diag(1 / (|residuals| + ε))
-
-        Args:
-            distances: Full per-receiver distance tuple (cm).
-            indices:   Receiver indices for this subset.
-
-        Returns:
-            ``(position, cep_radius, covariance_matrix)``
-        """
+        """Solve for position and compute the Circular Error Probable (CEP)."""
         d_arr    = np.array(distances, dtype=float)
         idx      = np.array(indices)
         initial  = self._ols(d_arr, idx)
@@ -546,20 +610,7 @@ class UltraGPSLib:
         sane_list: list,
         max_subsets: int,
     ) -> tuple:
-        """Try receiver subsets and return the one with the lowest CEP.
-
-        Always evaluates the full sane set first, then progressively smaller
-        subsets (down to size 3) until *max_subsets* combinations have been
-        tried.
-
-        Args:
-            distances:   Full per-receiver distance tuple (cm).
-            sane_list:   Indices of receivers that passed the sanity filter.
-            max_subsets: Upper bound on the number of subsets to evaluate.
-
-        Returns:
-            ``(best_position, best_cep, best_indices, best_cov)``
-        """
+        """Try receiver subsets and return the one with the lowest CEP."""
         all_combos: list[list] = [sane_list]
 
         for k in range(3, len(sane_list)):
@@ -593,17 +644,7 @@ class UltraGPSLib:
         self,
         position: Optional[np.ndarray],
     ) -> tuple:
-        """Check that *position* lies within the receiver bounding box.
-
-        Args:
-            position: ``[x, y]`` position to validate (may be ``None``).
-
-        Returns:
-            ``(validated_position, invalid_flag)``
-
-            If *position* is out-of-bounds, returns the last-known-good CEP
-            position (if any) and ``invalid_flag=True``.
-        """
+        """Check that *position* lies within the receiver bounding box."""
         if position is None:
             return self._cep_last_good_pos, True
 
