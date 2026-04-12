@@ -1,5 +1,3 @@
-from ControlModule import CommsModule, ControlModule
-#from ControlModule import NetworkClass
 from GraphicsModule import PositionWindow, MainWindow
 from GraphicsModule import GraphicsModule
 

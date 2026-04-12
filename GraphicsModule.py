@@ -10,7 +10,7 @@ import queue
 import time
 import math
 import numpy as np
-from ControlModule import ControlModule
+from ultragps_client import UltraGPSClient
 from SettingsModule import SettingsModule
 from ultragps_position import UltraGPSPositionLib
 
@@ -46,8 +46,9 @@ class GraphicsModule:
         # Store references to calibration point entry fields for arena maker
         self._cal_point_entries = {}
 
-        # Instantiate control module
-        self.control_module = ControlModule(ip_address)
+        # Instantiate client
+        self.client = UltraGPSClient(host=ip_address)
+        self.client.connect()
 
         # Instantiate the settings module
         self.settings_module = SettingsModule()
@@ -146,6 +147,7 @@ class GraphicsModule:
     def _on_closing(self):
         """Handle window closing event."""
         self.running = False
+        self.client.disconnect()
         if self.root:
             self.root.quit()
             # Don't destroy immediately - let mainloop finish
@@ -491,7 +493,7 @@ class GraphicsModule:
         if not position_thread_running:
             thread = threading.Thread(
                 target=self.position_window.update_cords_thread,
-                args=(self.control_module,),
+                args=(self.client,),
                 daemon=True,
                 name='position_update_thread'
             )
@@ -799,8 +801,7 @@ class GraphicsModule:
         """
         # Initial read to clear network
         try:
-            self.control_module.update()
-            _ = self.control_module.get_serial_message()
+            self.client.pulse()
         except Exception as e:
             print(f"Error clearing network: {e}")
 
@@ -812,23 +813,12 @@ class GraphicsModule:
         while self.calibration_window.calibration_running:
             try:
                 # Request new reading
-                self.control_module.update()
-                serial_msg = self.control_module.get_serial_message()
+                ticks = self.client.pulse()
 
-                # Parse serial message - assume space-separated values, one per receiver
-                try:
-                    serial_values = serial_msg.strip().split()
-                    if len(serial_values) >= 6:
-                        for recv_id in range(6):
-                            try:
-                                value = float(serial_values[recv_id])
-                                self.calibration_window.add_serial_reading(recv_id, value, run_num)
-                            except (ValueError, IndexError):
-                                pass
-                        read_count += 1
-                except Exception as e:
-                    print(f"Error parsing serial message: {e}")
-                    continue
+                if ticks is not None and len(ticks) >= 6:
+                    for recv_id in range(6):
+                        self.calibration_window.add_serial_reading(recv_id, float(ticks[recv_id]), run_num)
+                    read_count += 1
 
                 # Update histograms periodically instead of every read
                 if read_count % histogram_update_interval == 0:
@@ -2778,7 +2768,7 @@ class PositionWindow:
 
         return filtered_distances
 
-    def update_cords_thread(self, control_module: ControlModule):
+    def update_cords_thread(self, client: UltraGPSClient):
         """
         Thread function to update the position data asyncronously.
         Must be instantiated from the graphical thread.
@@ -2795,11 +2785,9 @@ class PositionWindow:
             try:
                 time_start = time.time()
 
-                # Request a pulse and retrieve the raw tick message
-                control_module.update()
-                serial_message = control_module.get_serial_message()
-                ticks = UltraGPSPositionLib.parse_message(serial_message)
-                print(f"Serial Message: {serial_message}")
+                # Request a pulse and retrieve tick counts
+                ticks = client.pulse()
+                print(f"Ticks: {ticks}")
 
                 # Compute both LM and CEP positions in a single filter pass
                 result = self.position_lib.get_position_full(ticks)
