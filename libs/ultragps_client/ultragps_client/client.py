@@ -145,6 +145,7 @@ class UltraGPSClient:
         # Latest continuous reading — written by UDP recv thread, read by caller
         self._latest_reading: Optional[list[int]] = None
         self._latest_reading_lock = threading.Lock()
+        self._reading_count: int = 0  # incremented each time a UDP packet is stored
 
         # Communication mode
         self._mode: CommMode = CommMode.NORMAL
@@ -181,6 +182,7 @@ class UltraGPSClient:
         self._running = True
         self._mode = CommMode.NORMAL
         self._latest_reading = None
+        self._reading_count = 0
         self._tcp_response = None
         self._tcp_response_event.clear()
 
@@ -291,6 +293,14 @@ class UltraGPSClient:
     def mode(self) -> CommMode:
         """Current communication mode (NORMAL or CONTINUOUS)."""
         return self._mode
+
+    @property
+    def reading_count(self) -> int:
+        """Total number of UDP packets stored since connect(). Increments on every
+        received continuous packet regardless of content, so callers can detect new
+        arrivals even when the payload is unchanged."""
+        with self._latest_reading_lock:
+            return self._reading_count
 
     # -----------------------------------------------------------------------
     # Private helpers
@@ -449,3 +459,4 @@ class UltraGPSClient:
             if parsed is not None:
                 with self._latest_reading_lock:
                     self._latest_reading = parsed
+                    self._reading_count += 1
