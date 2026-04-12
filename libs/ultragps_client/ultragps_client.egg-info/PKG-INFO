@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: ultragps-client
+Version: 1.0.0
+Summary: Standalone TCP/UDP client library for the UltraGPS ground station server
+Requires-Python: >=3.11
