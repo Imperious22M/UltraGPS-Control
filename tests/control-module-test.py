@@ -4,7 +4,7 @@ control-module-test.py
 End-to-end performance test for the UltraGPS control pipeline.
 
 Polls the UltraGPS-Ground server via ControlModule, converts each raw tick
-message to a 2D position using UltraGPSLib, and reports timing and position
+message to a 2D position using UltraGPSPositionLib, and reports timing and position
 statistics for the full round-trip.
 
 Usage examples
@@ -40,13 +40,13 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from ControlModule import ControlModule
-from ultragps_position import UltraGPSLib
+from ultragps_position import UltraGPSPositionLib
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_test(
-    lib:            UltraGPSLib,
+    lib:            UltraGPSPositionLib,
     control_module: ControlModule,
     num_iterations: int,
     use_cep:        bool,
@@ -59,7 +59,7 @@ def run_test(
             control_module.update()
             raw = control_module.get_serial_message()
             if raw:
-                lib.get_position(UltraGPSLib.parse_message(raw))
+                lib.get_position(UltraGPSPositionLib.parse_message(raw))
         except Exception:
             pass
         time.sleep(0.05)
@@ -99,7 +99,7 @@ def run_test(
             print(f"  [iter {i+1:4d}] Empty message — skipping")
             continue
 
-        ticks = UltraGPSLib.parse_message(raw)
+        ticks = UltraGPSPositionLib.parse_message(raw)
         if not ticks:
             print(f"  [iter {i+1:4d}] Parse error — skipping")
             continue
@@ -248,7 +248,7 @@ def main() -> None:
 
     # ── Load position library ─────────────────────────────────────────────────
     print(f"Loading config: {args.config}")
-    lib = UltraGPSLib(args.config)
+    lib = UltraGPSPositionLib(args.config)
     coords = lib.receiver_coords
     print(f"  Receivers : {lib.receiver_count}")
     print(f"  Units     : {lib.units}")

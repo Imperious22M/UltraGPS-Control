@@ -12,7 +12,7 @@ import math
 import numpy as np
 from ControlModule import ControlModule
 from SettingsModule import SettingsModule
-from ultragps_position import UltraGPSLib
+from ultragps_position import UltraGPSPositionLib
 
 class GraphicsModule:
     def __init__(self, ip_address="127.0.0.1", config_path=None):
@@ -55,7 +55,7 @@ class GraphicsModule:
         # Instantiate position library (use settings module path if none supplied)
         if config_path is None:
             config_path = self.settings_module._config_path
-        self.position_lib = UltraGPSLib(config_path)
+        self.position_lib = UltraGPSPositionLib(config_path)
 
         # Instantiate matplotlib window classes
         self.position_window = PositionWindow(
@@ -2318,11 +2318,11 @@ class PositionWindow:
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
-            position_lib (UltraGPSLib): Shared position library instance used for all
+            position_lib (UltraGPSPositionLib): Shared position library instance used for all
                 position calculations.
         """
         if position_lib is None:
-            raise ValueError("Must provide a UltraGPSLib instance via position_lib=")
+            raise ValueError("Must provide a UltraGPSPositionLib instance via position_lib=")
         self.position_lib = position_lib
         self.grid_padding = 20 # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
@@ -2798,7 +2798,7 @@ class PositionWindow:
                 # Request a pulse and retrieve the raw tick message
                 control_module.update()
                 serial_message = control_module.get_serial_message()
-                ticks = UltraGPSLib.parse_message(serial_message)
+                ticks = UltraGPSPositionLib.parse_message(serial_message)
                 print(f"Serial Message: {serial_message}")
 
                 # Compute both LM and CEP positions in a single filter pass

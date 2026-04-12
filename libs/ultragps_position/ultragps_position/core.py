@@ -12,15 +12,15 @@ transmitter position using two methods:
 
 Quick-start
 -----------
-    from ultragps_position import UltraGPSLib
+    from ultragps_position import UltraGPSPositionLib
 
-    lib = UltraGPSLib("path/to/config.toml")
+    lib = UltraGPSPositionLib("path/to/config.toml")
 
     # Both methods take a plain list/array of integer tick values — one per
     # receiver in id order.  Use parse_message() to convert a raw server
     # string (TCP or UDP) into the required tick list.
 
-    ticks = UltraGPSLib.parse_message("N: 1234, 2345, 3456, 4567, 5678, 6789")
+    ticks = UltraGPSPositionLib.parse_message("N: 1234, 2345, 3456, 4567, 5678, 6789")
     result = lib.get_position(ticks)
     if result["success"]:
         x, y = result["position"]
@@ -40,7 +40,7 @@ comma-space-separated integer tick counts, one per receiver in id order:
     "N: <tick0>, <tick1>, <tick2>, <tick3>, <tick4>, <tick5>"   (TCP poll)
     "C: <tick0>, <tick1>, ..."                                   (UDP stream)
 
-Use ``UltraGPSLib.parse_message(raw)`` to convert either format into a
+Use ``UltraGPSPositionLib.parse_message(raw)`` to convert either format into a
 ``list[int]`` suitable for ``get_position`` / ``get_position_cep``.
 
 Each tick is converted to centimetres inside the library via:
@@ -87,11 +87,11 @@ def load_config(config_path: str) -> dict:
 # Main library class
 # ─────────────────────────────────────────────────────────────────────────────
 
-class UltraGPSLib:
+class UltraGPSPositionLib:
     """Standalone 2D-position computation library for the UltraGPS system.
 
     All positioning state (differential filter history, last-good position
-    fallback) is stored on the instance, so each ``UltraGPSLib`` object
+    fallback) is stored on the instance, so each ``UltraGPSPositionLib`` object
     represents one independent tracking session.  Call ``reset_state()`` to
     start fresh without recreating the object.
 

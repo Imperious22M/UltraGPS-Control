@@ -1,7 +1,7 @@
 """
 position-lib-test.py
 ====================
-Performance and accuracy test for ultragps_position.UltraGPSLib.
+Performance and accuracy test for ultragps_position.UltraGPSPositionLib.
 
 Two test modes:
 
@@ -51,7 +51,7 @@ import socket
 import statistics
 import time
 
-from ultragps_position import UltraGPSLib
+from ultragps_position import UltraGPSPositionLib
 
 # Project root — one level up from tests/
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -104,7 +104,7 @@ def open_udp(ip: str, udp_port: int) -> socket.socket:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _print_stats(
-    lib: UltraGPSLib,
+    lib: UltraGPSPositionLib,
     iter_times:  list[float],
     solve_times: list[float],
     sane_counts: list[int],
@@ -175,7 +175,7 @@ def _print_stats(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_tcp_test(
-    lib:           UltraGPSLib,
+    lib:           UltraGPSPositionLib,
     ip:            str,
     tcp_port:      int,
     num_iterations: int,
@@ -195,7 +195,7 @@ def run_tcp_test(
     for _ in range(3):
         raw = tcp_poll(sock)
         if raw:
-            lib.get_position(UltraGPSLib.parse_message(raw))
+            lib.get_position(UltraGPSPositionLib.parse_message(raw))
         time.sleep(0.05)
     lib.reset_state()
     print("done\n")
@@ -222,7 +222,7 @@ def run_tcp_test(
             print(f"  [iter {i+1:4d}] No response — skipping")
             continue
 
-        ticks = UltraGPSLib.parse_message(raw)
+        ticks = UltraGPSPositionLib.parse_message(raw)
 
         t_solve = time.time()
         result  = lib.get_position_cep(ticks, max_subsets=max_subsets) if use_cep \
@@ -279,7 +279,7 @@ def run_tcp_test(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_udp_test(
-    lib:          UltraGPSLib,
+    lib:          UltraGPSPositionLib,
     ip:           str,
     tcp_port:     int,
     udp_port:     int,
@@ -356,7 +356,7 @@ def run_udp_test(
         raw = data.decode("utf-8", errors="replace")
         pkt_count += 1
 
-        ticks = UltraGPSLib.parse_message(raw)
+        ticks = UltraGPSPositionLib.parse_message(raw)
         if not ticks:
             continue          # malformed packet
 
@@ -490,7 +490,7 @@ def main() -> None:
 
     # ── Load library ──────────────────────────────────────────────────────────
     print(f"Loading config: {args.config}")
-    lib = UltraGPSLib(args.config)
+    lib = UltraGPSPositionLib(args.config)
     coords = lib.receiver_coords
     print(f"  Receivers : {lib.receiver_count}")
     print(f"  Units     : {lib.units}")
