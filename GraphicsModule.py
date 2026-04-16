@@ -13,6 +13,7 @@ import numpy as np
 from ultragps_client import UltraGPSClient
 from SettingsModule import SettingsModule
 from ultragps_position import UltraGPSPositionLib
+from ultragps_calibration import UltraGPSCalibration
 
 class GraphicsModule:
     def __init__(self, ip_address="127.0.0.1", config_path=None):
@@ -58,6 +59,9 @@ class GraphicsModule:
             config_path = self.settings_module._config_path
         self.position_lib = UltraGPSPositionLib(config_path)
 
+        # Instantiate calibration library
+        self.cal = UltraGPSCalibration(config_path, self.client)
+
         # Instantiate matplotlib window classes
         self.position_window = PositionWindow(
                                 receiver_positions=self.settings_module.get_tower_coordinates(),
@@ -66,7 +70,7 @@ class GraphicsModule:
 
         self.calibration_window = CalibrationWindow(
                                 receiver_positions=self.settings_module.get_tower_coordinates(),
-                                settings_module=self.settings_module
+                                cal=self.cal,
                                 )
 
         self.arena_maker_window = ArenaMakerWindow(
@@ -768,82 +772,14 @@ class GraphicsModule:
             return
 
         # Clear run 1 data
-        self.calibration_window.clear_histogram_data(1)
+        self.cal.clear_run_data(1)
 
         # Start calibration run 1
-        self._run_calibration(1, min_reads)
-
-    def _run_calibration(self, run_num, min_reads):
-        """
-        Run the calibration process for a specific run.
-
-        Args:
-            run_num: 1 or 2 for which calibration run
-            min_reads: Minimum number of reads required for each receiver
-        """
-        self.calibration_window.calibration_running = True
-        self.calibration_window.current_run = run_num
-
-        # Start calibration thread
-        cal_thread = threading.Thread(
-            target=self._calibration_thread,
-            args=(run_num, min_reads),
-            daemon=True,
-            name=f'calibration_run_{run_num}'
+        self.cal.start_run(
+            1, min_reads,
+            on_reading=lambda run, n: self.root.after(0, lambda r=run: self._update_all_histograms(r)),
+            on_complete=lambda run: self.root.after(0, lambda r=run, mr=min_reads: self._calibration_run_complete(r, mr)),
         )
-        cal_thread.start()
-        self.active_threads.append(cal_thread)
-
-    def _calibration_thread(self, run_num, min_reads):
-        """
-        Thread function for calibration run.
-        Collects serial messages until min_reads threshold is met for all receivers.
-        """
-        # Initial read to clear network
-        try:
-            self.client.pulse()
-        except Exception as e:
-            print(f"Error clearing network: {e}")
-
-        # Track when to update histograms (every N reads instead of every read)
-        read_count = 0
-        histogram_update_interval = 5  # Update histograms every 5 reads
-
-        # Keep reading until all receivers have met min_reads threshold
-        while self.calibration_window.calibration_running:
-            try:
-                # Request new reading
-                ticks = self.client.pulse()
-
-                if ticks is not None and len(ticks) >= 6:
-                    for recv_id in range(6):
-                        self.calibration_window.add_serial_reading(recv_id, float(ticks[recv_id]), run_num)
-                    read_count += 1
-
-                # Update histograms periodically instead of every read
-                if read_count % histogram_update_interval == 0:
-                    self.root.after(0, lambda n=run_num: self._update_all_histograms(n))
-
-                # Check if all receivers have met min_reads threshold
-                all_met = True
-                for recv_id in range(6):
-                    if self.calibration_window.get_max_count(recv_id, run_num) < min_reads:
-                        all_met = False
-                        break
-
-                if all_met:
-                    break
-
-            except Exception as e:
-                print(f"Error in calibration thread: {e}")
-                break
-
-        # Final histogram update
-        self.root.after(0, lambda n=run_num: self._update_all_histograms(n))
-
-        self.calibration_window.calibration_running = False
-        # Schedule next step on main thread
-        self.root.after(0, lambda: self._calibration_run_complete(run_num, min_reads))
 
     def _update_all_histograms(self, run_num):
         """Update all histograms for a given run."""
@@ -933,10 +869,14 @@ class GraphicsModule:
                 return
 
             # Clear run 2 data
-            self.calibration_window.clear_histogram_data(2)
+            self.cal.clear_run_data(2)
 
             # Start calibration run 2
-            self._run_calibration(2, min_reads)
+            self.cal.start_run(
+                2, min_reads,
+                on_reading=lambda run, n: self.root.after(0, lambda r=run: self._update_all_histograms(r)),
+                on_complete=lambda run: self.root.after(0, lambda r=run, mr=min_reads: self._calibration_run_complete(r, mr)),
+            )
 
         else:
             # Run 2 complete, calculate offsets
@@ -944,45 +884,8 @@ class GraphicsModule:
             self._calculate_and_save_offsets()
 
     def _calculate_and_save_offsets(self):
-        """
-        Calculate and save the offset values for all receivers.
-        a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
-        b = known_dist_1 - (a * valid_count_1)
-        """
-        for recv_id in range(6):
-            # Get known distances from settings
-            cal_distances = self.settings_module.get_receiver_cal_distances(recv_id)
-            if not cal_distances or len(cal_distances) < 2:
-                print(f"Missing calibration distances for receiver {recv_id}")
-                continue
-
-            known_dist_1 = cal_distances[0]  # Distance to cal_point_1
-            known_dist_2 = cal_distances[1]  # Distance to cal_point_2
-
-            # Get most frequent serial values from each run
-            valid_count_1 = self.calibration_window.get_most_frequent_value(recv_id, 1)
-            valid_count_2 = self.calibration_window.get_most_frequent_value(recv_id, 2)
-
-            if valid_count_1 is None or valid_count_2 is None:
-                print(f"Missing calibration data for receiver {recv_id}")
-                continue
-
-            # Calculate slope (a) and intercept (b)
-            try:
-                if valid_count_1 == valid_count_2:
-                    print(f"Warning: Same serial value for both runs on receiver {recv_id}")
-                    continue
-
-                a = (known_dist_1 - known_dist_2) / (valid_count_1 - valid_count_2)
-                b = known_dist_1 - (a * valid_count_1)
-
-                # Save to settings (note: per task doc, slope=a, intercept=b)
-                self.settings_module.set_receiver_offset(recv_id, a, b)
-
-                print(f"Receiver {recv_id + 1}: a={a:.4f}, b={b:.4f}")
-
-            except Exception as e:
-                print(f"Error calculating offset for receiver {recv_id}: {e}")
+        """Calculate and save offset values for all receivers via the calibration library."""
+        self.cal.calculate_and_save_offsets()
 
         # Update the offset display
         self._update_offset_display()
@@ -2843,7 +2746,7 @@ class PositionWindow:
         plt.close(self.fig)
 
 class CalibrationWindow:
-    def __init__(self, receiver_positions=None, settings_module=None):
+    def __init__(self, receiver_positions=None, cal=None):
         """
         Initialize the CalibrationWindow with matplotlib.
         Contains position arena, histogram plots for Run 1 and Run 2, and offset display.
@@ -2852,25 +2755,17 @@ class CalibrationWindow:
             receiver_positions (list of tuples): List of (id, (x, y)) positions for 6 receivers.
                 "id" is a 0-indexed id that denotes the tower coordinate to the tower in the real world
                 The label created is index+1 to mimic real-world labels which are 1-indexed
-            settings_module: Reference to SettingsModule for reading/saving offsets
+            cal: UltraGPSCalibration instance that owns histogram data and calibration state.
         """
         self.grid_padding = 20  # Extra padding on the side to make receivers visible
         self.position_history = deque(maxlen=50)  # Store last 50 positions
-        self.settings_module = settings_module
+        self.cal = cal
 
         # Store compass rose elements for updating
         self.compass_x_arrow = None
         self.compass_x_text = None
         self.compass_y_arrow = None
         self.compass_y_text = None
-
-        # Calibration state
-        self.calibration_running = False
-        self.current_run = 0  # 0 = not running, 1 = run 1, 2 = run 2
-
-        # Histogram data storage: {receiver_id: {serial_value: count}}
-        self.run1_data = {i: {} for i in range(6)}
-        self.run2_data = {i: {} for i in range(6)}
 
         # Calibration point display elements
         self.cal_point_scatter = None
@@ -3122,32 +3017,6 @@ class CalibrationWindow:
             self.cal_point_label.remove()
             self.cal_point_label = None
 
-    def clear_histogram_data(self, run_num):
-        """Clear histogram data for a specific run."""
-        if run_num == 1:
-            self.run1_data = {i: {} for i in range(6)}
-        elif run_num == 2:
-            self.run2_data = {i: {} for i in range(6)}
-
-    def add_serial_reading(self, receiver_id, serial_value, run_num):
-        """
-        Add a serial reading to the histogram data.
-
-        Args:
-            receiver_id: Receiver ID (0-5)
-            serial_value: The serial value read
-            run_num: 1 or 2 for which run
-        """
-        if run_num == 1:
-            data = self.run1_data
-        else:
-            data = self.run2_data
-
-        if serial_value in data[receiver_id]:
-            data[receiver_id][serial_value] += 1
-        else:
-            data[receiver_id][serial_value] = 1
-
     def update_histogram(self, receiver_id, run_num):
         """
         Update the histogram display for a specific receiver.
@@ -3158,10 +3027,9 @@ class CalibrationWindow:
         """
         if run_num == 1:
             ax = self.run1_axes[receiver_id]
-            data = self.run1_data[receiver_id]
         else:
             ax = self.run2_axes[receiver_id]
-            data = self.run2_data[receiver_id]
+        data = self.cal.get_histogram_data(receiver_id, run_num)
 
         # Clear existing bars
         ax.clear()
@@ -3193,48 +3061,6 @@ class CalibrationWindow:
             most_common_count = sorted_data[0][1]
             ax.set_xlabel(f'{int(most_common_value)} (n={most_common_count})',
                          color='#39FF14', fontsize=8, fontweight='bold')
-
-    def get_most_frequent_value(self, receiver_id, run_num):
-        """
-        Get the most frequent serial value for a receiver in a run.
-
-        Args:
-            receiver_id: Receiver ID (0-5)
-            run_num: 1 or 2 for which run
-
-        Returns:
-            The serial value with the highest count, or None if no data
-        """
-        if run_num == 1:
-            data = self.run1_data[receiver_id]
-        else:
-            data = self.run2_data[receiver_id]
-
-        if not data:
-            return None
-
-        return max(data.items(), key=lambda x: x[1])[0]
-
-    def get_max_count(self, receiver_id, run_num):
-        """
-        Get the maximum count for any serial value for a receiver in a run.
-
-        Args:
-            receiver_id: Receiver ID (0-5)
-            run_num: 1 or 2 for which run
-
-        Returns:
-            The maximum count, or 0 if no data
-        """
-        if run_num == 1:
-            data = self.run1_data[receiver_id]
-        else:
-            data = self.run2_data[receiver_id]
-
-        if not data:
-            return 0
-
-        return max(data.values())
 
     def update_cords(self, x, y):
         """
