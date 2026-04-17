@@ -44,11 +44,18 @@ class NetworkThread(QThread):
     cep_validity_changed = pyqtSignal(bool)           # True = invalid position
     insuff_changed       = pyqtSignal(bool)           # True = < 3 sane receivers
     pos_per_sec_updated  = pyqtSignal(float)          # positions calculated per second
+    barrier_triggered    = pyqtSignal(object)         # BarrierEvent
 
-    def __init__(self, client: UltraGPSClient, position_lib: UltraGPSPositionLib):
+    def __init__(
+        self,
+        client: UltraGPSClient,
+        position_lib: UltraGPSPositionLib,
+        barrier_manager: BarrierManager,
+    ):
         super().__init__()
         self._client = client
         self._position_lib = position_lib
+        self._barrier_manager = barrier_manager
         self._active = False
         self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
 
@@ -96,9 +103,15 @@ class NetworkThread(QThread):
                 cep_success   = result.get("cep_success", False)
 
                 if lm_pos is not None:
-                    self.lm_updated.emit(float(lm_pos[0]), float(lm_pos[1]))
+                    lx, ly = float(lm_pos[0]), float(lm_pos[1])
+                    self.lm_updated.emit(lx, ly)
+                    for event in self._barrier_manager.check_position(lx, ly, 'lm'):
+                        self.barrier_triggered.emit(event)
                 if cep_pos is not None:
-                    self.cep_updated.emit(float(cep_pos[0]), float(cep_pos[1]))
+                    cx, cy = float(cep_pos[0]), float(cep_pos[1])
+                    self.cep_updated.emit(cx, cy)
+                    for event in self._barrier_manager.check_position(cx, cy, 'cep'):
+                        self.barrier_triggered.emit(event)
                 if raw_distances is not None:
                     self.distances_updated.emit(list(raw_distances))
 
@@ -142,8 +155,6 @@ class PositionPanel(QWidget):
     stopped when the panel becomes visible/hidden.
     """
 
-    barrier_triggered = pyqtSignal(str, str, float, float)  # name, event_type, x, y
-
     def __init__(
         self,
         client: UltraGPSClient,
@@ -159,6 +170,7 @@ class PositionPanel(QWidget):
         self.setStyleSheet("background-color: black;")
 
         config_dir = os.path.dirname(self._settings._config_path)
+        print(f"Loading barriers from {config_dir}")
         self._barrier_manager = BarrierManager(config_dir)
         self._barrier_manager.load_barriers()
         self._barrier_patches: dict[str, list] = {}
@@ -185,7 +197,8 @@ class PositionPanel(QWidget):
         self._build_ui()
 
         # NetworkThread
-        self._net_thread = NetworkThread(self._client, self._position_lib)
+        self._net_thread = NetworkThread(
+            self._client, self._position_lib, self._barrier_manager)
         self._net_thread.lm_updated.connect(self._on_lm_updated)
         self._net_thread.cep_updated.connect(self._on_cep_updated)
         self._net_thread.distances_updated.connect(self._on_distances_updated)
@@ -193,6 +206,7 @@ class PositionPanel(QWidget):
         self._net_thread.cep_validity_changed.connect(self._on_cep_validity_changed)
         self._net_thread.insuff_changed.connect(self._on_insuff_changed)
         self._net_thread.pos_per_sec_updated.connect(self._on_pos_sec_updated)
+        self._net_thread.barrier_triggered.connect(self._handle_barrier_event)
         self._mode_cb.toggled.connect(self._net_thread.set_mode)
 
         # Canvas refresh at every 50 ms (started/stopped with panel visibility)
@@ -604,11 +618,6 @@ class PositionPanel(QWidget):
             self._barrier_patches[barrier.name] = artists
 
     def _handle_barrier_event(self, event: BarrierEvent) -> None:
-        self.barrier_triggered.emit(
-            event.barrier_name, event.event_type,
-            float(event.position[0]), float(event.position[1]),
-        )
-
         if event.event_type in ('enter', 'inside', 'outside'):
             for artist in self._barrier_patches.get(event.barrier_name, []):
                 try:
@@ -659,9 +668,6 @@ class PositionPanel(QWidget):
             self.vehicle_point.set_data([], [])
             self.vehicle_trail.set_data([], [])
 
-        for event in self._barrier_manager.check_position(x, y, 'lm'):
-            self._handle_barrier_event(event)
-
     def _on_cep_updated(self, x: float, y: float) -> None:
         self.cep_history.append((x, y))
         self.cep_label.setText(f'CEP: ({x:.1f}, {y:.1f})')
@@ -675,9 +681,6 @@ class PositionPanel(QWidget):
         else:
             self.cep_point.set_data([], [])
             self.cep_trail.set_data([], [])
-
-        for event in self._barrier_manager.check_position(x, y, 'cep'):
-            self._handle_barrier_event(event)
 
     def _on_distances_updated(self, distances: list) -> None:
         for i in range(6):

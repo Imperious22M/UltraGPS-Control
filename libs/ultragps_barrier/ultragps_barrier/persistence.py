@@ -128,19 +128,19 @@ def save_barriers(filepath: str, barriers: list[BarrierData]) -> None:
             f.write(f'alpha = {barrier.alpha}\n')
 
             if barrier.barrier_type == BarrierType.POLYGON:
-                verts = [[v[0], v[1]] for v in barrier.vertices]
+                verts = [[float(v[0]), float(v[1])] for v in barrier.vertices]
                 f.write(f'vertices = {verts}\n')
 
             elif barrier.barrier_type == BarrierType.CIRCLE:
-                cx, cy = barrier.center[0], barrier.center[1]
+                cx, cy = float(barrier.center[0]), float(barrier.center[1])
                 f.write(f'center = [{cx}, {cy}]\n')
-                f.write(f'radius = {barrier.radius}\n')
+                f.write(f'radius = {float(barrier.radius)}\n')
 
             elif barrier.barrier_type == BarrierType.LINE:
-                p1x, p1y = barrier.point1[0], barrier.point1[1]
-                p2x, p2y = barrier.point2[0], barrier.point2[1]
+                p1x, p1y = float(barrier.point1[0]), float(barrier.point1[1])
+                p2x, p2y = float(barrier.point2[0]), float(barrier.point2[1])
                 f.write(f'point1 = [{p1x}, {p1y}]\n')
                 f.write(f'point2 = [{p2x}, {p2y}]\n')
-                f.write(f'thickness = {barrier.thickness}\n')
+                f.write(f'thickness = {float(barrier.thickness)}\n')
 
             f.write('\n')

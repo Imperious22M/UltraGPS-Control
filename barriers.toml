@@ -1,0 +1,11 @@
+[[barrier]]
+name = "barrier_1"
+type = "circle"
+trigger_mode = "continuous"
+trigger_when = "outside"
+callback_name = "on_barrier"
+color = "#FF0000"
+alpha = 0.3
+center = [-1.5384239592183349, 2.05960432091274]
+radius = 108.35354594049893
+

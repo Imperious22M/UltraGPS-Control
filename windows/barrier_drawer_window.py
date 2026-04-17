@@ -67,6 +67,9 @@ class BarrierDrawerPanel(QWidget):
         self._line_point1 = None
         self._preview_artists: list = []
 
+        # In-place editing state (-1 = not editing)
+        self._editing_row: int = -1
+
         # Canvas event connection IDs
         self._cid_press = None
         self._cid_release = None
@@ -416,6 +419,7 @@ class BarrierDrawerPanel(QWidget):
         self._polygon_vertices = []
         self._circle_center = None
         self._line_point1 = None
+        self._editing_row = -1
         self._clear_preview()
         self._status_lbl.setText("Drawing cancelled")
         self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
@@ -740,6 +744,10 @@ class BarrierDrawerPanel(QWidget):
         if row < 0 or row >= len(self._barriers):
             return
         barrier = self._barriers[row]
+        if self._editing_row == row:
+            self._editing_row = -1
+        elif self._editing_row > row:
+            self._editing_row -= 1
         self._remove_barrier_patches(barrier.name)
         self._barriers.pop(row)
         self._refresh_barrier_list()
@@ -751,15 +759,26 @@ class BarrierDrawerPanel(QWidget):
         row = self._barrier_list.currentRow()
         if row < 0 or row >= len(self._barriers):
             return
-        barrier = self._barriers[row]
 
-        # Load barrier fields into controls
+        if self._editing_row == row:
+            # Second press on same barrier: apply control values in-place
+            self._apply_controls_to_barrier(row)
+        else:
+            # First press: load barrier values into controls
+            self._editing_row = row
+            self._load_barrier_into_controls(self._barriers[row])
+            name = self._barriers[row].name
+            self._status_lbl.setText(
+                f"Loaded '{name}' \u2014 modify fields then press Edit to apply")
+            self._status_lbl.setStyleSheet("color: #00FFFF; font: 10px Arial;")
+
+    def _load_barrier_into_controls(self, barrier: BarrierData) -> None:
         type_map = {BarrierType.POLYGON: "Polygon",
-                    BarrierType.CIRCLE: "Circle",
-                    BarrierType.LINE: "Line"}
-        trigger_map = {TriggerMode.EVENT: "Event",
-                       TriggerMode.CONTINUOUS: "Continuous"}
-        when_map = {TriggerWhen.INSIDE: "Inside",
+                    BarrierType.CIRCLE:  "Circle",
+                    BarrierType.LINE:    "Line"}
+        trigger_map = {TriggerMode.EVENT:       "Event",
+                       TriggerMode.CONTINUOUS:  "Continuous"}
+        when_map = {TriggerWhen.INSIDE:  "Inside",
                     TriggerWhen.OUTSIDE: "Outside"}
 
         self._type_combo.setCurrentText(type_map.get(barrier.barrier_type, "Polygon"))
@@ -774,12 +793,33 @@ class BarrierDrawerPanel(QWidget):
         self._name_edit.setText(barrier.name)
         self._callback_edit.setText(barrier.callback_name)
 
+    def _apply_controls_to_barrier(self, row: int) -> None:
+        self._editing_row = -1
+        barrier = self._barriers[row]
+        old_name = barrier.name
+
+        trigger_map = {"Event": TriggerMode.EVENT, "Continuous": TriggerMode.CONTINUOUS}
+        when_map = {"Inside": TriggerWhen.INSIDE, "Outside": TriggerWhen.OUTSIDE}
+
+        barrier.trigger_mode  = trigger_map[self._trigger_combo.currentText()]
+        barrier.trigger_when  = when_map[self._when_combo.currentText()]
+        barrier.color         = self._color_combo.currentText()
+        barrier.alpha         = self._alpha_spin.value()
+        barrier.callback_name = self._callback_edit.text().strip() or "on_barrier"
+
+        new_name = self._name_edit.text().strip() or old_name
+        if new_name != old_name:
+            patches = self._barrier_patches.pop(old_name, [])
+            self._barrier_patches[new_name] = patches
+        barrier.name = new_name
+
+        # Redraw with updated colour/alpha
         self._remove_barrier_patches(barrier.name)
-        self._barriers.pop(row)
+        self._draw_barrier(barrier)
         self._refresh_barrier_list()
         self._canvas.draw_idle()
-        self._status_lbl.setText(f"Editing '{barrier.name}' \u2014 click Draw to re-draw")
-        self._status_lbl.setStyleSheet("color: #00FFFF; font: 10px Arial;")
+        self._status_lbl.setText(f"Updated '{barrier.name}'")
+        self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
 
     # ------------------------------------------------------------------
     # Save / Load / Clear

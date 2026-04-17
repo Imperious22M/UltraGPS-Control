@@ -308,12 +308,14 @@ class BarrierEvent:
     """A single barrier trigger event.
 
     Args:
-        barrier_name: Name of the barrier that triggered.
-        event_type:   One of "enter", "exit", "inside", "outside".
-        position:     (x, y) position that triggered the event.
-        source:       Position source — "lm" or "cep".
+        barrier_name:  Name of the barrier that triggered.
+        callback_name: Callback name registered on the barrier (e.g. "on_barrier").
+        event_type:    One of "enter", "exit", "inside", "outside".
+        position:      (x, y) position that triggered the event.
+        source:        Position source — "lm" or "cep".
     """
     barrier_name: str
+    callback_name: str
     event_type: str
     position: tuple
     source: str
@@ -390,6 +392,7 @@ class BarrierManager:
                 if condition_met and not prev_state:
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
+                        callback_name=barrier.callback_name,
                         event_type="enter",
                         position=point,
                         source=source,
@@ -397,6 +400,7 @@ class BarrierManager:
                 elif not condition_met and prev_state:
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
+                        callback_name=barrier.callback_name,
                         event_type="exit",
                         position=point,
                         source=source,
@@ -406,6 +410,7 @@ class BarrierManager:
                     event_type = "inside" if barrier.trigger_when == TriggerWhen.INSIDE else "outside"
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
+                        callback_name=barrier.callback_name,
                         event_type=event_type,
                         position=point,
                         source=source,
