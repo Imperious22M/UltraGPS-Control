@@ -186,9 +186,9 @@ class PositionPanel(QWidget):
         self._net_thread.pos_per_sec_updated.connect(self._on_pos_sec_updated)
         self._mode_cb.toggled.connect(self._net_thread.set_mode)
 
-        # Canvas refresh at ~30 Hz (started/stopped with panel visibility)
+        # Canvas refresh at every 50 ms (started/stopped with panel visibility)
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(33)
+        self._refresh_timer.setInterval(50)
         self._refresh_timer.timeout.connect(self._on_refresh_timer)
 
     # ------------------------------------------------------------------
