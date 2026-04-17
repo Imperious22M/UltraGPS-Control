@@ -35,33 +35,53 @@ class NetworkThread(QThread):
     main thread via Qt's queued connection mechanism.
     """
 
-    lm_updated          = pyqtSignal(float, float)   # LM x, y
-    cep_updated         = pyqtSignal(float, float)   # CEP x, y
-    distances_updated   = pyqtSignal(object)          # list[float] raw distances
-    sane_updated        = pyqtSignal(object)          # list[int] sane receiver indices
+    lm_updated           = pyqtSignal(float, float)  # LM x, y
+    cep_updated          = pyqtSignal(float, float)  # CEP x, y
+    distances_updated    = pyqtSignal(object)         # list[float] raw distances
+    sane_updated         = pyqtSignal(object)         # list[int] sane receiver indices
     cep_validity_changed = pyqtSignal(bool)           # True = invalid position
     insuff_changed       = pyqtSignal(bool)           # True = < 3 sane receivers
+    pos_per_sec_updated  = pyqtSignal(float)          # positions calculated per second
 
     def __init__(self, client: UltraGPSClient, position_lib: UltraGPSPositionLib):
         super().__init__()
         self._client = client
         self._position_lib = position_lib
         self._active = False
+        self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
+
+    def set_mode(self, use_continuous: bool) -> None:
+        self._use_continuous = use_continuous
 
     def run(self) -> None:
         self._active = True
         self._position_lib.reset_state()
-        # Two consecutive calls mirrors the original code
-        self._client.continuous()
-        self._client.continuous()
+
+        prev_continuous = None
+        rate_count = 0
+        rate_start = time.monotonic()
 
         while self._active:
+            current_continuous = self._use_continuous
+
+            # Handle mode transitions
+            if current_continuous != prev_continuous:
+                if current_continuous:
+                    self._client.continuous()
+                    self._client.continuous()
+                prev_continuous = current_continuous
+
             try:
-                ticks = self._client.get_latest_reading()
+                if current_continuous:
+                    ticks = self._client.get_latest_reading()
+                else:
+                    ticks = self._client.pulse()
+
                 result = self._position_lib.get_position_full(ticks)
 
                 if result is None:
-                    time.sleep(0.1)
+                    if current_continuous:
+                        time.sleep(0.1)
                     continue
 
                 raw_distances = result.get("distances")
@@ -81,11 +101,20 @@ class NetworkThread(QThread):
                 self.cep_validity_changed.emit(not cep_success)
                 self.insuff_changed.emit(len(sane_indices) < 3)
 
-                time.sleep(0.1)
+                rate_count += 1
+                elapsed = time.monotonic() - rate_start
+                if elapsed >= 1.0:
+                    self.pos_per_sec_updated.emit(rate_count / elapsed)
+                    rate_count = 0
+                    rate_start = time.monotonic()
+
+                if current_continuous:
+                    time.sleep(0.1)
 
             except Exception as exc:
                 print(f"NetworkThread error: {exc}")
-                time.sleep(0.1)
+                if current_continuous:
+                    time.sleep(0.1)
 
         print("NetworkThread stopped")
 
@@ -125,6 +154,7 @@ class PositionPanel(QWidget):
         self.cep_history         = deque(maxlen=50)
         self.distance_histories  = [deque(maxlen=50) for _ in range(6)]
         self.distance_filter_buffers = [deque(maxlen=5) for _ in range(6)]
+        self._last_draw_time = time.monotonic()
 
         # Compass rose artist handles
         self._compass_x_arrow = None
@@ -148,11 +178,13 @@ class PositionPanel(QWidget):
         self._net_thread.sane_updated.connect(self._on_sane_updated)
         self._net_thread.cep_validity_changed.connect(self._on_cep_validity_changed)
         self._net_thread.insuff_changed.connect(self._on_insuff_changed)
+        self._net_thread.pos_per_sec_updated.connect(self._on_pos_sec_updated)
+        self._mode_cb.toggled.connect(self._net_thread.set_mode)
 
         # Canvas refresh at ~30 Hz (started/stopped with panel visibility)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(33)
-        self._refresh_timer.timeout.connect(self._canvas.draw_idle)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
 
     # ------------------------------------------------------------------
     # Figure construction
@@ -337,6 +369,13 @@ class PositionPanel(QWidget):
         self.insuff_led.setStyleSheet(
             "background-color:#39FF14; border-radius:10px; border:2px solid white;")
         insuff_layout.addWidget(self.insuff_led, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self._mode_cb = QCheckBox("Continuous:UDP")
+        self._mode_cb.setChecked(True)
+        self._mode_cb.setStyleSheet("color:#00FFFF; font:bold 10px Arial;")
+        self._mode_cb.toggled.connect(
+            lambda checked: self._mode_cb.setText("Continuous:UDP" if checked else "Normal:TCP"))
+        insuff_layout.addWidget(self._mode_cb, alignment=Qt.AlignmentFlag.AlignCenter)
         ctrl_layout.addWidget(insuff_group)
 
         # CEP group
@@ -366,6 +405,24 @@ class PositionPanel(QWidget):
         cep_cb.toggled.connect(lambda checked: setattr(self, 'show_cep', checked))
         cep_layout.addWidget(cep_cb, alignment=Qt.AlignmentFlag.AlignCenter)
         ctrl_layout.addWidget(cep_group)
+
+        # Performance counters
+        perf_group = QWidget()
+        perf_layout = QVBoxLayout(perf_group)
+        perf_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._fps_label = QLabel("FPS: --")
+        self._fps_label.setFont(QFont('Courier', 11, QFont.Weight.Bold))
+        self._fps_label.setStyleSheet("color:#AAAAAA;")
+        self._fps_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        perf_layout.addWidget(self._fps_label)
+
+        self._pos_sec_label = QLabel("Pos/s: --")
+        self._pos_sec_label.setFont(QFont('Courier', 11, QFont.Weight.Bold))
+        self._pos_sec_label.setStyleSheet("color:#AAAAAA;")
+        self._pos_sec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        perf_layout.addWidget(self._pos_sec_label)
+        ctrl_layout.addWidget(perf_group)
 
         # Navigation buttons
         nav_group = QWidget()
@@ -520,6 +577,17 @@ class PositionPanel(QWidget):
         color = '#FF0000' if insufficient else '#39FF14'
         self.insuff_led.setStyleSheet(
             f"background-color:{color}; border-radius:10px; border:2px solid white;")
+
+    def _on_pos_sec_updated(self, rate: float) -> None:
+        self._pos_sec_label.setText(f"Pos/s: {rate:.1f}")
+
+    def _on_refresh_timer(self) -> None:
+        now = time.monotonic()
+        dt = now - self._last_draw_time
+        if dt > 0:
+            self._fps_label.setText(f"FPS: {1.0 / dt:.1f}")
+        self._last_draw_time = now
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Panel lifecycle
