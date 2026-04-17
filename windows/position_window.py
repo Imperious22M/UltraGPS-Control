@@ -66,6 +66,9 @@ class NetworkThread(QThread):
 
             # Handle mode transitions
             if current_continuous != prev_continuous:
+                # Send the continouous command only if needed to switch modes
+                # This is because the pulse command will automatically change the 
+                # mode on the Arduino to continouous.
                 if current_continuous:
                     self._client.continuous()
                     self._client.continuous()
@@ -107,7 +110,9 @@ class NetworkThread(QThread):
                     self.pos_per_sec_updated.emit(rate_count / elapsed)
                     rate_count = 0
                     rate_start = time.monotonic()
-
+                
+                # If we are in continuous mode, we need to add a delay to
+                # prevent the server from spamming
                 if current_continuous:
                     time.sleep(0.1)
 
