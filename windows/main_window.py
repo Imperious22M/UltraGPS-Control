@@ -46,21 +46,25 @@ class UltraGPSMainWindow(QMainWindow):
         from windows.position_window import PositionPanel
         from windows.calibration_window import CalibrationPanel
         from windows.arena_maker_window import ArenaMakerPanel
+        from windows.barrier_drawer_window import BarrierDrawerPanel
 
         panels = [
-            ('main',        MainMenuPanel(main_window=self)),
-            ('position',    PositionPanel(
-                                client=self.client,
-                                position_lib=self.position_lib,
-                                settings_module=self.settings_module,
-                                main_window=self)),
-            ('calibration', CalibrationPanel(
-                                cal=self.cal,
-                                settings_module=self.settings_module,
-                                main_window=self)),
-            ('arena_maker', ArenaMakerPanel(
-                                settings_module=self.settings_module,
-                                main_window=self)),
+            ('main',           MainMenuPanel(main_window=self)),
+            ('position',       PositionPanel(
+                                   client=self.client,
+                                   position_lib=self.position_lib,
+                                   settings_module=self.settings_module,
+                                   main_window=self)),
+            ('calibration',    CalibrationPanel(
+                                   cal=self.cal,
+                                   settings_module=self.settings_module,
+                                   main_window=self)),
+            ('arena_maker',    ArenaMakerPanel(
+                                   settings_module=self.settings_module,
+                                   main_window=self)),
+            ('barrier_drawer', BarrierDrawerPanel(
+                                   settings_module=self.settings_module,
+                                   main_window=self)),
         ]
 
         for name, panel in panels:
@@ -114,9 +118,10 @@ class MainMenuPanel(QWidget):
         layout.addSpacing(40)
 
         buttons = [
-            ("Position",    'position',    '#39FF14', 'black',  '#2BCC10'),
-            ("Calibration", 'calibration', '#FF00FF', 'white',  '#CC00CC'),
-            ("Setup",       'arena_maker', '#00FFFF', 'black',  '#00CCCC'),
+            ("Position",    'position',       '#39FF14', 'black',  '#2BCC10'),
+            ("Calibration", 'calibration',    '#FF00FF', 'white',  '#CC00CC'),
+            ("Setup",       'arena_maker',    '#00FFFF', 'black',  '#00CCCC'),
+            ("Barriers",    'barrier_drawer', '#FF8800', 'black',  '#CC7000'),
         ]
 
         for text, panel_name, bg, fg, hover in buttons:

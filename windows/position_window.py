@@ -4,6 +4,7 @@ Contains NetworkThread (QThread) for continuous position calculation and
 PositionPanel (QWidget) for display.  All positioning logic lives here.
 """
 
+import os
 import time
 import numpy as np
 from collections import deque
@@ -17,11 +18,12 @@ from PyQt6.QtGui import QFont
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Polygon as MplPolygon
 
 from ultragps_client import UltraGPSClient
 from ultragps_position import UltraGPSPositionLib
 from SettingsModule import SettingsModule
+from ultragps_barrier import BarrierManager, BarrierEvent
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,8 @@ class PositionPanel(QWidget):
     stopped when the panel becomes visible/hidden.
     """
 
+    barrier_triggered = pyqtSignal(str, str, float, float)  # name, event_type, x, y
+
     def __init__(
         self,
         client: UltraGPSClient,
@@ -153,6 +157,11 @@ class PositionPanel(QWidget):
         self._settings = settings_module
         self._main_window = main_window
         self.setStyleSheet("background-color: black;")
+
+        config_dir = os.path.dirname(self._settings._config_path)
+        self._barrier_manager = BarrierManager(config_dir)
+        self._barrier_manager.load_barriers()
+        self._barrier_patches: dict[str, list] = {}
 
         self.grid_padding = 20
         self.position_history    = deque(maxlen=50)
@@ -452,6 +461,12 @@ class PositionPanel(QWidget):
         nav_layout.addWidget(arena_btn)
         ctrl_layout.addWidget(nav_group)
 
+        self._barrier_status_label = QLabel("")
+        self._barrier_status_label.setFont(QFont('Arial', 11, QFont.Weight.Bold))
+        self._barrier_status_label.setStyleSheet("color: #FF4444;")
+        self._barrier_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ctrl_layout.addWidget(self._barrier_status_label)
+
         layout.addWidget(ctrl)
 
     # ------------------------------------------------------------------
@@ -524,6 +539,109 @@ class PositionPanel(QWidget):
         return filtered
 
     # ------------------------------------------------------------------
+    # Barrier rendering & event handling
+    # ------------------------------------------------------------------
+
+    def _draw_barriers(self) -> None:
+        for artists in self._barrier_patches.values():
+            for artist in artists:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+        self._barrier_patches.clear()
+
+        for barrier in self._barrier_manager.barriers:
+            artists = []
+            color = barrier.color
+            alpha = barrier.alpha
+
+            if barrier.barrier_type.value == 'polygon' and barrier.vertices:
+                patch = MplPolygon(
+                    barrier.vertices, closed=True,
+                    facecolor=color, alpha=alpha,
+                    edgecolor=color, linewidth=2, zorder=3,
+                )
+                self.ax.add_patch(patch)
+                artists.append(patch)
+
+            elif barrier.barrier_type.value == 'circle' and barrier.center and barrier.radius:
+                patch = Circle(
+                    barrier.center, barrier.radius,
+                    facecolor=color, alpha=alpha,
+                    edgecolor=color, linewidth=2, zorder=3,
+                )
+                self.ax.add_patch(patch)
+                artists.append(patch)
+
+            elif barrier.barrier_type.value == 'line' and barrier.point1 and barrier.point2:
+                x1, y1 = barrier.point1
+                x2, y2 = barrier.point2
+                thickness_pts = max(2, barrier.thickness or 5)
+                line, = self.ax.plot(
+                    [x1, x2], [y1, y2],
+                    color=color, alpha=alpha,
+                    linewidth=thickness_pts, zorder=3,
+                    solid_capstyle='round',
+                )
+                artists.append(line)
+
+            if artists and barrier.vertices:
+                cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
+                cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
+                lbl = self.ax.text(
+                    cx, cy, barrier.name, color='white',
+                    fontsize=8, ha='center', va='center', zorder=4,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5))
+                artists.append(lbl)
+            elif artists and barrier.center:
+                lbl = self.ax.text(
+                    barrier.center[0], barrier.center[1], barrier.name,
+                    color='white', fontsize=8, ha='center', va='center', zorder=4,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5))
+                artists.append(lbl)
+
+            self._barrier_patches[barrier.name] = artists
+
+    def _handle_barrier_event(self, event: BarrierEvent) -> None:
+        self.barrier_triggered.emit(
+            event.barrier_name, event.event_type,
+            float(event.position[0]), float(event.position[1]),
+        )
+
+        if event.event_type in ('enter', 'inside', 'outside'):
+            for artist in self._barrier_patches.get(event.barrier_name, []):
+                try:
+                    if hasattr(artist, 'set_edgecolor'):
+                        artist.set_edgecolor('#FF0000')
+                        artist.set_linewidth(3)
+                    elif hasattr(artist, 'set_color'):
+                        artist.set_color('#FF0000')
+                except Exception:
+                    pass
+            if hasattr(self, '_barrier_status_label'):
+                self._barrier_status_label.setText(
+                    f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type})")
+                self._barrier_status_label.setStyleSheet(
+                    "color: #FF4444; font: bold 11px Arial;")
+
+        elif event.event_type == 'exit':
+            for barrier in self._barrier_manager.barriers:
+                if barrier.name == event.barrier_name:
+                    for artist in self._barrier_patches.get(event.barrier_name, []):
+                        try:
+                            if hasattr(artist, 'set_edgecolor'):
+                                artist.set_edgecolor(barrier.color)
+                                artist.set_linewidth(2)
+                            elif hasattr(artist, 'set_color'):
+                                artist.set_color(barrier.color)
+                        except Exception:
+                            pass
+                    break
+            if hasattr(self, '_barrier_status_label'):
+                self._barrier_status_label.setText("")
+
+    # ------------------------------------------------------------------
     # NetworkThread signal handlers  (run on main thread via queued conn)
     # ------------------------------------------------------------------
 
@@ -541,6 +659,9 @@ class PositionPanel(QWidget):
             self.vehicle_point.set_data([], [])
             self.vehicle_trail.set_data([], [])
 
+        for event in self._barrier_manager.check_position(x, y, 'lm'):
+            self._handle_barrier_event(event)
+
     def _on_cep_updated(self, x: float, y: float) -> None:
         self.cep_history.append((x, y))
         self.cep_label.setText(f'CEP: ({x:.1f}, {y:.1f})')
@@ -554,6 +675,9 @@ class PositionPanel(QWidget):
         else:
             self.cep_point.set_data([], [])
             self.cep_trail.set_data([], [])
+
+        for event in self._barrier_manager.check_position(x, y, 'cep'):
+            self._handle_barrier_event(event)
 
     def _on_distances_updated(self, distances: list) -> None:
         for i in range(6):
@@ -600,6 +724,8 @@ class PositionPanel(QWidget):
 
     def on_panel_show(self) -> None:
         self.update_arena(self._settings.get_tower_coordinates())
+        self._barrier_manager.reload_barriers()
+        self._draw_barriers()
         if not self._net_thread.isRunning():
             self._net_thread.start()
         self._refresh_timer.start()
@@ -608,3 +734,4 @@ class PositionPanel(QWidget):
         self._refresh_timer.stop()
         if self._net_thread.isRunning():
             self._net_thread.stop()
+        self._barrier_manager.clear_states()

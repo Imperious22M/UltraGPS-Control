@@ -3,3 +3,4 @@ matplotlib==3.10.8
 numpy==2.4.4
 PyQt6>=6.4.0
 scipy==1.17.1
+-e libs/ultragps_barrier

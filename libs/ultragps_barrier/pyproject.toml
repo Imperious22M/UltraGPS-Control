@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultragps-barrier"
+version = "1.0.0"
+description = "Virtual barrier/obstacle zone library for the UltraGPS positioning system"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
