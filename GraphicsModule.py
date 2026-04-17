@@ -786,7 +786,6 @@ class GraphicsModule:
         for recv_id in range(6):
             self.calibration_window.update_histogram(recv_id, run_num)
 
-
     def _calibration_run_complete(self, run_num, min_reads):
         """Called when a calibration run is complete."""
         if run_num == 1:
@@ -2684,12 +2683,15 @@ class PositionWindow:
         # Reset library state so differential filter starts clean each session
         self.position_lib.reset_state()
 
+        client.continuous()
+        client.continuous()
         while self.update_thread_run and (graphics_module is None or graphics_module.running):
             try:
                 time_start = time.time()
 
                 # Request a pulse and retrieve tick counts
-                ticks = client.pulse()
+                #ticks = client.pulse()
+                ticks = client.get_latest_reading()
                 print(f"Ticks: {ticks}")
 
                 # Compute both LM and CEP positions in a single filter pass
@@ -2731,6 +2733,7 @@ class PositionWindow:
 
                 print(f"~~~~~~~~~~~")
                 print(time.time() - time_start)
+                time.sleep(1/10)  # Sleep to limit update rate (20 Hz)
 
                 # Re-check graphics module status
                 graphics_module = getattr(self, '_graphics_module', None)
