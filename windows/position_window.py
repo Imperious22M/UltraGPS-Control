@@ -174,6 +174,7 @@ class PositionPanel(QWidget):
         self._barrier_manager = BarrierManager(config_dir)
         self._barrier_manager.load_barriers()
         self._barrier_patches: dict[str, list] = {}
+        self._barrier_reset_timers: dict[str, QTimer] = {}
 
         self.grid_padding = 20
         self.position_history    = deque(maxlen=50)
@@ -617,38 +618,61 @@ class PositionPanel(QWidget):
 
             self._barrier_patches[barrier.name] = artists
 
+    def _highlight_barrier(self, barrier_name: str) -> None:
+        for artist in self._barrier_patches.get(barrier_name, []):
+            try:
+                if hasattr(artist, 'set_edgecolor'):
+                    artist.set_edgecolor('#FF0000')
+                    artist.set_linewidth(3)
+                elif hasattr(artist, 'set_color'):
+                    artist.set_color('#FF0000')
+            except Exception:
+                pass
+
+    def _reset_barrier_visual(self, barrier_name: str) -> None:
+        for barrier in self._barrier_manager.barriers:
+            if barrier.name == barrier_name:
+                for artist in self._barrier_patches.get(barrier_name, []):
+                    try:
+                        if hasattr(artist, 'set_edgecolor'):
+                            artist.set_edgecolor(barrier.color)
+                            artist.set_linewidth(2)
+                        elif hasattr(artist, 'set_color'):
+                            artist.set_color(barrier.color)
+                    except Exception:
+                        pass
+                break
+        self._barrier_status_label.setText("")
+
+    def _get_reset_timer(self, barrier_name: str) -> QTimer:
+        if barrier_name not in self._barrier_reset_timers:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(10)
+            timer.timeout.connect(lambda: self._reset_barrier_visual(barrier_name))
+            self._barrier_reset_timers[barrier_name] = timer
+        return self._barrier_reset_timers[barrier_name]
+
     def _handle_barrier_event(self, event: BarrierEvent) -> None:
-        if event.event_type in ('enter', 'inside', 'outside'):
-            for artist in self._barrier_patches.get(event.barrier_name, []):
-                try:
-                    if hasattr(artist, 'set_edgecolor'):
-                        artist.set_edgecolor('#FF0000')
-                        artist.set_linewidth(3)
-                    elif hasattr(artist, 'set_color'):
-                        artist.set_color('#FF0000')
-                except Exception:
-                    pass
-            if hasattr(self, '_barrier_status_label'):
-                self._barrier_status_label.setText(
-                    f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type})")
-                self._barrier_status_label.setStyleSheet(
-                    "color: #FF4444; font: bold 11px Arial;")
+        if event.event_type == 'enter':
+            self._highlight_barrier(event.barrier_name)
+            self._barrier_status_label.setText(
+                f"\u26a0 BARRIER: {event.barrier_name} (enter)")
+            self._barrier_status_label.setStyleSheet(
+                "color: #FF4444; font: bold 11px Arial;")
+
+        elif event.event_type in ('inside', 'outside'):
+            self._highlight_barrier(event.barrier_name)
+            self._barrier_status_label.setText(
+                f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type})")
+            self._barrier_status_label.setStyleSheet(
+                "color: #FF4444; font: bold 11px Arial;")
+            timer = self._get_reset_timer(event.barrier_name)
+            timer.stop()
+            timer.start()
 
         elif event.event_type == 'exit':
-            for barrier in self._barrier_manager.barriers:
-                if barrier.name == event.barrier_name:
-                    for artist in self._barrier_patches.get(event.barrier_name, []):
-                        try:
-                            if hasattr(artist, 'set_edgecolor'):
-                                artist.set_edgecolor(barrier.color)
-                                artist.set_linewidth(2)
-                            elif hasattr(artist, 'set_color'):
-                                artist.set_color(barrier.color)
-                        except Exception:
-                            pass
-                    break
-            if hasattr(self, '_barrier_status_label'):
-                self._barrier_status_label.setText("")
+            self._reset_barrier_visual(event.barrier_name)
 
     # ------------------------------------------------------------------
     # NetworkThread signal handlers  (run on main thread via queued conn)
