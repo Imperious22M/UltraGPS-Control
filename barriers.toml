@@ -1,11 +1,10 @@
 [[barrier]]
 name = "barrier_1"
-type = "circle"
-trigger_mode = "continuous"
-trigger_when = "outside"
+type = "polygon"
+trigger_mode = "event"
+trigger_when = "inside"
 callback_name = "on_barrier"
-color = "#FF0000"
+color = "#00FF00"
 alpha = 0.3
-center = [-1.5384239592183349, 2.05960432091274]
-radius = 108.35354594049893
+vertices = [[-47.507362644363326, -46.84442541340931], [-52.78072698149782, -147.0383478189645], [56.076579692206906, -148.1683544626362], [44.02317549304237, -51.36445198809602]]
 
