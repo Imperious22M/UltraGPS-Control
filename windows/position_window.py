@@ -117,6 +117,7 @@ class NetworkThread(QThread):
                                 car.stop()
                         elif event.event_type == 'exit':
                             with Vehicle("10.235.222.209") as car:
+                                car.stop()
                                 car.joystick_mode()
                             
 
