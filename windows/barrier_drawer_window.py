@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QComboBox, QDoubleSpinBox, QMessageBox,
     QFrame,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QFont, QColor
 
 from matplotlib.figure import Figure
@@ -69,6 +69,7 @@ class BarrierDrawerPanel(QWidget):
 
         # In-place editing state (-1 = not editing)
         self._editing_row: int = -1
+        self._current_mode: str = 'normal'
 
         # Canvas event connection IDs
         self._cid_press = None
@@ -286,72 +287,89 @@ class BarrierDrawerPanel(QWidget):
         r2 = QHBoxLayout(row2)
         r2.setContentsMargins(10, 5, 10, 5)
 
-        draw_btn = QPushButton("Draw")
-        draw_btn.setStyleSheet("""
+        self._draw_btn = QPushButton("New Barrier")
+        self._draw_btn.setStyleSheet("""
             QPushButton { background-color:#FF8800; color:black; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#CC6D00; }
+            QPushButton:disabled { background-color:#5C3100; color:#666666; }
         """)
-        draw_btn.clicked.connect(self._start_drawing)
-        r2.addWidget(draw_btn)
+        self._draw_btn.clicked.connect(self._start_drawing)
+        r2.addWidget(self._draw_btn)
 
-        finish_btn = QPushButton("Finish")
-        finish_btn.setStyleSheet("""
+        self._finish_btn = QPushButton("Finish")
+        self._finish_btn.setStyleSheet("""
             QPushButton { background-color:#39FF14; color:black; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#2BCC10; }
+            QPushButton:disabled { background-color:#1A5508; color:#666666; }
         """)
-        finish_btn.clicked.connect(self._finish_drawing)
-        r2.addWidget(finish_btn)
+        self._finish_btn.clicked.connect(self._finish_drawing)
+        r2.addWidget(self._finish_btn)
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet("""
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setStyleSheet("""
             QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
+            QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
-        cancel_btn.clicked.connect(self._cancel_drawing)
-        r2.addWidget(cancel_btn)
+        self._cancel_btn.clicked.connect(self._cancel_drawing)
+        r2.addWidget(self._cancel_btn)
 
         r2.addSpacing(20)
 
-        edit_btn = QPushButton("Edit")
-        edit_btn.setStyleSheet("""
+        self._edit_btn = QPushButton("Edit")
+        self._edit_btn.setStyleSheet("""
             QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#00CCCC; }
+            QPushButton:disabled { background-color:#005555; color:#666666; }
         """)
-        edit_btn.clicked.connect(self._edit_selected)
-        r2.addWidget(edit_btn)
+        self._edit_btn.clicked.connect(self._edit_selected)
+        r2.addWidget(self._edit_btn)
 
-        del_btn = QPushButton("Delete")
-        del_btn.setStyleSheet("""
+        self._edit_cancel_btn = QPushButton("Cancel")
+        self._edit_cancel_btn.setStyleSheet("""
             QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
+            QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
-        del_btn.clicked.connect(self._delete_selected)
-        r2.addWidget(del_btn)
+        self._edit_cancel_btn.clicked.connect(self._cancel_editing)
+        r2.addWidget(self._edit_cancel_btn)
 
         r2.addSpacing(20)
 
-        save_btn = QPushButton("Save All")
-        save_btn.setStyleSheet("""
+        self._save_btn = QPushButton("Save All")
+        self._save_btn.setStyleSheet("""
             QPushButton { background-color:#FFD700; color:black; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#FFC000; }
+            QPushButton:disabled { background-color:#554700; color:#666666; }
         """)
-        save_btn.clicked.connect(self._save_barriers)
-        r2.addWidget(save_btn)
+        self._save_btn.clicked.connect(self._save_barriers)
+        r2.addWidget(self._save_btn)
 
-        clear_btn = QPushButton("Clear All")
-        clear_btn.setStyleSheet("""
+        self._clear_btn = QPushButton("Clear All")
+        self._clear_btn.setStyleSheet("""
             QPushButton { background-color:#888888; color:white; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#666666; }
+            QPushButton:disabled { background-color:#444444; color:#666666; }
         """)
-        clear_btn.clicked.connect(self._clear_all)
-        r2.addWidget(clear_btn)
+        self._clear_btn.clicked.connect(self._clear_all)
+        r2.addWidget(self._clear_btn)
+
+        self._del_btn = QPushButton("Delete Barrier")
+        self._del_btn.setStyleSheet("""
+            QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
+                          padding:4px 12px; border-radius:4px; }
+            QPushButton:hover { background-color:#CC3333; }
+            QPushButton:disabled { background-color:#552222; color:#666666; }
+        """)
+        self._del_btn.clicked.connect(self._delete_selected)
+        r2.addWidget(self._del_btn)
 
         r2.addStretch()
         left_col.addWidget(row2)
@@ -371,9 +389,14 @@ class BarrierDrawerPanel(QWidget):
         self._barrier_list.setStyleSheet("""
             QListWidget { background:#111111; color:white; font:11px Arial;
                           border:1px solid #FF8800; }
+            QListWidget::item { background:#111111; color:white; }
+            QListWidget::item:focus { outline:0; }
             QListWidget::item:selected { background:#FF8800; color:black; }
+            QListWidget::item:selected:!active { background:#FF8800; color:black; }
+            QListWidget::item:selected:focus { background:#FF8800; color:black; outline:0; }
         """)
         self._barrier_list.setFixedWidth(220)
+        self._barrier_list.viewport().installEventFilter(self)
         right_col.addWidget(self._barrier_list, stretch=1)
 
         # Status label at bottom of list
@@ -382,13 +405,70 @@ class BarrierDrawerPanel(QWidget):
         self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_col.addWidget(self._status_lbl)
 
+        self._barrier_list.currentRowChanged.connect(
+            lambda: self._update_button_states(self._current_mode))
+
         root.addLayout(right_col)
+        self._update_button_states('normal')
 
     @staticmethod
     def _styled_label(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet("color:#AAAAAA; font:bold 10px Arial;")
         return lbl
+
+    def _update_button_states(self, mode: str = 'normal') -> None:
+        """Enable/disable action buttons based on the current interaction mode.
+
+        mode: 'normal' | 'drawing' | 'editing'
+        """
+        self._current_mode = mode
+        drawing = mode == 'drawing'
+        editing = mode == 'editing'
+        selected = self._barrier_list.currentRow() >= 0
+
+        self._draw_btn.setEnabled(not drawing and not editing)
+        self._finish_btn.setEnabled(drawing)
+        self._cancel_btn.setEnabled(drawing)
+        self._edit_btn.setEnabled(not drawing)
+        self._edit_cancel_btn.setEnabled(editing)
+        self._del_btn.setEnabled(not drawing and not editing and selected)
+        self._save_btn.setEnabled(not drawing and not editing)
+        self._clear_btn.setEnabled(not drawing and not editing)
+
+    def _auto_save(self) -> None:
+        """Persist barriers to disk without updating the status label."""
+        save_barriers(self._get_barriers_path(), self._barriers)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Deselect a list item when it is clicked while already selected."""
+        if (obj is self._barrier_list.viewport()
+                and event.type() in (QEvent.Type.MouseButtonPress,
+                                     QEvent.Type.MouseButtonDblClick)
+                and event.button() == Qt.MouseButton.LeftButton):
+            item = self._barrier_list.itemAt(event.pos())
+            if item is not None and self._barrier_list.currentItem() is item:
+                self._deselect_barrier()
+                return True  # consume event so the list cannot re-select on release
+        return super().eventFilter(obj, event)
+
+    def _deselect_barrier(self) -> None:
+        self._barrier_list.clearSelection()
+        self._barrier_list.setCurrentRow(-1)
+        self._barrier_list.clearFocus()
+
+    def _cancel_editing(self) -> None:
+        self._editing_row = -1
+        self._edit_btn.setText("Edit")
+        self._edit_btn.setStyleSheet("""
+            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
+                          padding:4px 12px; border-radius:4px; }
+            QPushButton:hover { background-color:#00CCCC; }
+            QPushButton:disabled { background-color:#005555; color:#666666; }
+        """)
+        self._status_lbl.setText("Edit cancelled")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+        self._update_button_states('normal')
 
     # ------------------------------------------------------------------
     # Drawing state machine
@@ -403,6 +483,7 @@ class BarrierDrawerPanel(QWidget):
         self._clear_preview()
         self._status_lbl.setText(f"Drawing {type_text} \u2014 click on canvas")
         self._status_lbl.setStyleSheet("color: #FF8800; font: 10px Arial;")
+        self._update_button_states('drawing')
 
     def _finish_drawing(self) -> None:
         if self._drawing_mode == "polygon":
@@ -420,9 +501,19 @@ class BarrierDrawerPanel(QWidget):
         self._circle_center = None
         self._line_point1 = None
         self._editing_row = -1
+        self._edit_btn.setText("Edit")
+        self._edit_btn.setStyleSheet("""
+            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
+                          padding:4px 12px; border-radius:4px; }
+            QPushButton:hover { background-color:#00CCCC; }
+            QPushButton:disabled { background-color:#005555; color:#666666; }
+        """)
         self._clear_preview()
+        self._barrier_list.clearSelection()
+        self._barrier_list.setCurrentRow(-1)
         self._status_lbl.setText("Drawing cancelled")
         self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+        self._update_button_states('normal')
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -534,8 +625,10 @@ class BarrierDrawerPanel(QWidget):
         self._polygon_vertices = []
         self._draw_barrier(barrier)
         self._refresh_barrier_list()
-        self._status_lbl.setText(f"Added polygon '{barrier.name}'")
+        self._auto_save()
+        self._status_lbl.setText(f"Added and saved polygon '{barrier.name}'")
         self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._update_button_states('normal')
         self._canvas.draw_idle()
 
     def _finish_circle(self, x: float, y: float) -> None:
@@ -562,8 +655,10 @@ class BarrierDrawerPanel(QWidget):
         self._circle_center = None
         self._draw_barrier(barrier)
         self._refresh_barrier_list()
-        self._status_lbl.setText(f"Added circle '{barrier.name}'")
+        self._auto_save()
+        self._status_lbl.setText(f"Added and saved circle '{barrier.name}'")
         self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._update_button_states('normal')
         self._canvas.draw_idle()
 
     def _finish_line(self, x: float, y: float) -> None:
@@ -591,8 +686,10 @@ class BarrierDrawerPanel(QWidget):
         self._line_point1 = None
         self._draw_barrier(barrier)
         self._refresh_barrier_list()
-        self._status_lbl.setText(f"Added line '{barrier.name}'")
+        self._auto_save()
+        self._status_lbl.setText(f"Added and saved line '{barrier.name}'")
         self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._update_button_states('normal')
         self._canvas.draw_idle()
 
     def _make_barrier_from_controls(self, btype: BarrierType) -> BarrierData:
@@ -744,6 +841,14 @@ class BarrierDrawerPanel(QWidget):
         if row < 0 or row >= len(self._barriers):
             return
         barrier = self._barriers[row]
+        reply = QMessageBox.question(
+            self, "Delete Barrier",
+            f"Delete barrier '{barrier.name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
         if self._editing_row == row:
             self._editing_row = -1
         elif self._editing_row > row:
@@ -761,15 +866,23 @@ class BarrierDrawerPanel(QWidget):
             return
 
         if self._editing_row == row:
-            # Second press on same barrier: apply control values in-place
+            # "Done" pressed: apply control values in-place
             self._apply_controls_to_barrier(row)
         else:
-            # First press: load barrier values into controls
+            # First press: load barrier values into controls, enter edit mode
             self._editing_row = row
             self._load_barrier_into_controls(self._barriers[row])
+            self._edit_btn.setText("Done")
+            self._edit_btn.setStyleSheet("""
+                QPushButton { background-color:#39FF14; color:black; font:bold 11px Arial;
+                              padding:4px 12px; border-radius:4px; }
+                QPushButton:hover { background-color:#2BCC10; }
+                QPushButton:disabled { background-color:#005555; color:#666666; }
+            """)
+            self._update_button_states('editing')
             name = self._barriers[row].name
             self._status_lbl.setText(
-                f"Loaded '{name}' \u2014 modify fields then press Edit to apply")
+                f"Loaded '{name}' \u2014 modify fields then press Done to apply")
             self._status_lbl.setStyleSheet("color: #00FFFF; font: 10px Arial;")
 
     def _load_barrier_into_controls(self, barrier: BarrierData) -> None:
@@ -795,6 +908,14 @@ class BarrierDrawerPanel(QWidget):
 
     def _apply_controls_to_barrier(self, row: int) -> None:
         self._editing_row = -1
+        self._edit_btn.setText("Edit")
+        self._edit_btn.setStyleSheet("""
+            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
+                          padding:4px 12px; border-radius:4px; }
+            QPushButton:hover { background-color:#00CCCC; }
+            QPushButton:disabled { background-color:#005555; color:#666666; }
+        """)
+        self._update_button_states('normal')
         barrier = self._barriers[row]
         old_name = barrier.name
 

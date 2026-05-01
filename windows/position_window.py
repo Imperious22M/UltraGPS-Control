@@ -59,9 +59,6 @@ class NetworkThread(QThread):
         self._barrier_manager = barrier_manager
         self._active = False
         self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
-        # Set the car in joystick mode at the start
-        with Vehicle("10.235.222.209") as car:
-            car.joystick_mode()
 
     def set_mode(self, use_continuous: bool) -> None:
         self._use_continuous = use_continuous
@@ -111,15 +108,6 @@ class NetworkThread(QThread):
                     self.lm_updated.emit(lx, ly)
                     for event in self._barrier_manager.check_position(lx, ly, 'lm'):
                         self.barrier_triggered.emit(event)
-                        if event.event_type == 'enter':
-                            with Vehicle("10.235.222.209") as car:
-                                car.command_mode()
-                                car.stop()
-                        elif event.event_type == 'exit':
-                            with Vehicle("10.235.222.209") as car:
-                                car.stop()
-                                car.joystick_mode()
-                            
 
                 if cep_pos is not None:
                     cx, cy = float(cep_pos[0]), float(cep_pos[1])
@@ -141,13 +129,6 @@ class NetworkThread(QThread):
                     rate_count = 0
                     rate_start = time.monotonic()
 
-               # Example control of the car
-               #with Vehicle("10.235.222.209") as car:
-               #    car.continuous_mode()
-               #    car.drive(200, 200) 
-
-                # If we are in continuous mode, we need to add a delay to
-                # prevent the server from spamming
                 if current_continuous:
                     time.sleep(0.1)
 
