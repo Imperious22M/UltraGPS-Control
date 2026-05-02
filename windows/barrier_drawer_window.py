@@ -27,6 +27,7 @@ from SettingsModule import SettingsModule
 from ultragps_barrier import (
     BarrierData, BarrierType, TriggerMode, TriggerWhen,
     load_barriers, save_barriers, validate_barrier,
+    check_point_in_barrier,
 )
 
 
@@ -70,6 +71,11 @@ class BarrierDrawerPanel(QWidget):
         # UI interaction state
         self._current_mode: str = 'normal'
         self._has_unsaved_changes: bool = False
+
+        # Drag-edit state
+        self._drag_state = None
+        self._handle_artists: list = []
+        self._handle_meta: list = []  # parallel: ('vertex', idx) | ('center',) | ('radius',)
 
         # Canvas event connection IDs
         self._cid_press = None
@@ -466,12 +472,15 @@ class BarrierDrawerPanel(QWidget):
 
     def _on_barrier_selected(self, row: int) -> None:
         """Called when the barrier list selection changes."""
+        self._drag_state = None
         if self._current_mode == 'drawing':
             return
         if 0 <= row < len(self._barriers):
             self._load_barrier_into_controls(self._barriers[row])
+            self._draw_selected_handles(self._barriers[row])
         else:
             self._blank_edit_controls()
+            self._clear_handles()
         self._update_button_states('normal')
 
     def _blank_edit_controls(self) -> None:
@@ -530,10 +539,198 @@ class BarrierDrawerPanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _deselect_barrier(self) -> None:
+        self._drag_state = None
+        self._clear_handles()
         self._barrier_list.clearSelection()
         self._barrier_list.setCurrentRow(-1)
         self._barrier_list.clearFocus()
 
+    # ------------------------------------------------------------------
+    # Handle rendering and drag editing
+    # ------------------------------------------------------------------
+
+    def _draw_selected_handles(self, barrier: BarrierData) -> None:
+        """Render draggable vertex/control handles for the selected barrier."""
+        self._clear_handles()
+        kw = dict(markersize=8, markeredgecolor='black', markeredgewidth=1.5,
+                  zorder=20, picker=False)
+
+        if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
+            for i, (vx, vy) in enumerate(barrier.vertices):
+                h, = self.ax.plot(vx, vy, 'o', color='white', **kw)
+                self._handle_artists.append(h)
+                self._handle_meta.append(('vertex', i))
+            cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
+            cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
+            h, = self.ax.plot(cx, cy, 'D', color='#FF8800', **kw)
+            self._handle_artists.append(h)
+            self._handle_meta.append(('centroid',))
+
+        elif barrier.barrier_type == BarrierType.LINE:
+            for idx, pt in enumerate((barrier.point1, barrier.point2)):
+                if pt is None:
+                    continue
+                h, = self.ax.plot(pt[0], pt[1], 'o', color='white', **kw)
+                self._handle_artists.append(h)
+                self._handle_meta.append(('vertex', idx))
+            if barrier.point1 and barrier.point2:
+                mx = (barrier.point1[0] + barrier.point2[0]) / 2
+                my = (barrier.point1[1] + barrier.point2[1]) / 2
+                h, = self.ax.plot(mx, my, 'D', color='#FF8800', **kw)
+                self._handle_artists.append(h)
+                self._handle_meta.append(('centroid',))
+
+        elif barrier.barrier_type == BarrierType.CIRCLE and barrier.center:
+            cx, cy = barrier.center
+            h, = self.ax.plot(cx, cy, 'o', color='white', **kw)
+            self._handle_artists.append(h)
+            self._handle_meta.append(('center',))
+            h, = self.ax.plot(cx, cy + (barrier.radius or 0), 's',
+                               color='#FFFF00', **kw)
+            self._handle_artists.append(h)
+            self._handle_meta.append(('radius',))
+
+        self._canvas.draw_idle()
+
+    def _clear_handles(self) -> None:
+        for h in self._handle_artists:
+            try:
+                h.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._handle_artists.clear()
+        self._handle_meta.clear()
+
+    def _hit_test_handles(self, event) -> 'int | None':
+        """Return index of the handle under the cursor (12 px radius), or None."""
+        if event.x is None or event.y is None:
+            return None
+        for i, h in enumerate(self._handle_artists):
+            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
+            disp = self.ax.transData.transform((hx, hy))
+            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
+                return i
+        return None
+
+    def _hit_test_barrier_body(self, event, barrier: BarrierData) -> bool:
+        """Return True if the click lands on the barrier body."""
+        if event.xdata is None or event.ydata is None:
+            return False
+        if barrier.barrier_type == BarrierType.LINE and barrier.point1 and barrier.point2:
+            px, py = event.x, event.y
+            x1, y1 = self.ax.transData.transform(barrier.point1)
+            x2, y2 = self.ax.transData.transform(barrier.point2)
+            dx, dy = x2 - x1, y2 - y1
+            seg_sq = dx * dx + dy * dy
+            if seg_sq == 0:
+                return False
+            t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_sq))
+            dist = math.sqrt((px - x1 - t * dx) ** 2 + (py - y1 - t * dy) ** 2)
+            return dist <= 12
+        return check_point_in_barrier((event.xdata, event.ydata), barrier)
+
+    def _update_handle_positions(self, barrier: BarrierData) -> None:
+        """Reposition handle artists in-place after barrier geometry changes."""
+        for i, meta in enumerate(self._handle_meta):
+            if i >= len(self._handle_artists):
+                break
+            h = self._handle_artists[i]
+            tag = meta[0]
+            if tag == 'vertex':
+                idx = meta[1]
+                if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
+                    if idx < len(barrier.vertices):
+                        vx, vy = barrier.vertices[idx]
+                        h.set_xdata([vx])
+                        h.set_ydata([vy])
+                elif barrier.barrier_type == BarrierType.LINE:
+                    pt = barrier.point1 if idx == 0 else barrier.point2
+                    if pt:
+                        h.set_xdata([pt[0]])
+                        h.set_ydata([pt[1]])
+            elif tag == 'centroid':
+                if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
+                    cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
+                    cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
+                    h.set_xdata([cx]); h.set_ydata([cy])
+                elif (barrier.barrier_type == BarrierType.LINE
+                        and barrier.point1 and barrier.point2):
+                    h.set_xdata([(barrier.point1[0] + barrier.point2[0]) / 2])
+                    h.set_ydata([(barrier.point1[1] + barrier.point2[1]) / 2])
+            elif tag == 'center' and barrier.center:
+                h.set_xdata([barrier.center[0]])
+                h.set_ydata([barrier.center[1]])
+            elif tag == 'radius' and barrier.center and barrier.radius is not None:
+                h.set_xdata([barrier.center[0]])
+                h.set_ydata([barrier.center[1] + barrier.radius])
+
+    def _move_barrier(self, barrier: BarrierData, dx: float, dy: float) -> None:
+        """Translate the entire barrier by (dx, dy) in data coordinates."""
+        if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
+            barrier.vertices = [(vx + dx, vy + dy) for vx, vy in barrier.vertices]
+        elif barrier.barrier_type == BarrierType.CIRCLE and barrier.center:
+            cx, cy = barrier.center
+            barrier.center = (cx + dx, cy + dy)
+        elif barrier.barrier_type == BarrierType.LINE:
+            if barrier.point1:
+                barrier.point1 = (barrier.point1[0] + dx, barrier.point1[1] + dy)
+            if barrier.point2:
+                barrier.point2 = (barrier.point2[0] + dx, barrier.point2[1] + dy)
+
+    def _apply_handle_move(self, barrier: BarrierData, meta: tuple,
+                            abs_x: float, abs_y: float,
+                            dx: float, dy: float) -> None:
+        """Apply one drag increment to a single handle."""
+        tag = meta[0]
+        if tag == 'vertex':
+            idx = meta[1]
+            if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
+                verts = list(barrier.vertices)
+                if idx < len(verts):
+                    vx, vy = verts[idx]
+                    verts[idx] = (vx + dx, vy + dy)
+                    barrier.vertices = verts
+            elif barrier.barrier_type == BarrierType.LINE:
+                if idx == 0 and barrier.point1:
+                    barrier.point1 = (barrier.point1[0] + dx, barrier.point1[1] + dy)
+                elif idx == 1 and barrier.point2:
+                    barrier.point2 = (barrier.point2[0] + dx, barrier.point2[1] + dy)
+        elif tag == 'centroid':
+            self._move_barrier(barrier, dx, dy)
+        elif tag == 'center' and barrier.center:
+            cx, cy = barrier.center
+            barrier.center = (cx + dx, cy + dy)
+        elif tag == 'radius' and barrier.center:
+            cx, cy = barrier.center
+            barrier.radius = max(1.0, math.sqrt((abs_x - cx) ** 2 + (abs_y - cy) ** 2))
+
+    def _apply_drag(self, event) -> None:
+        """Apply the current drag delta to the selected barrier and refresh."""
+        state = self._drag_state
+        if state is None or event.xdata is None or event.ydata is None:
+            return
+        row = state['row']
+        if row < 0 or row >= len(self._barriers):
+            return
+        barrier = self._barriers[row]
+        dx = event.xdata - state['last_x']
+        dy = event.ydata - state['last_y']
+        state['last_x'] = event.xdata
+        state['last_y'] = event.ydata
+
+        if state['type'] == 'body':
+            self._move_barrier(barrier, dx, dy)
+        else:
+            handle_idx = state['handle_idx']
+            if handle_idx < len(self._handle_meta):
+                self._apply_handle_move(
+                    barrier, self._handle_meta[handle_idx],
+                    event.xdata, event.ydata, dx, dy)
+
+        self._remove_barrier_patches(barrier.name)
+        self._draw_barrier(barrier)
+        self._update_handle_positions(barrier)
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Drawing state machine
@@ -620,82 +817,109 @@ class BarrierDrawerPanel(QWidget):
     def _on_canvas_click(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None:
             return
-        if self._drawing_mode is None:
-            return
 
         x, y = event.xdata, event.ydata
 
-        if self._drawing_mode == "polygon":
-            if event.dblclick:
-                self._finish_polygon()
-                return
-            self._polygon_vertices.append((x, y))
-            self._update_polygon_preview()
-            self._status_lbl.setText(
-                f"Polygon: {len(self._polygon_vertices)} vertices (dbl-click to close)")
+        # ---- drawing mode ------------------------------------------------
+        if self._drawing_mode is not None:
+            if self._drawing_mode == "polygon":
+                if event.dblclick:
+                    self._finish_polygon()
+                    return
+                self._polygon_vertices.append((x, y))
+                self._update_polygon_preview()
+                self._status_lbl.setText(
+                    f"Polygon: {len(self._polygon_vertices)} vertices (dbl-click to close)")
 
-        elif self._drawing_mode == "circle":
-            if self._circle_center is None:
-                self._circle_center = (x, y)
-                dot = self.ax.plot(x, y, 'o', color=self._current_color(),
-                                   markersize=6, zorder=10)
-                self._preview_artists.extend(dot)
-                self._canvas.draw_idle()
-                self._status_lbl.setText("Circle: click to set radius")
-            else:
-                self._finish_circle(x, y)
+            elif self._drawing_mode == "circle":
+                if self._circle_center is None:
+                    self._circle_center = (x, y)
+                    dot = self.ax.plot(x, y, 'o', color=self._current_color(),
+                                       markersize=6, zorder=10)
+                    self._preview_artists.extend(dot)
+                    self._canvas.draw_idle()
+                    self._status_lbl.setText("Circle: click to set radius")
+                else:
+                    self._finish_circle(x, y)
 
-        elif self._drawing_mode == "line":
-            if self._line_point1 is None:
-                self._line_point1 = (x, y)
-                dot = self.ax.plot(x, y, 'o', color=self._current_color(),
-                                   markersize=6, zorder=10)
-                self._preview_artists.extend(dot)
-                self._canvas.draw_idle()
-                self._status_lbl.setText("Line: click to set second endpoint")
-            else:
-                self._finish_line(x, y)
+            elif self._drawing_mode == "line":
+                if self._line_point1 is None:
+                    self._line_point1 = (x, y)
+                    dot = self.ax.plot(x, y, 'o', color=self._current_color(),
+                                       markersize=6, zorder=10)
+                    self._preview_artists.extend(dot)
+                    self._canvas.draw_idle()
+                    self._status_lbl.setText("Line: click to set second endpoint")
+                else:
+                    self._finish_line(x, y)
+            return
+
+        # ---- drag start (barrier selected) --------------------------------
+        row = self._barrier_list.currentRow()
+        if row < 0 or row >= len(self._barriers):
+            return
+        barrier = self._barriers[row]
+
+        handle_idx = self._hit_test_handles(event)
+        if handle_idx is not None:
+            self._drag_state = {
+                'type': 'handle', 'row': row, 'handle_idx': handle_idx,
+                'last_x': x, 'last_y': y,
+            }
+            return
+
+        if self._hit_test_barrier_body(event, barrier):
+            self._drag_state = {
+                'type': 'body', 'row': row,
+                'last_x': x, 'last_y': y,
+            }
 
     def _on_canvas_release(self, event) -> None:
-        pass  # reserved for future drag interactions
+        if self._drag_state is not None:
+            if not self._has_unsaved_changes:
+                self._has_unsaved_changes = True
+                self._update_unsaved_state()
+            self._drag_state = None
 
     def _on_canvas_motion(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None:
             return
-        if self._drawing_mode is None:
+
+        if self._drawing_mode is not None:
+            x, y = event.xdata, event.ydata
+            self._clear_motion_preview()
+
+            if self._drawing_mode == "polygon" and self._polygon_vertices:
+                lx, ly = self._polygon_vertices[-1]
+                ln, = self.ax.plot([lx, x], [ly, y], '--',
+                                   color=self._current_color(), linewidth=1,
+                                   alpha=0.6, zorder=9)
+                ln._motion_preview = True
+                self._preview_artists.append(ln)
+
+            elif self._drawing_mode == "circle" and self._circle_center is not None:
+                cx, cy = self._circle_center
+                r = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+                circ = MplCircle((cx, cy), r, fill=False,
+                                 edgecolor=self._current_color(), linewidth=1,
+                                 linestyle='--', alpha=0.6, zorder=9)
+                circ._motion_preview = True
+                self.ax.add_patch(circ)
+                self._preview_artists.append(circ)
+
+            elif self._drawing_mode == "line" and self._line_point1 is not None:
+                lx, ly = self._line_point1
+                ln, = self.ax.plot([lx, x], [ly, y], '--',
+                                   color=self._current_color(), linewidth=1,
+                                   alpha=0.6, zorder=9)
+                ln._motion_preview = True
+                self._preview_artists.append(ln)
+
+            self._canvas.draw_idle()
             return
 
-        x, y = event.xdata, event.ydata
-
-        self._clear_motion_preview()
-
-        if self._drawing_mode == "polygon" and self._polygon_vertices:
-            lx, ly = self._polygon_vertices[-1]
-            ln, = self.ax.plot([lx, x], [ly, y], '--',
-                               color=self._current_color(), linewidth=1,
-                               alpha=0.6, zorder=9)
-            ln._motion_preview = True
-            self._preview_artists.append(ln)
-
-        elif self._drawing_mode == "circle" and self._circle_center is not None:
-            cx, cy = self._circle_center
-            r = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-            circ = MplCircle((cx, cy), r, fill=False,
-                             edgecolor=self._current_color(), linewidth=1,
-                             linestyle='--', alpha=0.6, zorder=9)
-            circ._motion_preview = True
-            self.ax.add_patch(circ)
-            self._preview_artists.append(circ)
-
-        elif self._drawing_mode == "line" and self._line_point1 is not None:
-            lx, ly = self._line_point1
-            ln, = self.ax.plot([lx, x], [ly, y], '--',
-                               color=self._current_color(), linewidth=1,
-                               alpha=0.6, zorder=9)
-            ln._motion_preview = True
-            self._preview_artists.append(ln)
-
-        self._canvas.draw_idle()
+        if self._drag_state is not None:
+            self._apply_drag(event)
 
     # ------------------------------------------------------------------
     # Drawing finishers
@@ -1100,4 +1324,6 @@ class BarrierDrawerPanel(QWidget):
                 self._canvas.mpl_disconnect(cid)
                 setattr(self, cid_attr, None)
         self._drawing_mode = None
+        self._drag_state = None
         self._clear_preview()
+        self._clear_handles()
