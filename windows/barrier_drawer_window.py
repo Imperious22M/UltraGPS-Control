@@ -7,13 +7,14 @@ with configurable trigger modes, colours, and callbacks.
 
 import os
 import math
+import shutil
 
 import numpy as np
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QComboBox, QDoubleSpinBox, QMessageBox,
-    QFrame,
+    QFrame, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
 )
 from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QFont, QColor
@@ -21,14 +22,63 @@ from PyQt6.QtGui import QFont, QColor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
+from matplotlib.transforms import Affine2D
+import matplotlib.image as mpl_image
 import matplotlib.lines as mlines
 
 from SettingsModule import SettingsModule
 from ultragps_barrier import (
     BarrierData, BarrierType, TriggerMode, TriggerWhen,
+    ImageOverlay,
     load_barriers, save_barriers, validate_barrier,
     check_point_in_barrier,
+    load_images, save_all, polygon_from_image,
 )
+
+
+class _ImportImageDialog(QDialog):
+    """Ask the user for the real-world width and height of an imported image."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Import Image")
+        self.setStyleSheet("background-color: #1a1a1a; color: white;")
+
+        form = QFormLayout()
+        lbl_style = "color: white; font: 11px Arial;"
+
+        self._width_spin = QDoubleSpinBox()
+        self._width_spin.setRange(1.0, 10000.0)
+        self._width_spin.setValue(100.0)
+        self._width_spin.setSuffix(" cm")
+        self._width_spin.setStyleSheet("background:#222; color:white; font:11px Arial;")
+
+        self._height_spin = QDoubleSpinBox()
+        self._height_spin.setRange(1.0, 10000.0)
+        self._height_spin.setValue(100.0)
+        self._height_spin.setSuffix(" cm")
+        self._height_spin.setStyleSheet("background:#222; color:white; font:11px Arial;")
+
+        w_lbl = QLabel("Width (cm):")
+        w_lbl.setStyleSheet(lbl_style)
+        h_lbl = QLabel("Height (cm):")
+        h_lbl.setStyleSheet(lbl_style)
+
+        form.addRow(w_lbl, self._width_spin)
+        form.addRow(h_lbl, self._height_spin)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.setStyleSheet("color: white; font: 11px Arial;")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[float, float]:
+        return self._width_spin.value(), self._height_spin.value()
 
 
 class BarrierDrawerPanel(QWidget):
@@ -85,6 +135,13 @@ class BarrierDrawerPanel(QWidget):
         self._ruler_artists: list = []         # [line, dot1, dot2, ann] for complete ruler
         self._cid_key = None
 
+        # Image overlay state
+        self._images: list[ImageOverlay] = []
+        self._image_artists: dict[str, object] = {}   # name -> AxesImage
+        self._selected_image_idx: int = -1
+        self._img_handle_artists: list = []
+        self._img_handle_meta: list = []  # ('img_center',)|('img_corner',i)|('img_rotate',)
+
         # Canvas event connection IDs
         self._cid_press = None
         self._cid_release = None
@@ -123,6 +180,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._draw_compass_rose()
         self._init_receiver_plot(receiver_positions)
+        # Lock limits so imshow / add_patch never auto-rescale the arena
+        self.ax.set_autoscale_on(False)
 
     def _init_receiver_plot(self, receiver_positions: list) -> None:
         rx = [p[1][0] for p in receiver_positions]
@@ -466,6 +525,61 @@ class BarrierDrawerPanel(QWidget):
 
         self._barrier_list.currentRowChanged.connect(self._on_barrier_selected)
 
+        # --- Images section ---
+        img_title = QLabel("Images")
+        img_title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
+        img_title.setStyleSheet("color: #FF8800;")
+        img_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_col.addWidget(img_title)
+
+        self._image_list = QListWidget()
+        self._image_list.setStyleSheet("""
+            QListWidget { background:#111111; color:white; font:11px Arial;
+                          border:1px solid #FF8800; }
+            QListWidget::item:selected { background:#FF8800; color:black; }
+            QListWidget::item:selected:!active { background:#FF8800; color:black; }
+        """)
+        self._image_list.setFixedWidth(220)
+        self._image_list.setMaximumHeight(120)
+        self._image_list.viewport().installEventFilter(self)
+        right_col.addWidget(self._image_list)
+
+        img_btn_row = QHBoxLayout()
+        self._import_img_btn = QPushButton("Import")
+        self._import_img_btn.setStyleSheet("""
+            QPushButton { background-color:#4444CC; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
+            QPushButton:hover { background-color:#3333AA; }
+        """)
+        self._import_img_btn.clicked.connect(self._import_image)
+        img_btn_row.addWidget(self._import_img_btn)
+
+        self._delete_img_btn = QPushButton("Delete")
+        self._delete_img_btn.setStyleSheet("""
+            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
+            QPushButton:hover { background-color:#CC3333; }
+            QPushButton:disabled { background-color:#552222; color:#666666; }
+        """)
+        self._delete_img_btn.setEnabled(False)
+        self._delete_img_btn.clicked.connect(self._delete_image_selected)
+        img_btn_row.addWidget(self._delete_img_btn)
+
+        self._extract_img_btn = QPushButton("→ Barrier")
+        self._extract_img_btn.setStyleSheet("""
+            QPushButton { background-color:#39FF14; color:black; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
+            QPushButton:hover { background-color:#2BCC10; }
+            QPushButton:disabled { background-color:#1A5508; color:#666666; }
+        """)
+        self._extract_img_btn.setEnabled(False)
+        self._extract_img_btn.clicked.connect(self._extract_image_as_barrier)
+        img_btn_row.addWidget(self._extract_img_btn)
+
+        right_col.addLayout(img_btn_row)
+
+        self._image_list.currentRowChanged.connect(self._on_image_selected)
+
         root.addLayout(right_col)
         self._update_button_states('normal')
 
@@ -527,6 +641,9 @@ class BarrierDrawerPanel(QWidget):
         self._drag_state = None
         if self._current_mode == 'drawing':
             return
+        # Deselect any image when a barrier is selected
+        if row >= 0:
+            self._deselect_image()
         if 0 <= row < len(self._barriers):
             self._load_barrier_into_controls(self._barriers[row])
             self._draw_selected_handles(self._barriers[row])
@@ -553,20 +670,24 @@ class BarrierDrawerPanel(QWidget):
         self._callback_edit.blockSignals(False)
 
     def _auto_save(self) -> None:
-        """Persist barriers to disk without updating the status label."""
-        save_barriers(self._get_barriers_path(), self._barriers)
+        """Persist barriers and images to disk without updating the status label."""
+        save_all(self._get_barriers_path(), self._barriers, self._images)
         self._has_unsaved_changes = False
         self._update_unsaved_state()
 
     def _clear_all_changes(self) -> None:
-        """Revert all in-memory barrier edits to the last saved file state."""
+        """Revert all in-memory barrier and image edits to the last saved file state."""
         saved_row = self._barrier_list.currentRow()
         path = self._get_barriers_path()
         self._barriers = load_barriers(path)
+        self._images = load_images(path)
         for name in list(self._barrier_patches.keys()):
             self._remove_barrier_patches(name)
+        self._remove_all_image_artists()
         self._draw_all_barriers()
+        self._draw_all_images()
         self._refresh_barrier_list()
+        self._refresh_image_list()
         self._has_unsaved_changes = False
         # Restore selection so controls reload
         if 0 <= saved_row < len(self._barriers):
@@ -580,14 +701,21 @@ class BarrierDrawerPanel(QWidget):
 
     def eventFilter(self, obj, event) -> bool:
         """Deselect a list item when it is clicked while already selected."""
-        if (obj is self._barrier_list.viewport()
-                and event.type() in (QEvent.Type.MouseButtonPress,
-                                     QEvent.Type.MouseButtonDblClick)
+        click_types = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+        if (event.type() in click_types
                 and event.button() == Qt.MouseButton.LeftButton):
-            item = self._barrier_list.itemAt(event.pos())
-            if item is not None and self._barrier_list.currentItem() is item:
-                self._deselect_barrier()
-                return True  # consume event so the list cannot re-select on release
+            if obj is self._barrier_list.viewport():
+                item = self._barrier_list.itemAt(event.pos())
+                if item is not None and self._barrier_list.currentItem() is item:
+                    self._deselect_barrier()
+                    return True
+            elif obj is self._image_list.viewport():
+                item = self._image_list.itemAt(event.pos())
+                if item is not None and self._image_list.currentItem() is item:
+                    self._deselect_image()
+                    self._clear_image_handles()
+                    self._canvas.draw_idle()
+                    return True
         return super().eventFilter(obj, event)
 
     def _deselect_barrier(self) -> None:
@@ -775,6 +903,29 @@ class BarrierDrawerPanel(QWidget):
                 self._redraw_ruler()
             return
 
+        if state['type'] == 'img_move':
+            idx = self._selected_image_idx
+            if 0 <= idx < len(self._images):
+                img = self._images[idx]
+                img.center_x += dx
+                img.center_y += dy
+                self._redraw_image(img)
+                self._update_image_handle_positions(img)
+                self._canvas.draw_idle()
+            return
+
+        if state['type'] == 'img_handle':
+            idx = self._selected_image_idx
+            if 0 <= idx < len(self._images):
+                img = self._images[idx]
+                h_idx = state['handle_idx']
+                self._apply_image_handle_move(
+                    img, h_idx, event.xdata, event.ydata, dx, dy)
+                self._redraw_image(img)
+                self._update_image_handle_positions(img)
+                self._canvas.draw_idle()
+            return
+
         row = state['row']
         if row < 0 or row >= len(self._barriers):
             return
@@ -925,7 +1076,7 @@ class BarrierDrawerPanel(QWidget):
             }
             return
 
-        # ---- barrier handle / body drag (barrier selected) ----------------
+        # ---- barrier handles (highest priority — never blocked by images) --
         row = self._barrier_list.currentRow()
         if 0 <= row < len(self._barriers):
             barrier = self._barriers[row]
@@ -936,12 +1087,35 @@ class BarrierDrawerPanel(QWidget):
                     'last_x': x, 'last_y': y,
                 }
                 return
+
+        # ---- image handle drag (selected image) ---------------------------
+        img_h_idx = self._hit_test_image_handles(event)
+        if img_h_idx is not None:
+            self._drag_state = {
+                'type': 'img_handle', 'handle_idx': img_h_idx,
+                'last_x': x, 'last_y': y,
+            }
+            return
+
+        # ---- barrier body drag (already-selected barrier) -----------------
+        if 0 <= row < len(self._barriers):
+            barrier = self._barriers[row]
             if self._hit_test_barrier_body(event, barrier):
                 self._drag_state = {
                     'type': 'body', 'row': row,
                     'last_x': x, 'last_y': y,
                 }
                 return
+
+        # ---- image body click/drag ----------------------------------------
+        img_body_idx = self._hit_test_image_body(event)
+        if img_body_idx is not None:
+            if img_body_idx != self._selected_image_idx:
+                self._select_image(img_body_idx)
+            self._drag_state = {
+                'type': 'img_move', 'last_x': x, 'last_y': y,
+            }
+            return
 
         # ---- ruler point placement (only in ruler mode, empty canvas) ------
         if self._ruler_mode:
@@ -1356,17 +1530,21 @@ class BarrierDrawerPanel(QWidget):
 
     def _save_barriers(self) -> None:
         path = self._get_barriers_path()
-        save_barriers(path, self._barriers)
+        save_all(path, self._barriers, self._images)
         self._has_unsaved_changes = False
         self._update_unsaved_state()
-        self._status_lbl.setText(f"Saved {len(self._barriers)} barriers")
+        self._status_lbl.setText(
+            f"Saved {len(self._barriers)} barriers, {len(self._images)} images")
         self._status_lbl.setStyleSheet("color: #FFD700; font: bold 13px Arial;")
 
     def _load_barriers(self) -> None:
         path = self._get_barriers_path()
         self._barriers = load_barriers(path)
+        self._images = load_images(path)
         self._redraw_all_barriers()
+        self._draw_all_images()
         self._refresh_barrier_list()
+        self._refresh_image_list()
         self._has_unsaved_changes = False
         self._update_unsaved_state()
 
@@ -1389,6 +1567,426 @@ class BarrierDrawerPanel(QWidget):
         self._canvas.draw_idle()
         self._status_lbl.setText("All barriers cleared")
         self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+
+    # ------------------------------------------------------------------
+    # Image overlay rendering & editing
+    # ------------------------------------------------------------------
+
+    def _get_resources_dir(self) -> str:
+        config_dir = os.path.dirname(self._settings._config_path)
+        return os.path.join(config_dir, 'resources')
+
+    def _draw_image(self, overlay: ImageOverlay) -> None:
+        """Render (or re-render) a single image overlay on the canvas."""
+        self._remove_image_artist(overlay.name)
+        resources_dir = self._get_resources_dir()
+        filepath = os.path.join(resources_dir, overlay.filename)
+        if not os.path.exists(filepath):
+            return
+
+        try:
+            img_data = mpl_image.imread(filepath)
+        except Exception:
+            return
+
+        # Snapshot limits before imshow — imshow updates internal data limits
+        # even when autoscale_on=False, so we restore them explicitly.
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        half_w = overlay.width_cm / 2.0
+        half_h = overlay.height_cm / 2.0
+        cx, cy = overlay.center_x, overlay.center_y
+
+        # Place extent at actual arena coordinates so internal data-limit updates
+        # stay inside the arena rather than near the origin.
+        # Do NOT pass aspect= — imshow(aspect='auto') calls ax.set_aspect('auto')
+        # internally which overrides the equal-aspect-ratio set in _build_figure.
+        extent = [cx - half_w, cx + half_w, cy - half_h, cy + half_h]
+
+        im = self.ax.imshow(
+            img_data,
+            extent=extent,
+            origin='upper',
+            zorder=4,
+            interpolation='bilinear',
+        )
+        # Rotation only — translation is already encoded in the extent
+        tr = (
+            Affine2D()
+            .rotate_around(cx, cy, math.radians(overlay.rotation_deg))
+            + self.ax.transData
+        )
+        im.set_transform(tr)
+        self._image_artists[overlay.name] = im
+
+        # Hard-restore view limits — never let image drawing affect the arena
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+
+    def _remove_image_artist(self, name: str) -> None:
+        artist = self._image_artists.pop(name, None)
+        if artist is not None:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+
+    def _remove_all_image_artists(self) -> None:
+        for name in list(self._image_artists.keys()):
+            self._remove_image_artist(name)
+
+    def _redraw_image(self, overlay: ImageOverlay) -> None:
+        """Remove and re-draw a single overlay (called after geometry changes)."""
+        self._draw_image(overlay)
+
+    def _draw_all_images(self) -> None:
+        self._remove_all_image_artists()
+        for overlay in self._images:
+            self._draw_image(overlay)
+        self._canvas.draw_idle()
+
+    def _refresh_image_list(self) -> None:
+        self._image_list.clear()
+        for img in self._images:
+            self._image_list.addItem(
+                f"{img.name} ({img.width_cm:.0f}×{img.height_cm:.0f} cm)")
+
+    def _on_image_selected(self, row: int) -> None:
+        if row < 0:
+            self._deselect_image()
+            return
+        # Deselect barrier list when image is selected
+        self._barrier_list.blockSignals(True)
+        self._barrier_list.clearSelection()
+        self._barrier_list.setCurrentRow(-1)
+        self._barrier_list.blockSignals(False)
+        self._clear_handles()
+        self._blank_edit_controls()
+        self._update_button_states('normal')
+        self._select_image(row)
+
+    def _select_image(self, idx: int) -> None:
+        # Clear any barrier selection first
+        self._barrier_list.blockSignals(True)
+        self._barrier_list.clearSelection()
+        self._barrier_list.setCurrentRow(-1)
+        self._barrier_list.blockSignals(False)
+        self._clear_handles()
+        self._blank_edit_controls()
+
+        self._selected_image_idx = idx
+        self._image_list.blockSignals(True)
+        self._image_list.setCurrentRow(idx)
+        self._image_list.blockSignals(False)
+        self._delete_img_btn.setEnabled(True)
+        self._extract_img_btn.setEnabled(True)
+        if 0 <= idx < len(self._images):
+            self._draw_image_handles(self._images[idx])
+
+    def _deselect_image(self) -> None:
+        self._selected_image_idx = -1
+        self._clear_image_handles()
+        self._image_list.blockSignals(True)
+        self._image_list.clearSelection()
+        self._image_list.setCurrentRow(-1)
+        self._image_list.blockSignals(False)
+        self._delete_img_btn.setEnabled(False)
+        self._extract_img_btn.setEnabled(False)
+
+    # ---- image handles -------------------------------------------------------
+
+    def _get_image_corner_positions(self, overlay: ImageOverlay) -> list[tuple]:
+        """Return the 4 screen corners (arena cm) of the overlay, in order TL TR BR BL."""
+        hw = overlay.width_cm / 2.0
+        hh = overlay.height_cm / 2.0
+        local_corners = [(-hw, hh), (hw, hh), (hw, -hh), (-hw, -hh)]
+        rad = math.radians(overlay.rotation_deg)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        result = []
+        for lx, ly in local_corners:
+            rx = lx * cos_r - ly * sin_r + overlay.center_x
+            ry = lx * sin_r + ly * cos_r + overlay.center_y
+            result.append((rx, ry))
+        return result
+
+    def _get_rotation_handle_pos(self, overlay: ImageOverlay) -> tuple:
+        """Return the position of the rotation handle (above the image centre)."""
+        offset = overlay.height_cm / 2.0 + 10.0
+        rad = math.radians(overlay.rotation_deg)
+        rx = -math.sin(rad) * offset + overlay.center_x
+        ry = math.cos(rad) * offset + overlay.center_y
+        return (rx, ry)
+
+    def _draw_image_handles(self, overlay: ImageOverlay) -> None:
+        self._clear_image_handles()
+        kw = dict(markersize=9, markeredgecolor='black', markeredgewidth=1.5,
+                  zorder=25, picker=False)
+
+        # Center handle
+        h, = self.ax.plot(overlay.center_x, overlay.center_y,
+                          'D', color='#FF8800', **kw)
+        self._img_handle_artists.append(h)
+        self._img_handle_meta.append(('img_center',))
+
+        # Corner handles
+        for i, (cx, cy) in enumerate(self._get_image_corner_positions(overlay)):
+            h, = self.ax.plot(cx, cy, 's', color='#FFFFFF', **kw)
+            self._img_handle_artists.append(h)
+            self._img_handle_meta.append(('img_corner', i))
+
+        # Rotation handle
+        rx, ry = self._get_rotation_handle_pos(overlay)
+        h, = self.ax.plot(rx, ry, '^', color='#00FFFF', **kw)
+        self._img_handle_artists.append(h)
+        self._img_handle_meta.append(('img_rotate',))
+
+        self._canvas.draw_idle()
+
+    def _clear_image_handles(self) -> None:
+        for h in self._img_handle_artists:
+            try:
+                h.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._img_handle_artists.clear()
+        self._img_handle_meta.clear()
+
+    def _update_image_handle_positions(self, overlay: ImageOverlay) -> None:
+        corners = self._get_image_corner_positions(overlay)
+        rx, ry = self._get_rotation_handle_pos(overlay)
+        for i, (h, meta) in enumerate(
+                zip(self._img_handle_artists, self._img_handle_meta)):
+            tag = meta[0]
+            if tag == 'img_center':
+                h.set_xdata([overlay.center_x])
+                h.set_ydata([overlay.center_y])
+            elif tag == 'img_corner':
+                ci = meta[1]
+                h.set_xdata([corners[ci][0]])
+                h.set_ydata([corners[ci][1]])
+            elif tag == 'img_rotate':
+                h.set_xdata([rx])
+                h.set_ydata([ry])
+
+    def _hit_test_image_handles(self, event) -> 'int | None':
+        if self._selected_image_idx < 0 or event.x is None:
+            return None
+        for i, h in enumerate(self._img_handle_artists):
+            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
+            disp = self.ax.transData.transform((hx, hy))
+            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
+                return i
+        return None
+
+    def _hit_test_image_body(self, event) -> 'int | None':
+        """Return the index of the image overlay under the cursor, or None."""
+        if event.xdata is None or event.ydata is None:
+            return None
+        for i, overlay in enumerate(self._images):
+            if self._point_in_image(event.xdata, event.ydata, overlay):
+                return i
+        return None
+
+    def _point_in_image(self, px: float, py: float, overlay: ImageOverlay) -> bool:
+        """Return True if (px,py) falls inside the (possibly rotated) image rectangle."""
+        rad = math.radians(-overlay.rotation_deg)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        dx = px - overlay.center_x
+        dy = py - overlay.center_y
+        lx = dx * cos_r - dy * sin_r
+        ly = dx * sin_r + dy * cos_r
+        return abs(lx) <= overlay.width_cm / 2.0 and abs(ly) <= overlay.height_cm / 2.0
+
+    def _apply_image_handle_move(
+        self,
+        overlay: ImageOverlay,
+        h_idx: int,
+        abs_x: float, abs_y: float,
+        dx: float, dy: float,
+    ) -> None:
+        if h_idx >= len(self._img_handle_meta):
+            return
+        meta = self._img_handle_meta[h_idx]
+        tag = meta[0]
+
+        if tag == 'img_center':
+            overlay.center_x += dx
+            overlay.center_y += dy
+
+        elif tag == 'img_corner':
+            # Scale: adjust width/height by how far the corner moved
+            # Project delta onto local axes
+            rad = math.radians(overlay.rotation_deg)
+            cos_r, sin_r = math.cos(rad), math.sin(rad)
+            ldx = dx * cos_r + dy * sin_r
+            ldy = -dx * sin_r + dy * cos_r
+            ci = meta[1]
+            # TL=0 TR=1 BR=2 BL=3
+            x_sign = 1 if ci in (1, 2) else -1
+            y_sign = 1 if ci in (0, 1) else -1
+            delta_w = ldx * x_sign * 2
+            delta_h = ldy * y_sign * 2
+            overlay.width_cm = max(5.0, overlay.width_cm + delta_w)
+            overlay.height_cm = max(5.0, overlay.height_cm + delta_h)
+
+        elif tag == 'img_rotate':
+            # Angle of cursor relative to image centre
+            angle = math.degrees(
+                math.atan2(abs_y - overlay.center_y, abs_x - overlay.center_x))
+            # Rotation handle sits at 90° in local space; adjust
+            overlay.rotation_deg = angle - 90.0
+
+    # ---- image management buttons -------------------------------------------
+
+    def _import_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif)")
+        if not path:
+            return
+
+        dlg = _ImportImageDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        width_cm, height_cm = dlg.values()
+
+        x_range = self.ax.get_xlim()
+        y_range = self.ax.get_ylim()
+        arena_w = x_range[1] - x_range[0]
+        arena_h = y_range[1] - y_range[0]
+
+        # Only clamp when the image is larger than the entire arena
+        clamped = False
+        if width_cm > arena_w or height_cm > arena_h:
+            scale = min(arena_w / width_cm, arena_h / height_cm)
+            width_cm *= scale
+            height_cm *= scale
+            clamped = True
+
+        resources_dir = self._get_resources_dir()
+        os.makedirs(resources_dir, exist_ok=True)
+
+        # Build unique filename
+        base_name = os.path.basename(path)
+        dest = os.path.join(resources_dir, base_name)
+        if os.path.abspath(path) != os.path.abspath(dest):
+            # Avoid name collision
+            stem, ext = os.path.splitext(base_name)
+            counter = 1
+            while os.path.exists(dest):
+                dest = os.path.join(resources_dir, f"{stem}_{counter}{ext}")
+                counter += 1
+            shutil.copy2(path, dest)
+
+        # Place image at centre of visible arena
+        cx = (x_range[0] + x_range[1]) / 2.0
+        cy = (y_range[0] + y_range[1]) / 2.0
+
+        # Unique name
+        filename = os.path.basename(dest)
+        stem = os.path.splitext(filename)[0]
+        existing_names = {img.name for img in self._images}
+        name = stem
+        counter = 2
+        while name in existing_names:
+            name = f"{stem}_{counter}"
+            counter += 1
+
+        overlay = ImageOverlay(
+            name=name,
+            filename=filename,
+            center_x=cx,
+            center_y=cy,
+            width_cm=width_cm,
+            height_cm=height_cm,
+            rotation_deg=0.0,
+        )
+        self._images.append(overlay)
+        self._draw_image(overlay)
+        self._refresh_image_list()
+        self._select_image(len(self._images) - 1)
+        self._auto_save()
+        if clamped:
+            self._status_lbl.setText(
+                f"'{name}' imported — dimensions too large, "
+                f"scaled to {width_cm:.0f}×{height_cm:.0f} cm")
+            self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+        else:
+            self._status_lbl.setText(
+                f"Imported '{name}' ({width_cm:.0f}×{height_cm:.0f} cm)")
+            self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        self._canvas.draw_idle()
+
+    def _delete_image_selected(self) -> None:
+        idx = self._selected_image_idx
+        if idx < 0 or idx >= len(self._images):
+            return
+        overlay = self._images[idx]
+        reply = QMessageBox.question(
+            self, "Delete Image",
+            f"Remove image '{overlay.name}' from canvas?\n"
+            f"(The file in resources/ will not be deleted.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._remove_image_artist(overlay.name)
+        self._images.pop(idx)
+        self._deselect_image()
+        self._refresh_image_list()
+        self._auto_save()
+        self._status_lbl.setText(f"Removed image '{overlay.name}'")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+        self._canvas.draw_idle()
+
+    def _extract_image_as_barrier(self) -> None:
+        idx = self._selected_image_idx
+        if idx < 0 or idx >= len(self._images):
+            return
+        overlay = self._images[idx]
+        resources_dir = self._get_resources_dir()
+        self._status_lbl.setText("Extracting polygon…")
+        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+
+        try:
+            verts = polygon_from_image(overlay, resources_dir)
+        except Exception as exc:
+            self._status_lbl.setText(f"Extraction failed: {exc}")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            return
+
+        if len(verts) < 3:
+            self._status_lbl.setText("Could not extract enough vertices")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            return
+
+        existing = {b.name for b in self._barriers}
+        name = overlay.name + "_barrier"
+        counter = 2
+        while name in existing:
+            name = f"{overlay.name}_barrier_{counter}"
+            counter += 1
+
+        barrier = BarrierData(
+            name=name,
+            barrier_type=BarrierType.POLYGON,
+            trigger_mode=TriggerMode.EVENT,
+            trigger_when=TriggerWhen.INSIDE,
+            callback_name="on_barrier",
+            color="#FF8800",
+            alpha=0.3,
+            vertices=verts,
+        )
+        self._barriers.append(barrier)
+        self._draw_barrier(barrier)
+        self._refresh_barrier_list()
+        self._auto_save()
+        self._status_lbl.setText(
+            f"Extracted '{name}' ({len(verts)} vertices)")
+        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Ruler tool
@@ -1532,3 +2130,4 @@ class BarrierDrawerPanel(QWidget):
         self._clear_preview()
         self._clear_handles()
         self._clear_ruler()
+        self._deselect_image()

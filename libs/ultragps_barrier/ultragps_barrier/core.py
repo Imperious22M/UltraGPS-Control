@@ -322,6 +322,35 @@ class BarrierEvent:
 
 
 # ---------------------------------------------------------------------------
+# Image overlay
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ImageOverlay:
+    """A bitmap image pinned to the arena canvas.
+
+    The file lives in the project's ``resources/`` folder; all spatial metadata
+    is persisted to ``barriers.toml`` under ``[[image]]`` sections.
+
+    Args:
+        name:         Unique human-readable identifier.
+        filename:     Base filename of the image inside ``resources/``.
+        center_x:     X coordinate of the image centre in cm.
+        center_y:     Y coordinate of the image centre in cm.
+        width_cm:     Displayed width in cm.
+        height_cm:    Displayed height in cm.
+        rotation_deg: Counter-clockwise rotation in degrees (default 0).
+    """
+    name: str
+    filename: str
+    center_x: float
+    center_y: float
+    width_cm: float
+    height_cm: float
+    rotation_deg: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Barrier manager — state-tracking engine
 # ---------------------------------------------------------------------------
 
