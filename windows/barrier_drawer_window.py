@@ -215,8 +215,8 @@ class BarrierDrawerPanel(QWidget):
 
         back_btn = QPushButton("\u2190 Back")
         back_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 12px Arial;
-                          padding:5px 10px; border-radius:4px; }
+            QPushButton { background-color:#39FF14; color:black; font:bold 14px Arial;
+                          padding:6px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#2BCC10; }
         """)
         back_btn.clicked.connect(lambda: self._main_window.show_panel('main'))
@@ -307,8 +307,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._draw_btn = QPushButton("New Barrier")
         self._draw_btn.setStyleSheet("""
-            QPushButton { background-color:#FF8800; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#FF8800; color:black; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#CC6D00; }
             QPushButton:disabled { background-color:#5C3100; color:#666666; }
         """)
@@ -317,8 +317,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._finish_btn = QPushButton("Finish")
         self._finish_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#39FF14; color:black; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#2BCC10; }
             QPushButton:disabled { background-color:#1A5508; color:#666666; }
         """)
@@ -327,8 +327,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
             QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
@@ -339,8 +339,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._clear_changes_btn = QPushButton("Clear All Changes")
         self._clear_changes_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
             QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
@@ -351,8 +351,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._save_btn = QPushButton("Save All")
         self._save_btn.setStyleSheet("""
-            QPushButton { background-color:#FFD700; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#FFD700; color:black; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#FFC000; }
             QPushButton:disabled { background-color:#554700; color:#666666; }
         """)
@@ -361,8 +361,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._clear_btn = QPushButton("Clear All")
         self._clear_btn.setStyleSheet("""
-            QPushButton { background-color:#888888; color:white; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#888888; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#666666; }
             QPushButton:disabled { background-color:#444444; color:#666666; }
         """)
@@ -371,8 +371,8 @@ class BarrierDrawerPanel(QWidget):
 
         self._del_btn = QPushButton("Delete Barrier")
         self._del_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
+            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
             QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
@@ -409,8 +409,10 @@ class BarrierDrawerPanel(QWidget):
 
         # Status label at bottom of list
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet("color: #888888; font: 10px Arial;")
-        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setMinimumHeight(75)
         right_col.addWidget(self._status_lbl)
 
         self._barrier_list.currentRowChanged.connect(self._on_barrier_selected)
@@ -524,7 +526,7 @@ class BarrierDrawerPanel(QWidget):
         self._update_button_states('normal')
         self._canvas.draw_idle()
         self._status_lbl.setText("All changes cleared — reverted to saved file")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
 
     def eventFilter(self, obj, event) -> bool:
         """Deselect a list item when it is clicked while already selected."""
@@ -772,7 +774,7 @@ class BarrierDrawerPanel(QWidget):
         self._line_point1 = None
         self._clear_preview()
         self._status_lbl.setText(f"Drawing {type_text} \u2014 click on canvas")
-        self._status_lbl.setStyleSheet("color: #FF8800; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
         self._update_button_states('drawing')
 
     def _on_type_combo_changed(self, text: str) -> None:
@@ -785,7 +787,7 @@ class BarrierDrawerPanel(QWidget):
         self._clear_preview()
         self._canvas.draw_idle()
         self._status_lbl.setText(f"Drawing {self._drawing_mode} — click on canvas")
-        self._status_lbl.setStyleSheet("color: #FF8800; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
 
     def _finish_drawing(self) -> None:
         if self._drawing_mode == "polygon":
@@ -806,7 +808,7 @@ class BarrierDrawerPanel(QWidget):
         self._barrier_list.clearSelection()
         self._barrier_list.setCurrentRow(-1)
         self._status_lbl.setText("Drawing cancelled")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
@@ -928,7 +930,7 @@ class BarrierDrawerPanel(QWidget):
     def _finish_polygon(self) -> None:
         if len(self._polygon_vertices) < 3:
             self._status_lbl.setText("Polygon needs at least 3 vertices")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.POLYGON)
@@ -937,7 +939,7 @@ class BarrierDrawerPanel(QWidget):
         ok, msg = validate_barrier(barrier)
         if not ok:
             self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         self._barriers.append(barrier)
@@ -948,7 +950,7 @@ class BarrierDrawerPanel(QWidget):
         self._refresh_barrier_list()
         self._auto_save()
         self._status_lbl.setText(f"Added and saved polygon '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
@@ -957,7 +959,7 @@ class BarrierDrawerPanel(QWidget):
         radius = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
         if radius <= 0:
             self._status_lbl.setText("Circle radius must be > 0")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.CIRCLE)
@@ -967,7 +969,7 @@ class BarrierDrawerPanel(QWidget):
         ok, msg = validate_barrier(barrier)
         if not ok:
             self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         self._barriers.append(barrier)
@@ -978,7 +980,7 @@ class BarrierDrawerPanel(QWidget):
         self._refresh_barrier_list()
         self._auto_save()
         self._status_lbl.setText(f"Added and saved circle '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
@@ -987,7 +989,7 @@ class BarrierDrawerPanel(QWidget):
         p2 = (x, y)
         if p1 == p2:
             self._status_lbl.setText("Line endpoints must differ")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.LINE)
@@ -998,7 +1000,7 @@ class BarrierDrawerPanel(QWidget):
         ok, msg = validate_barrier(barrier)
         if not ok:
             self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
             return
 
         self._barriers.append(barrier)
@@ -1009,7 +1011,7 @@ class BarrierDrawerPanel(QWidget):
         self._refresh_barrier_list()
         self._auto_save()
         self._status_lbl.setText(f"Added and saved line '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
@@ -1176,7 +1178,7 @@ class BarrierDrawerPanel(QWidget):
         self._refresh_barrier_list()
         self._canvas.draw_idle()
         self._status_lbl.setText(f"Deleted '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
 
 
     def _load_barrier_into_controls(self, barrier: BarrierData) -> None:
@@ -1267,7 +1269,7 @@ class BarrierDrawerPanel(QWidget):
         self._has_unsaved_changes = False
         self._update_unsaved_state()
         self._status_lbl.setText(f"Saved {len(self._barriers)} barriers")
-        self._status_lbl.setStyleSheet("color: #FFD700; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: #FFD700; font: bold 13px Arial;")
 
     def _load_barriers(self) -> None:
         path = self._get_barriers_path()
@@ -1295,7 +1297,7 @@ class BarrierDrawerPanel(QWidget):
         self._refresh_barrier_list()
         self._canvas.draw_idle()
         self._status_lbl.setText("All barriers cleared")
-        self._status_lbl.setStyleSheet("color: #888888; font: 10px Arial;")
+        self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
 
     # ------------------------------------------------------------------
     # Panel lifecycle
