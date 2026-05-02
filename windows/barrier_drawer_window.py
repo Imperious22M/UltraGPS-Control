@@ -36,6 +36,62 @@ from ultragps_barrier import (
 )
 
 
+class _CustomColorDialog(QDialog):
+    """Small popup that lets the user enter a custom hex colour."""
+
+    import re as _re  # class-level so accept() can use it without a module import
+
+    def __init__(self, parent=None, initial_hex: str = "#FF0000") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Custom Colour")
+        self.setStyleSheet("background-color: #1a1a1a; color: white;")
+        self.setMinimumWidth(280)
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel("Enter hex colour (#RRGGBB):")
+        lbl.setStyleSheet("color: white; font: 11px Arial;")
+        layout.addWidget(lbl)
+
+        self._hex_edit = QLineEdit(initial_hex)
+        self._hex_edit.setStyleSheet(
+            "background:#222; color:white; font:12px Arial; padding:4px;")
+        layout.addWidget(self._hex_edit)
+
+        # Error label — hidden until validation fails
+        self._error_lbl = QLabel("")
+        self._error_lbl.setStyleSheet("color: #FF4444; font: italic 10px Arial;")
+        self._error_lbl.setVisible(False)
+        layout.addWidget(self._error_lbl)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.setStyleSheet("color: white; font: 11px Arial;")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        """Validate before closing — show an inline error and stay open if invalid."""
+        import re
+        hex_val = self.hex_value()
+        if re.match(r'^#[0-9A-Fa-f]{6}$', hex_val):
+            self._error_lbl.setVisible(False)
+            super().accept()
+        else:
+            self._error_lbl.setText(
+                f"Invalid colour '{hex_val}' — must be exactly 6 hex digits, e.g. #FF8800")
+            self._error_lbl.setVisible(True)
+            self.adjustSize()
+
+    def hex_value(self) -> str:
+        """Return the sanitised hex colour entered by the user (truncated to #RRGGBB)."""
+        raw = self._hex_edit.text().strip()
+        if not raw.startswith('#'):
+            raw = '#' + raw
+        return raw[:7]
+
+
 class _ImportImageDialog(QDialog):
     """Ask the user for the real-world width and height of an imported image."""
 
@@ -121,6 +177,7 @@ class BarrierDrawerPanel(QWidget):
         # UI interaction state
         self._current_mode: str = 'normal'
         self._has_unsaved_changes: bool = False
+        self._prev_color_idx: int = 0  # for reverting if Custom dialog is cancelled
 
         # Drag-edit state
         self._drag_state = None
@@ -371,8 +428,16 @@ class BarrierDrawerPanel(QWidget):
 
         r1.addWidget(self._styled_label("Color:"))
         self._color_combo = QComboBox()
-        self._color_combo.addItems([
-            "#FF0000", "#FF8800", "#FFFF00", "#00FF00", "#00FFFF", "#FF00FF"])
+        for _name, _hex in [
+            ("Red",     "#FF0000"),
+            ("Orange",  "#FF8800"),
+            ("Yellow",  "#FFFF00"),
+            ("Green",   "#00FF00"),
+            ("Cyan",    "#00FFFF"),
+            ("Magenta", "#FF00FF"),
+            ("Custom",  None),
+        ]:
+            self._color_combo.addItem(_name, _hex)
         self._color_combo.setStyleSheet(_combo_ss)
         r1.addWidget(self._color_combo)
 
@@ -587,12 +652,13 @@ class BarrierDrawerPanel(QWidget):
         for sig in (
             self._trigger_combo.currentTextChanged,
             self._when_combo.currentTextChanged,
-            self._color_combo.currentTextChanged,
             self._name_edit.textChanged,
             self._callback_edit.textChanged,
         ):
             sig.connect(lambda _: self._live_update_barrier())
         self._alpha_spin.valueChanged.connect(lambda _: self._live_update_barrier())
+        # Color uses activated so Custom re-opens the dialog even when already selected
+        self._color_combo.activated.connect(self._on_color_activated)
         self._type_combo.currentTextChanged.connect(self._on_type_combo_changed)
 
     @staticmethod
@@ -988,6 +1054,32 @@ class BarrierDrawerPanel(QWidget):
         self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
         self._update_button_states('drawing')
 
+    def _on_color_activated(self, index: int) -> None:
+        """Handle colour combo selection; open Custom dialog when needed."""
+        if self._color_combo.itemText(index) == "Custom":
+            self._prompt_custom_color()
+        else:
+            self._prev_color_idx = index
+            self._live_update_barrier()
+
+    def _prompt_custom_color(self) -> None:
+        """Open the hex colour dialog; revert selection if cancelled."""
+        current_hex = self._color_combo.currentData() or "#FF0000"
+        dlg = _CustomColorDialog(self, current_hex)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            hex_val = dlg.hex_value()
+            idx = self._color_combo.currentIndex()
+            self._color_combo.blockSignals(True)
+            self._color_combo.setItemData(idx, hex_val)
+            self._color_combo.blockSignals(False)
+            self._prev_color_idx = idx
+            self._live_update_barrier()
+            self._canvas.draw()   # force immediate repaint, not just idle schedule
+        else:
+            self._color_combo.blockSignals(True)
+            self._color_combo.setCurrentIndex(self._prev_color_idx)
+            self._color_combo.blockSignals(False)
+
     def _on_type_combo_changed(self, text: str) -> None:
         if self._current_mode != 'drawing' or not text:
             return
@@ -1299,7 +1391,7 @@ class BarrierDrawerPanel(QWidget):
             trigger_mode=trigger_map[self._trigger_combo.currentText()],
             trigger_when=when_map[self._when_combo.currentText()],
             callback_name=self._callback_edit.text().strip() or "on_barrier",
-            color=self._color_combo.currentText(),
+            color=self._current_color(),
             alpha=self._alpha_spin.value(),
         )
 
@@ -1342,7 +1434,8 @@ class BarrierDrawerPanel(QWidget):
         self._canvas.draw_idle()
 
     def _current_color(self) -> str:
-        return self._color_combo.currentText()
+        data = self._color_combo.currentData()
+        return data if data else "#FF0000"
 
     # ------------------------------------------------------------------
     # Barrier rendering
@@ -1354,7 +1447,12 @@ class BarrierDrawerPanel(QWidget):
 
     def _draw_barrier(self, barrier: BarrierData) -> None:
         artists = []
-        color = barrier.color
+        import matplotlib.colors as _mcolors
+        try:
+            _mcolors.to_rgba(barrier.color)
+            color = barrier.color
+        except (ValueError, TypeError):
+            color = '#FFFFFF'
         alpha = barrier.alpha
 
         if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
@@ -1467,9 +1565,20 @@ class BarrierDrawerPanel(QWidget):
         self._trigger_combo.setCurrentText(trigger_map.get(barrier.trigger_mode, "Event"))
         self._when_combo.setCurrentText(when_map.get(barrier.trigger_when, "Inside"))
 
-        idx = self._color_combo.findText(barrier.color)
-        if idx >= 0:
-            self._color_combo.setCurrentIndex(idx)
+        # Find predefined colour by stored data value; fall back to Custom
+        color_idx = next(
+            (i for i in range(self._color_combo.count())
+             if self._color_combo.itemData(i) == barrier.color),
+            None,
+        )
+        if color_idx is not None:
+            self._color_combo.setCurrentIndex(color_idx)
+            self._prev_color_idx = color_idx
+        else:
+            custom_idx = self._color_combo.count() - 1
+            self._color_combo.setItemData(custom_idx, barrier.color)
+            self._color_combo.setCurrentIndex(custom_idx)
+            self._prev_color_idx = custom_idx
 
         self._alpha_spin.setValue(barrier.alpha)
         self._name_edit.setText(barrier.name)
@@ -1494,7 +1603,7 @@ class BarrierDrawerPanel(QWidget):
         barrier.trigger_mode  = trigger_map[t] if t in trigger_map else barrier.trigger_mode
         w = self._when_combo.currentText()
         barrier.trigger_when  = when_map[w] if w in when_map else barrier.trigger_when
-        barrier.color         = self._color_combo.currentText() or barrier.color
+        barrier.color         = self._current_color()
         barrier.alpha         = self._alpha_spin.value()
         barrier.callback_name = self._callback_edit.text().strip() or "on_barrier"
 
