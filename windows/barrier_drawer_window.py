@@ -77,6 +77,14 @@ class BarrierDrawerPanel(QWidget):
         self._handle_artists: list = []
         self._handle_meta: list = []  # parallel: ('vertex', idx) | ('center',) | ('radius',)
 
+        # Ruler tool state
+        self._ruler_mode: bool = False
+        self._ruler_p1: tuple | None = None    # pending first point (before ruler drawn)
+        self._ruler_p1_dot = None              # dot artist for pending first point
+        self._ruler_endpoints: list = []       # [(x1,y1),(x2,y2)] for complete ruler
+        self._ruler_artists: list = []         # [line, dot1, dot2, ann] for complete ruler
+        self._cid_key = None
+
         # Canvas event connection IDs
         self._cid_press = None
         self._cid_release = None
@@ -195,6 +203,47 @@ class BarrierDrawerPanel(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # --- Tools sidebar (far left) ---
+        tools_widget = QWidget()
+        tools_widget.setFixedWidth(170)
+        tools_widget.setStyleSheet("background-color: black;")
+        tools_layout = QVBoxLayout(tools_widget)
+        tools_layout.setContentsMargins(6, 8, 6, 8)
+        tools_layout.setSpacing(8)
+
+        tools_title = QLabel("Tools")
+        tools_title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
+        tools_title.setStyleSheet("color: #FF8800;")
+        tools_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tools_layout.addWidget(tools_title)
+
+        self._tools_status_lbl = QLabel("Ready")
+        self._tools_status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+        self._tools_status_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        self._tools_status_lbl.setWordWrap(True)
+        self._tools_status_lbl.setMinimumHeight(75)
+        tools_layout.addWidget(self._tools_status_lbl)
+
+        self._ruler_btn = QPushButton("Virtual Ruler")
+        self._ruler_btn.setStyleSheet("""
+            QPushButton { background-color:#4444CC; color:white; font:bold 13px Arial;
+                          padding:5px 14px; border-radius:4px; }
+            QPushButton:hover { background-color:#3333AA; }
+            QPushButton:disabled { background-color:#222244; color:#666666; }
+        """)
+        self._ruler_btn.clicked.connect(self._toggle_ruler)
+        tools_layout.addWidget(self._ruler_btn)
+
+        tools_layout.addStretch()
+        root.addWidget(tools_widget)
+
+        # Thin vertical separator
+        vsep = QFrame()
+        vsep.setFrameShape(QFrame.Shape.VLine)
+        vsep.setStyleSheet("color: #333333;")
+        root.addWidget(vsep)
 
         # Left column: top bar + canvas + controls
         left_col = QVBoxLayout()
@@ -447,6 +496,7 @@ class BarrierDrawerPanel(QWidget):
         self._draw_btn.setEnabled(not drawing)
         self._finish_btn.setEnabled(drawing)
         self._cancel_btn.setEnabled(drawing)
+        self._ruler_btn.setEnabled(not drawing)
 
         self._del_btn.setEnabled(not drawing and selected)
         self._save_btn.setEnabled(not drawing)
@@ -707,18 +757,28 @@ class BarrierDrawerPanel(QWidget):
             barrier.radius = max(1.0, math.sqrt((abs_x - cx) ** 2 + (abs_y - cy) ** 2))
 
     def _apply_drag(self, event) -> None:
-        """Apply the current drag delta to the selected barrier and refresh."""
+        """Apply the current drag delta and refresh."""
         state = self._drag_state
         if state is None or event.xdata is None or event.ydata is None:
             return
-        row = state['row']
-        if row < 0 or row >= len(self._barriers):
-            return
-        barrier = self._barriers[row]
+
         dx = event.xdata - state['last_x']
         dy = event.ydata - state['last_y']
         state['last_x'] = event.xdata
         state['last_y'] = event.ydata
+
+        if state['type'] == 'ruler_endpoint':
+            idx = state['idx']
+            if len(self._ruler_endpoints) == 2:
+                x, y = self._ruler_endpoints[idx]
+                self._ruler_endpoints[idx] = (x + dx, y + dy)
+                self._redraw_ruler()
+            return
+
+        row = state['row']
+        if row < 0 or row >= len(self._barriers):
+            return
+        barrier = self._barriers[row]
 
         if state['type'] == 'body':
             self._move_barrier(barrier, dx, dy)
@@ -856,25 +916,56 @@ class BarrierDrawerPanel(QWidget):
                     self._finish_line(x, y)
             return
 
-        # ---- drag start (barrier selected) --------------------------------
+        # ---- ruler endpoint drag (always, if a ruler exists) ---------------
+        ep_idx = self._hit_test_ruler_endpoints(event)
+        if ep_idx is not None:
+            self._drag_state = {
+                'type': 'ruler_endpoint', 'idx': ep_idx,
+                'last_x': x, 'last_y': y,
+            }
+            return
+
+        # ---- barrier handle / body drag (barrier selected) ----------------
         row = self._barrier_list.currentRow()
-        if row < 0 or row >= len(self._barriers):
-            return
-        barrier = self._barriers[row]
+        if 0 <= row < len(self._barriers):
+            barrier = self._barriers[row]
+            handle_idx = self._hit_test_handles(event)
+            if handle_idx is not None:
+                self._drag_state = {
+                    'type': 'handle', 'row': row, 'handle_idx': handle_idx,
+                    'last_x': x, 'last_y': y,
+                }
+                return
+            if self._hit_test_barrier_body(event, barrier):
+                self._drag_state = {
+                    'type': 'body', 'row': row,
+                    'last_x': x, 'last_y': y,
+                }
+                return
 
-        handle_idx = self._hit_test_handles(event)
-        if handle_idx is not None:
-            self._drag_state = {
-                'type': 'handle', 'row': row, 'handle_idx': handle_idx,
-                'last_x': x, 'last_y': y,
-            }
-            return
-
-        if self._hit_test_barrier_body(event, barrier):
-            self._drag_state = {
-                'type': 'body', 'row': row,
-                'last_x': x, 'last_y': y,
-            }
+        # ---- ruler point placement (only in ruler mode, empty canvas) ------
+        if self._ruler_mode:
+            if self._ruler_artists:
+                # Ruler already shown: clear it, this click becomes new first point
+                self._clear_ruler()
+                self._ruler_p1 = (x, y)
+                self._ruler_p1_dot, = self.ax.plot(
+                    x, y, 'o', color='#DDDDDD', markersize=7, zorder=31)
+                self._canvas.draw_idle()
+                self._tools_status_lbl.setText("Ruler: click second point")
+                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+            elif self._ruler_p1 is None:
+                # First point
+                self._ruler_p1 = (x, y)
+                self._ruler_p1_dot, = self.ax.plot(
+                    x, y, 'o', color='#DDDDDD', markersize=7, zorder=31)
+                self._canvas.draw_idle()
+                self._tools_status_lbl.setText("Ruler: click second point")
+                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+            else:
+                # Second point — draw the ruler
+                self._draw_ruler(self._ruler_p1, (x, y))
+                self._ruler_p1 = None
 
     def _on_canvas_release(self, event) -> None:
         if self._drag_state is not None:
@@ -1300,6 +1391,113 @@ class BarrierDrawerPanel(QWidget):
         self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
 
     # ------------------------------------------------------------------
+    # Ruler tool
+    # ------------------------------------------------------------------
+
+    def _toggle_ruler(self) -> None:
+        if self._ruler_mode:
+            self._ruler_mode = False
+            self._ruler_btn.setText("Virtual Ruler")
+            self._clear_ruler_p1()
+            self._clear_ruler()
+            self._tools_status_lbl.setText("Ready")
+            self._tools_status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+        else:
+            self._ruler_mode = True
+            self._ruler_btn.setText("Stop Ruler")
+            if not self._ruler_artists:
+                self._tools_status_lbl.setText("Virtual ruler active")
+                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+
+    def _clear_ruler_p1(self) -> None:
+        """Remove the pending first-point dot and reset first-point state."""
+        if self._ruler_p1_dot is not None:
+            try:
+                self._ruler_p1_dot.remove()
+            except (ValueError, AttributeError):
+                pass
+            self._ruler_p1_dot = None
+        self._ruler_p1 = None
+
+    def _clear_ruler(self) -> None:
+        """Remove the complete ruler (line + dots + annotation)."""
+        for artist in self._ruler_artists:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._ruler_artists.clear()
+        self._ruler_endpoints.clear()
+        self._canvas.draw_idle()
+
+    def _draw_ruler(self, p1: tuple, p2: tuple) -> None:
+        """Create the complete ruler between p1 and p2, removing any p1 dot first."""
+        self._clear_ruler_p1()
+        self._clear_ruler()
+        x1, y1 = p1
+        x2, y2 = p2
+        self._ruler_endpoints = [(x1, y1), (x2, y2)]
+
+        line, = self.ax.plot([x1, x2], [y1, y2], '--',
+                              color='#DDDDDD', linewidth=1.5, alpha=0.9, zorder=30)
+        dot1, = self.ax.plot(x1, y1, 'o', color='#DDDDDD', markersize=7, zorder=31)
+        dot2, = self.ax.plot(x2, y2, 'o', color='#DDDDDD', markersize=7, zorder=31)
+        dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        ann = self.ax.annotate(
+            f"{dist:.1f} cm",
+            xy=(mx, my), xytext=(mx, my),
+            ha='center', va='center',
+            fontsize=10, fontweight='bold', color='black',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      alpha=0.9, edgecolor='#888888'),
+            zorder=32,
+        )
+        self._ruler_artists = [line, dot1, dot2, ann]
+        self._canvas.draw_idle()
+        self._tools_status_lbl.setText(f"Distance:\n{dist:.1f} cm")
+        self._tools_status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+
+    def _redraw_ruler(self) -> None:
+        """Update ruler artists in-place after an endpoint is dragged."""
+        if len(self._ruler_artists) < 4 or len(self._ruler_endpoints) < 2:
+            return
+        (x1, y1), (x2, y2) = self._ruler_endpoints
+        dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+
+        line, dot1, dot2, ann = self._ruler_artists
+        line.set_xdata([x1, x2]); line.set_ydata([y1, y2])
+        dot1.set_xdata([x1]);     dot1.set_ydata([y1])
+        dot2.set_xdata([x2]);     dot2.set_ydata([y2])
+        ann.set_position((mx, my))
+        ann.xy = (mx, my)
+        ann.set_text(f"{dist:.1f} cm")
+        self._canvas.draw_idle()
+        self._tools_status_lbl.setText(f"Distance:\n{dist:.1f} cm")
+
+    def _hit_test_ruler_endpoints(self, event) -> 'int | None':
+        """Return 0 or 1 if the cursor is within 12 px of a ruler endpoint, else None."""
+        if len(self._ruler_artists) < 3 or event.x is None or event.y is None:
+            return None
+        for idx in (0, 1):
+            h = self._ruler_artists[idx + 1]   # dot1 at [1], dot2 at [2]
+            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
+            disp = self.ax.transData.transform((hx, hy))
+            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
+                return idx
+        return None
+
+    def _on_canvas_key(self, event) -> None:
+        """Handle Escape: cancel a pending ruler first-point."""
+        if event.key == 'escape' and self._ruler_p1 is not None and not self._ruler_artists:
+            self._clear_ruler_p1()
+            self._canvas.draw_idle()
+            if self._ruler_mode:
+                self._tools_status_lbl.setText("Virtual ruler active")
+                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+
+    # ------------------------------------------------------------------
     # Panel lifecycle
     # ------------------------------------------------------------------
 
@@ -1315,17 +1513,22 @@ class BarrierDrawerPanel(QWidget):
             'button_release_event', self._on_canvas_release)
         self._cid_motion = self._canvas.mpl_connect(
             'motion_notify_event', self._on_canvas_motion)
+        self._cid_key = self._canvas.mpl_connect(
+            'key_press_event', self._on_canvas_key)
 
         self._refresh_timer.start()
 
     def on_panel_hide(self) -> None:
         self._refresh_timer.stop()
-        for cid_attr in ('_cid_press', '_cid_release', '_cid_motion'):
+        for cid_attr in ('_cid_press', '_cid_release', '_cid_motion', '_cid_key'):
             cid = getattr(self, cid_attr, None)
             if cid is not None:
                 self._canvas.mpl_disconnect(cid)
                 setattr(self, cid_attr, None)
         self._drawing_mode = None
         self._drag_state = None
+        self._ruler_mode = False
+        self._clear_ruler_p1()
         self._clear_preview()
         self._clear_handles()
+        self._clear_ruler()
