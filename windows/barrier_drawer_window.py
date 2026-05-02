@@ -67,9 +67,9 @@ class BarrierDrawerPanel(QWidget):
         self._line_point1 = None
         self._preview_artists: list = []
 
-        # In-place editing state (-1 = not editing)
-        self._editing_row: int = -1
+        # UI interaction state
         self._current_mode: str = 'normal'
+        self._has_unsaved_changes: bool = False
 
         # Canvas event connection IDs
         self._cid_press = None
@@ -227,33 +227,39 @@ class BarrierDrawerPanel(QWidget):
         r1 = QHBoxLayout(row1)
         r1.setContentsMargins(10, 5, 10, 5)
 
+        _combo_ss = ("QComboBox { background:#222222; color:white; font:11px Arial;"
+                     " padding:2px 6px; }"
+                     " QComboBox:disabled { background:#1a1a1a; color:#555555; }")
+        _spin_ss  = ("QDoubleSpinBox { background:#222222; color:white; font:11px Arial;"
+                     " padding:2px 6px; }"
+                     " QDoubleSpinBox:disabled { background:#1a1a1a; color:#555555; }")
+        _edit_ss  = ("QLineEdit { background:#222222; color:white; font:11px Arial;"
+                     " padding:2px 6px; }"
+                     " QLineEdit:disabled { background:#1a1a1a; color:#555555; }")
+
         r1.addWidget(self._styled_label("Type:"))
         self._type_combo = QComboBox()
         self._type_combo.addItems(["Polygon", "Circle", "Line"])
-        self._type_combo.setStyleSheet(
-            "QComboBox { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._type_combo.setStyleSheet(_combo_ss)
         r1.addWidget(self._type_combo)
 
         r1.addWidget(self._styled_label("Trigger:"))
         self._trigger_combo = QComboBox()
         self._trigger_combo.addItems(["Event", "Continuous"])
-        self._trigger_combo.setStyleSheet(
-            "QComboBox { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._trigger_combo.setStyleSheet(_combo_ss)
         r1.addWidget(self._trigger_combo)
 
         r1.addWidget(self._styled_label("When:"))
         self._when_combo = QComboBox()
         self._when_combo.addItems(["Inside", "Outside"])
-        self._when_combo.setStyleSheet(
-            "QComboBox { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._when_combo.setStyleSheet(_combo_ss)
         r1.addWidget(self._when_combo)
 
         r1.addWidget(self._styled_label("Color:"))
         self._color_combo = QComboBox()
         self._color_combo.addItems([
             "#FF0000", "#FF8800", "#FFFF00", "#00FF00", "#00FFFF", "#FF00FF"])
-        self._color_combo.setStyleSheet(
-            "QComboBox { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._color_combo.setStyleSheet(_combo_ss)
         r1.addWidget(self._color_combo)
 
         r1.addWidget(self._styled_label("Alpha:"))
@@ -261,23 +267,29 @@ class BarrierDrawerPanel(QWidget):
         self._alpha_spin.setRange(0.0, 1.0)
         self._alpha_spin.setSingleStep(0.1)
         self._alpha_spin.setValue(0.3)
-        self._alpha_spin.setStyleSheet(
-            "QDoubleSpinBox { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._alpha_spin.setStyleSheet(_spin_ss)
         r1.addWidget(self._alpha_spin)
 
         r1.addWidget(self._styled_label("Name:"))
-        self._name_edit = QLineEdit("barrier_1")
-        self._name_edit.setStyleSheet(
-            "QLineEdit { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._name_edit = QLineEdit()
+        self._name_edit.setStyleSheet(_edit_ss)
         self._name_edit.setFixedWidth(120)
         r1.addWidget(self._name_edit)
 
         r1.addWidget(self._styled_label("Callback:"))
-        self._callback_edit = QLineEdit("on_barrier")
-        self._callback_edit.setStyleSheet(
-            "QLineEdit { background:#222222; color:white; font:11px Arial; padding:2px 6px; }")
+        self._callback_edit = QLineEdit()
+        self._callback_edit.setStyleSheet(_edit_ss)
         self._callback_edit.setFixedWidth(120)
         r1.addWidget(self._callback_edit)
+
+        # Controls that are editable when a barrier is selected (Type is always read-only)
+        self._edit_controls = [
+            self._trigger_combo, self._when_combo, self._color_combo,
+            self._alpha_spin, self._name_edit, self._callback_edit,
+        ]
+        for w in self._edit_controls:
+            w.setEnabled(False)
+        self._type_combo.setEnabled(False)
 
         left_col.addWidget(row1)
 
@@ -319,25 +331,15 @@ class BarrierDrawerPanel(QWidget):
 
         r2.addSpacing(20)
 
-        self._edit_btn = QPushButton("Edit")
-        self._edit_btn.setStyleSheet("""
-            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#00CCCC; }
-            QPushButton:disabled { background-color:#005555; color:#666666; }
-        """)
-        self._edit_btn.clicked.connect(self._edit_selected)
-        r2.addWidget(self._edit_btn)
-
-        self._edit_cancel_btn = QPushButton("Cancel")
-        self._edit_cancel_btn.setStyleSheet("""
+        self._clear_changes_btn = QPushButton("Clear All Changes")
+        self._clear_changes_btn.setStyleSheet("""
             QPushButton { background-color:#FF4444; color:white; font:bold 11px Arial;
                           padding:4px 12px; border-radius:4px; }
             QPushButton:hover { background-color:#CC3333; }
             QPushButton:disabled { background-color:#552222; color:#666666; }
         """)
-        self._edit_cancel_btn.clicked.connect(self._cancel_editing)
-        r2.addWidget(self._edit_cancel_btn)
+        self._clear_changes_btn.clicked.connect(self._clear_all_changes)
+        r2.addWidget(self._clear_changes_btn)
 
         r2.addSpacing(20)
 
@@ -405,11 +407,22 @@ class BarrierDrawerPanel(QWidget):
         self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_col.addWidget(self._status_lbl)
 
-        self._barrier_list.currentRowChanged.connect(
-            lambda: self._update_button_states(self._current_mode))
+        self._barrier_list.currentRowChanged.connect(self._on_barrier_selected)
 
         root.addLayout(right_col)
         self._update_button_states('normal')
+
+        # Live-edit signals — fire whenever a barrier is selected
+        for sig in (
+            self._trigger_combo.currentTextChanged,
+            self._when_combo.currentTextChanged,
+            self._color_combo.currentTextChanged,
+            self._name_edit.textChanged,
+            self._callback_edit.textChanged,
+        ):
+            sig.connect(lambda _: self._live_update_barrier())
+        self._alpha_spin.valueChanged.connect(lambda _: self._live_update_barrier())
+        self._type_combo.currentTextChanged.connect(self._on_type_combo_changed)
 
     @staticmethod
     def _styled_label(text: str) -> QLabel:
@@ -418,27 +431,91 @@ class BarrierDrawerPanel(QWidget):
         return lbl
 
     def _update_button_states(self, mode: str = 'normal') -> None:
-        """Enable/disable action buttons based on the current interaction mode.
-
-        mode: 'normal' | 'drawing' | 'editing'
-        """
+        """Enable/disable buttons and controls based on the current interaction mode."""
         self._current_mode = mode
         drawing = mode == 'drawing'
-        editing = mode == 'editing'
         selected = self._barrier_list.currentRow() >= 0
 
-        self._draw_btn.setEnabled(not drawing and not editing)
+        self._draw_btn.setEnabled(not drawing)
         self._finish_btn.setEnabled(drawing)
         self._cancel_btn.setEnabled(drawing)
-        self._edit_btn.setEnabled(not drawing)
-        self._edit_cancel_btn.setEnabled(editing)
-        self._del_btn.setEnabled(not drawing and not editing and selected)
-        self._save_btn.setEnabled(not drawing and not editing)
-        self._clear_btn.setEnabled(not drawing and not editing)
+
+        self._del_btn.setEnabled(not drawing and selected)
+        self._save_btn.setEnabled(not drawing)
+        self._clear_btn.setEnabled(not drawing)
+
+        if drawing:
+            # All fields editable when configuring a new barrier
+            for w in self._edit_controls:
+                w.setEnabled(True)
+            self._type_combo.setEnabled(True)
+        else:
+            # For existing barriers: editable when selected, Type always read-only
+            for w in self._edit_controls:
+                w.setEnabled(selected)
+            self._type_combo.setEnabled(False)
+
+        self._update_unsaved_state()
+
+    def _update_unsaved_state(self) -> None:
+        """Sync Save button label and Clear All Changes button with unsaved state."""
+        self._save_btn.setText(
+            "Save All Changes" if self._has_unsaved_changes else "Save All")
+        self._clear_changes_btn.setEnabled(
+            self._current_mode != 'drawing' and self._has_unsaved_changes)
+
+    def _on_barrier_selected(self, row: int) -> None:
+        """Called when the barrier list selection changes."""
+        if self._current_mode == 'drawing':
+            return
+        if 0 <= row < len(self._barriers):
+            self._load_barrier_into_controls(self._barriers[row])
+        else:
+            self._blank_edit_controls()
+        self._update_button_states('normal')
+
+    def _blank_edit_controls(self) -> None:
+        """Clear all edit controls to an empty/default state."""
+        for w in (self._type_combo, self._trigger_combo,
+                  self._when_combo, self._color_combo):
+            w.blockSignals(True)
+            w.setCurrentIndex(-1)
+            w.blockSignals(False)
+        self._alpha_spin.blockSignals(True)
+        self._alpha_spin.setValue(0.0)
+        self._alpha_spin.blockSignals(False)
+        self._name_edit.blockSignals(True)
+        self._name_edit.clear()
+        self._name_edit.blockSignals(False)
+        self._callback_edit.blockSignals(True)
+        self._callback_edit.clear()
+        self._callback_edit.blockSignals(False)
 
     def _auto_save(self) -> None:
         """Persist barriers to disk without updating the status label."""
         save_barriers(self._get_barriers_path(), self._barriers)
+        self._has_unsaved_changes = False
+        self._update_unsaved_state()
+
+    def _clear_all_changes(self) -> None:
+        """Revert all in-memory barrier edits to the last saved file state."""
+        saved_row = self._barrier_list.currentRow()
+        path = self._get_barriers_path()
+        self._barriers = load_barriers(path)
+        for name in list(self._barrier_patches.keys()):
+            self._remove_barrier_patches(name)
+        self._draw_all_barriers()
+        self._refresh_barrier_list()
+        self._has_unsaved_changes = False
+        # Restore selection so controls reload
+        if 0 <= saved_row < len(self._barriers):
+            self._barrier_list.setCurrentRow(saved_row)
+        else:
+            self._blank_edit_controls()
+        self._update_button_states('normal')
+        self._canvas.draw_idle()
+        self._status_lbl.setText("All changes cleared — reverted to saved file")
+        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
 
     def eventFilter(self, obj, event) -> bool:
         """Deselect a list item when it is clicked while already selected."""
@@ -457,24 +534,40 @@ class BarrierDrawerPanel(QWidget):
         self._barrier_list.setCurrentRow(-1)
         self._barrier_list.clearFocus()
 
-    def _cancel_editing(self) -> None:
-        self._editing_row = -1
-        self._edit_btn.setText("Edit")
-        self._edit_btn.setStyleSheet("""
-            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#00CCCC; }
-            QPushButton:disabled { background-color:#005555; color:#666666; }
-        """)
-        self._status_lbl.setText("Edit cancelled")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
-        self._update_button_states('normal')
 
     # ------------------------------------------------------------------
     # Drawing state machine
     # ------------------------------------------------------------------
 
     def _start_drawing(self) -> None:
+        # Deselect any barrier so live-edit signals don't accidentally modify it
+        self._barrier_list.clearSelection()
+        self._barrier_list.setCurrentRow(-1)
+
+        # Fill in defaults for any controls that are still blank
+        for combo, idx in (
+            (self._type_combo,    0),   # Polygon
+            (self._trigger_combo, 0),   # Event
+            (self._when_combo,    0),   # Inside
+            (self._color_combo,   0),   # #FF0000
+        ):
+            if combo.currentIndex() < 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+        if self._alpha_spin.value() == 0.0:
+            self._alpha_spin.blockSignals(True)
+            self._alpha_spin.setValue(0.3)
+            self._alpha_spin.blockSignals(False)
+        if not self._name_edit.text().strip():
+            self._name_edit.blockSignals(True)
+            self._name_edit.setText("barrier_1")
+            self._name_edit.blockSignals(False)
+        if not self._callback_edit.text().strip():
+            self._callback_edit.blockSignals(True)
+            self._callback_edit.setText("on_barrier")
+            self._callback_edit.blockSignals(False)
+
         type_text = self._type_combo.currentText().lower()
         self._drawing_mode = type_text
         self._polygon_vertices = []
@@ -484,6 +577,18 @@ class BarrierDrawerPanel(QWidget):
         self._status_lbl.setText(f"Drawing {type_text} \u2014 click on canvas")
         self._status_lbl.setStyleSheet("color: #FF8800; font: 10px Arial;")
         self._update_button_states('drawing')
+
+    def _on_type_combo_changed(self, text: str) -> None:
+        if self._current_mode != 'drawing' or not text:
+            return
+        self._drawing_mode = text.lower()
+        self._polygon_vertices = []
+        self._circle_center = None
+        self._line_point1 = None
+        self._clear_preview()
+        self._canvas.draw_idle()
+        self._status_lbl.setText(f"Drawing {self._drawing_mode} — click on canvas")
+        self._status_lbl.setStyleSheet("color: #FF8800; font: 10px Arial;")
 
     def _finish_drawing(self) -> None:
         if self._drawing_mode == "polygon":
@@ -500,14 +605,6 @@ class BarrierDrawerPanel(QWidget):
         self._polygon_vertices = []
         self._circle_center = None
         self._line_point1 = None
-        self._editing_row = -1
-        self._edit_btn.setText("Edit")
-        self._edit_btn.setStyleSheet("""
-            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#00CCCC; }
-            QPushButton:disabled { background-color:#005555; color:#666666; }
-        """)
         self._clear_preview()
         self._barrier_list.clearSelection()
         self._barrier_list.setCurrentRow(-1)
@@ -849,43 +946,24 @@ class BarrierDrawerPanel(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._editing_row == row:
-            self._editing_row = -1
-        elif self._editing_row > row:
-            self._editing_row -= 1
         self._remove_barrier_patches(barrier.name)
         self._barriers.pop(row)
+        self._has_unsaved_changes = True
         self._refresh_barrier_list()
         self._canvas.draw_idle()
         self._status_lbl.setText(f"Deleted '{barrier.name}'")
         self._status_lbl.setStyleSheet("color: #FF4444; font: 10px Arial;")
 
-    def _edit_selected(self) -> None:
-        row = self._barrier_list.currentRow()
-        if row < 0 or row >= len(self._barriers):
-            return
-
-        if self._editing_row == row:
-            # "Done" pressed: apply control values in-place
-            self._apply_controls_to_barrier(row)
-        else:
-            # First press: load barrier values into controls, enter edit mode
-            self._editing_row = row
-            self._load_barrier_into_controls(self._barriers[row])
-            self._edit_btn.setText("Done")
-            self._edit_btn.setStyleSheet("""
-                QPushButton { background-color:#39FF14; color:black; font:bold 11px Arial;
-                              padding:4px 12px; border-radius:4px; }
-                QPushButton:hover { background-color:#2BCC10; }
-                QPushButton:disabled { background-color:#005555; color:#666666; }
-            """)
-            self._update_button_states('editing')
-            name = self._barriers[row].name
-            self._status_lbl.setText(
-                f"Loaded '{name}' \u2014 modify fields then press Done to apply")
-            self._status_lbl.setStyleSheet("color: #00FFFF; font: 10px Arial;")
 
     def _load_barrier_into_controls(self, barrier: BarrierData) -> None:
+        _edit_widgets = (
+            self._type_combo, self._trigger_combo, self._when_combo,
+            self._color_combo, self._alpha_spin,
+            self._name_edit, self._callback_edit,
+        )
+        for w in _edit_widgets:
+            w.blockSignals(True)
+
         type_map = {BarrierType.POLYGON: "Polygon",
                     BarrierType.CIRCLE:  "Circle",
                     BarrierType.LINE:    "Line"}
@@ -906,25 +984,26 @@ class BarrierDrawerPanel(QWidget):
         self._name_edit.setText(barrier.name)
         self._callback_edit.setText(barrier.callback_name)
 
-    def _apply_controls_to_barrier(self, row: int) -> None:
-        self._editing_row = -1
-        self._edit_btn.setText("Edit")
-        self._edit_btn.setStyleSheet("""
-            QPushButton { background-color:#00FFFF; color:black; font:bold 11px Arial;
-                          padding:4px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#00CCCC; }
-            QPushButton:disabled { background-color:#005555; color:#666666; }
-        """)
-        self._update_button_states('normal')
+        for w in _edit_widgets:
+            w.blockSignals(False)
+
+    def _live_update_barrier(self) -> None:
+        """Apply current control values to the selected barrier and redraw."""
+        row = self._barrier_list.currentRow()
+        if row < 0 or row >= len(self._barriers):
+            return
+
         barrier = self._barriers[row]
         old_name = barrier.name
 
         trigger_map = {"Event": TriggerMode.EVENT, "Continuous": TriggerMode.CONTINUOUS}
         when_map = {"Inside": TriggerWhen.INSIDE, "Outside": TriggerWhen.OUTSIDE}
 
-        barrier.trigger_mode  = trigger_map[self._trigger_combo.currentText()]
-        barrier.trigger_when  = when_map[self._when_combo.currentText()]
-        barrier.color         = self._color_combo.currentText()
+        t = self._trigger_combo.currentText()
+        barrier.trigger_mode  = trigger_map[t] if t in trigger_map else barrier.trigger_mode
+        w = self._when_combo.currentText()
+        barrier.trigger_when  = when_map[w] if w in when_map else barrier.trigger_when
+        barrier.color         = self._color_combo.currentText() or barrier.color
         barrier.alpha         = self._alpha_spin.value()
         barrier.callback_name = self._callback_edit.text().strip() or "on_barrier"
 
@@ -934,13 +1013,21 @@ class BarrierDrawerPanel(QWidget):
             self._barrier_patches[new_name] = patches
         barrier.name = new_name
 
-        # Redraw with updated colour/alpha
+        # Update list item text directly to avoid clearing the selection
+        item = self._barrier_list.item(row)
+        if item:
+            item.setText(
+                f"{barrier.name} ({barrier.barrier_type.value},"
+                f" {barrier.trigger_mode.value})")
+
         self._remove_barrier_patches(barrier.name)
         self._draw_barrier(barrier)
-        self._refresh_barrier_list()
         self._canvas.draw_idle()
-        self._status_lbl.setText(f"Updated '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: 10px Arial;")
+
+        if not self._has_unsaved_changes:
+            self._has_unsaved_changes = True
+            self._update_unsaved_state()
+
 
     # ------------------------------------------------------------------
     # Save / Load / Clear
@@ -953,6 +1040,8 @@ class BarrierDrawerPanel(QWidget):
     def _save_barriers(self) -> None:
         path = self._get_barriers_path()
         save_barriers(path, self._barriers)
+        self._has_unsaved_changes = False
+        self._update_unsaved_state()
         self._status_lbl.setText(f"Saved {len(self._barriers)} barriers")
         self._status_lbl.setStyleSheet("color: #FFD700; font: 10px Arial;")
 
@@ -961,6 +1050,8 @@ class BarrierDrawerPanel(QWidget):
         self._barriers = load_barriers(path)
         self._redraw_all_barriers()
         self._refresh_barrier_list()
+        self._has_unsaved_changes = False
+        self._update_unsaved_state()
 
     def _clear_all(self) -> None:
         if not self._barriers:
