@@ -4,6 +4,7 @@ Contains NetworkThread (QThread) for continuous position calculation and
 PositionPanel (QWidget) for display.  All positioning logic lives here.
 """
 
+import math
 import os
 import time
 import numpy as np
@@ -11,6 +12,7 @@ from collections import deque
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QFrame,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
@@ -19,11 +21,13 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Circle, Polygon as MplPolygon
+from matplotlib.transforms import Affine2D
+import matplotlib.image as mpl_image
 
 from ultragps_client import UltraGPSClient
 from ultragps_position import UltraGPSPositionLib
 from SettingsModule import SettingsModule
-from ultragps_barrier import BarrierManager, BarrierEvent
+from ultragps_barrier import BarrierManager, BarrierEvent, EventType, load_images
 from joy_tractor import Vehicle
 
 
@@ -176,6 +180,7 @@ class PositionPanel(QWidget):
         self._barrier_manager.load_barriers()
         self._barrier_patches: dict[str, list] = {}
         self._barrier_reset_timers: dict[str, QTimer] = {}
+        self._image_artists: list = []
 
         self.grid_padding = 20
         self.position_history    = deque(maxlen=50)
@@ -269,6 +274,7 @@ class PositionPanel(QWidget):
             self.sane_leds.append(ax_d[3])
 
         self._draw_compass_rose()
+        self.ax.set_autoscale_on(False)
 
         # Receivers
         self.ax.scatter(rx, ry, c='#FF00FF', s=100, zorder=5, label='Receivers')
@@ -555,6 +561,79 @@ class PositionPanel(QWidget):
         return filtered
 
     # ------------------------------------------------------------------
+    # Image overlay rendering
+    # ------------------------------------------------------------------
+
+    def _get_resources_dir(self) -> str:
+        config_dir = os.path.dirname(self._settings._config_path)
+        return os.path.join(config_dir, 'resources')
+
+    def _draw_images(self) -> None:
+        """Load and render image overlays from barriers.toml onto the arena."""
+        # Remove any previously drawn image artists
+        for im in self._image_artists:
+            try:
+                im.remove()
+            except Exception:
+                pass
+        self._image_artists.clear()
+
+        config_dir = os.path.dirname(self._settings._config_path)
+        barriers_path = os.path.join(config_dir, 'barriers.toml')
+        images = load_images(barriers_path)
+
+        if not images:
+            return
+
+        resources_dir = self._get_resources_dir()
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        corrupted = []
+
+        for overlay in images:
+            filepath = os.path.join(resources_dir, overlay.filename)
+            try:
+                img_data = mpl_image.imread(filepath)
+            except Exception:
+                corrupted.append(overlay.filename)
+                continue
+
+            try:
+                half_w = overlay.width_cm / 2.0
+                half_h = overlay.height_cm / 2.0
+                cx, cy = overlay.center_x, overlay.center_y
+                extent = [cx - half_w, cx + half_w, cy - half_h, cy + half_h]
+
+                im = self.ax.imshow(
+                    img_data,
+                    extent=extent,
+                    origin='upper',
+                    zorder=2,
+                    interpolation='bilinear',
+                )
+                tr = (
+                    Affine2D()
+                    .rotate_around(cx, cy, math.radians(overlay.rotation_deg))
+                    + self.ax.transData
+                )
+                im.set_transform(tr)
+                self._image_artists.append(im)
+
+                # Restore arena limits — imshow must never resize the arena
+                self.ax.set_xlim(xlim)
+                self.ax.set_ylim(ylim)
+
+            except Exception:
+                corrupted.append(overlay.filename)
+
+        if corrupted:
+            QMessageBox.warning(
+                self,
+                "Image Error",
+                "Image data files are corrupted.",
+            )
+
+    # ------------------------------------------------------------------
     # Barrier rendering & event handling
     # ------------------------------------------------------------------
 
@@ -655,24 +734,24 @@ class PositionPanel(QWidget):
         return self._barrier_reset_timers[barrier_name]
 
     def _handle_barrier_event(self, event: BarrierEvent) -> None:
-        if event.event_type == 'enter':
+        if event.event_type == EventType.ENTER:
             self._highlight_barrier(event.barrier_name)
             self._barrier_status_label.setText(
                 f"\u26a0 BARRIER: {event.barrier_name} (enter)")
             self._barrier_status_label.setStyleSheet(
                 "color: #FF4444; font: bold 11px Arial;")
 
-        elif event.event_type in ('inside', 'outside'):
+        elif event.event_type in (EventType.INSIDE, EventType.OUTSIDE):
             self._highlight_barrier(event.barrier_name)
             self._barrier_status_label.setText(
-                f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type})")
+                f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type.value})")
             self._barrier_status_label.setStyleSheet(
                 "color: #FF4444; font: bold 11px Arial;")
             timer = self._get_reset_timer(event.barrier_name)
             timer.stop()
             timer.start()
 
-        elif event.event_type == 'exit':
+        elif event.event_type == EventType.EXIT:
             self._reset_barrier_visual(event.barrier_name)
 
     # ------------------------------------------------------------------
@@ -754,6 +833,7 @@ class PositionPanel(QWidget):
         self.update_arena(self._settings.get_tower_coordinates())
         self._barrier_manager.reload_barriers()
         self._draw_barriers()
+        self._draw_images()
         if not self._net_thread.isRunning():
             self._net_thread.start()
         self._refresh_timer.start()

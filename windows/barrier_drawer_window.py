@@ -14,7 +14,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QComboBox, QDoubleSpinBox, QMessageBox,
-    QFrame, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QFrame, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QRadioButton,
+    QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QFont, QColor
@@ -352,6 +353,39 @@ class BarrierDrawerPanel(QWidget):
         self._ruler_btn.clicked.connect(self._toggle_ruler)
         tools_layout.addWidget(self._ruler_btn)
 
+        # --- Settings sub-section (inside Tools sidebar) ---
+        tools_sep = QFrame()
+        tools_sep.setFrameShape(QFrame.Shape.HLine)
+        tools_sep.setStyleSheet("color: #333333; margin-top: 4px; margin-bottom: 2px;")
+        tools_layout.addWidget(tools_sep)
+
+        settings_title = QLabel("Settings")
+        settings_title.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        settings_title.setStyleSheet("color: #FF8800;")
+        settings_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tools_layout.addWidget(settings_title)
+
+        _rb_ss = ("QRadioButton { color: #CCCCCC; font: 11px Arial; spacing: 6px; }"
+                  " QRadioButton::indicator { width: 13px; height: 13px; }"
+                  " QRadioButton::indicator:checked { background-color: #FF8800;"
+                  "   border: 2px solid #FF8800; border-radius: 7px; }"
+                  " QRadioButton::indicator:unchecked { background-color: #222222;"
+                  "   border: 2px solid #666666; border-radius: 7px; }")
+
+        self._show_all_names_rb = QRadioButton("Show all names")
+        self._show_all_names_rb.setStyleSheet(_rb_ss)
+        self._show_all_names_rb.setChecked(True)
+        self._show_all_names_rb.setAutoExclusive(False)
+        self._show_all_names_rb.clicked.connect(self._on_show_all_names_clicked)
+        tools_layout.addWidget(self._show_all_names_rb)
+
+        self._no_names_rb = QRadioButton("No barrier names")
+        self._no_names_rb.setStyleSheet(_rb_ss)
+        self._no_names_rb.setChecked(False)
+        self._no_names_rb.setAutoExclusive(False)
+        self._no_names_rb.clicked.connect(self._on_no_names_clicked)
+        tools_layout.addWidget(self._no_names_rb)
+
         tools_layout.addStretch()
         root.addWidget(tools_widget)
 
@@ -397,6 +431,7 @@ class BarrierDrawerPanel(QWidget):
         row1.setStyleSheet("background-color: black;")
         r1 = QHBoxLayout(row1)
         r1.setContentsMargins(10, 5, 10, 5)
+        r1.setSpacing(4)
 
         _combo_ss = ("QComboBox { background:#222222; color:white; font:11px Arial;"
                      " padding:2px 6px; }"
@@ -408,25 +443,29 @@ class BarrierDrawerPanel(QWidget):
                      " padding:2px 6px; }"
                      " QLineEdit:disabled { background:#1a1a1a; color:#555555; }")
 
-        r1.addWidget(self._styled_label("Type:"))
+        r1.addStretch(1)
+
         self._type_combo = QComboBox()
         self._type_combo.addItems(["Polygon", "Circle", "Line"])
         self._type_combo.setStyleSheet(_combo_ss)
+        r1.addWidget(self._styled_label("Type:"))
         r1.addWidget(self._type_combo)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("Trigger:"))
         self._trigger_combo = QComboBox()
         self._trigger_combo.addItems(["Event", "Continuous"])
         self._trigger_combo.setStyleSheet(_combo_ss)
+        r1.addWidget(self._styled_label("Trigger:"))
         r1.addWidget(self._trigger_combo)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("When:"))
         self._when_combo = QComboBox()
         self._when_combo.addItems(["Inside", "Outside"])
         self._when_combo.setStyleSheet(_combo_ss)
+        r1.addWidget(self._styled_label("When:"))
         r1.addWidget(self._when_combo)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("Color:"))
         self._color_combo = QComboBox()
         for _name, _hex in [
             ("Red",     "#FF0000"),
@@ -439,27 +478,33 @@ class BarrierDrawerPanel(QWidget):
         ]:
             self._color_combo.addItem(_name, _hex)
         self._color_combo.setStyleSheet(_combo_ss)
+        r1.addWidget(self._styled_label("Color:"))
         r1.addWidget(self._color_combo)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("Alpha:"))
         self._alpha_spin = QDoubleSpinBox()
         self._alpha_spin.setRange(0.0, 1.0)
         self._alpha_spin.setSingleStep(0.1)
         self._alpha_spin.setValue(0.3)
         self._alpha_spin.setStyleSheet(_spin_ss)
+        r1.addWidget(self._styled_label("Alpha:"))
         r1.addWidget(self._alpha_spin)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("Name:"))
         self._name_edit = QLineEdit()
         self._name_edit.setStyleSheet(_edit_ss)
         self._name_edit.setFixedWidth(120)
+        r1.addWidget(self._styled_label("Name:"))
         r1.addWidget(self._name_edit)
+        r1.addSpacing(10)
 
-        r1.addWidget(self._styled_label("Callback:"))
         self._callback_edit = QLineEdit()
         self._callback_edit.setStyleSheet(_edit_ss)
         self._callback_edit.setFixedWidth(120)
+        r1.addWidget(self._styled_label("Callback:"))
         r1.addWidget(self._callback_edit)
+
+        r1.addStretch(1)
 
         # Controls that are editable when a barrier is selected (Type is always read-only)
         self._edit_controls = [
@@ -477,6 +522,7 @@ class BarrierDrawerPanel(QWidget):
         row2.setStyleSheet("background-color: black;")
         r2 = QHBoxLayout(row2)
         r2.setContentsMargins(10, 5, 10, 5)
+        r2.addStretch(1)
 
         self._draw_btn = QPushButton("New Barrier")
         self._draw_btn.setStyleSheet("""
@@ -552,8 +598,9 @@ class BarrierDrawerPanel(QWidget):
         self._del_btn.clicked.connect(self._delete_selected)
         r2.addWidget(self._del_btn)
 
-        r2.addStretch()
+        r2.addStretch(1)
         left_col.addWidget(row2)
+
         root.addLayout(left_col, stretch=1)
 
         # --- Right column: Barrier list ---
@@ -717,6 +764,8 @@ class BarrierDrawerPanel(QWidget):
             self._blank_edit_controls()
             self._clear_handles()
         self._update_button_states('normal')
+        if self._name_display_mode() == 'selected':
+            self._update_name_visibility()
 
     def _blank_edit_controls(self) -> None:
         """Clear all edit controls to an empty/default state."""
@@ -969,6 +1018,13 @@ class BarrierDrawerPanel(QWidget):
                 self._redraw_ruler()
             return
 
+        if state['type'] == 'ruler_midpoint':
+            if len(self._ruler_endpoints) == 2:
+                (x1, y1), (x2, y2) = self._ruler_endpoints
+                self._ruler_endpoints = [(x1 + dx, y1 + dy), (x2 + dx, y2 + dy)]
+                self._redraw_ruler()
+            return
+
         if state['type'] == 'img_move':
             idx = self._selected_image_idx
             if 0 <= idx < len(self._images):
@@ -1164,6 +1220,14 @@ class BarrierDrawerPanel(QWidget):
         if ep_idx is not None:
             self._drag_state = {
                 'type': 'ruler_endpoint', 'idx': ep_idx,
+                'last_x': x, 'last_y': y,
+            }
+            return
+
+        # ---- ruler midpoint drag (translate entire ruler) -------------------
+        if self._hit_test_ruler_midpoint(event):
+            self._drag_state = {
+                'type': 'ruler_midpoint',
                 'last_x': x, 'last_y': y,
             }
             return
@@ -1455,6 +1519,14 @@ class BarrierDrawerPanel(QWidget):
             color = '#FFFFFF'
         alpha = barrier.alpha
 
+        mode = self._name_display_mode()
+        row = self._barrier_list.currentRow()
+        selected_name = (self._barriers[row].name
+                         if 0 <= row < len(self._barriers) else None)
+
+        def _lbl_visible() -> bool:
+            return mode == 'all' or (mode == 'selected' and barrier.name == selected_name)
+
         if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
             verts = [(v[0], v[1]) for v in barrier.vertices]
             patch = MplPolygon(verts, closed=True, facecolor=color,
@@ -1467,6 +1539,7 @@ class BarrierDrawerPanel(QWidget):
                                fontweight='bold', ha='center', va='center', zorder=9,
                                bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
                                          alpha=0.7, edgecolor=color))
+            lbl.set_visible(_lbl_visible())
             artists.append(lbl)
 
         elif barrier.barrier_type == BarrierType.CIRCLE and barrier.center:
@@ -1479,6 +1552,7 @@ class BarrierDrawerPanel(QWidget):
                                ha='center', va='center', zorder=9,
                                bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
                                          alpha=0.7, edgecolor=color))
+            lbl.set_visible(_lbl_visible())
             artists.append(lbl)
 
         elif barrier.barrier_type == BarrierType.LINE and barrier.point1 and barrier.point2:
@@ -1494,6 +1568,7 @@ class BarrierDrawerPanel(QWidget):
                                fontweight='bold', ha='center', va='center', zorder=9,
                                bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
                                          alpha=0.7, edgecolor=color))
+            lbl.set_visible(_lbl_visible())
             artists.append(lbl)
 
         self._barrier_patches[barrier.name] = artists
@@ -2098,6 +2173,41 @@ class BarrierDrawerPanel(QWidget):
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
+    # Name display settings
+    # ------------------------------------------------------------------
+
+    def _name_display_mode(self) -> str:
+        """Return 'all', 'selected', or 'none' based on the radio button states."""
+        if self._no_names_rb.isChecked():
+            return 'none'
+        if self._show_all_names_rb.isChecked():
+            return 'all'
+        return 'selected'
+
+    def _update_name_visibility(self) -> None:
+        """Apply current name-display mode to all drawn barrier label artists."""
+        mode = self._name_display_mode()
+        row = self._barrier_list.currentRow()
+        selected_name = (self._barriers[row].name
+                         if 0 <= row < len(self._barriers) else None)
+        for name, artists in self._barrier_patches.items():
+            if len(artists) >= 2:
+                artists[1].set_visible(
+                    mode == 'all' or (mode == 'selected' and name == selected_name)
+                )
+        self._canvas.draw_idle()
+
+    def _on_show_all_names_clicked(self) -> None:
+        if self._show_all_names_rb.isChecked():
+            self._no_names_rb.setChecked(False)
+        self._update_name_visibility()
+
+    def _on_no_names_clicked(self) -> None:
+        if self._no_names_rb.isChecked():
+            self._show_all_names_rb.setChecked(False)
+        self._update_name_visibility()
+
+    # ------------------------------------------------------------------
     # Ruler tool
     # ------------------------------------------------------------------
 
@@ -2153,31 +2263,33 @@ class BarrierDrawerPanel(QWidget):
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         ann = self.ax.annotate(
             f"{dist:.1f} cm",
-            xy=(mx, my), xytext=(mx, my),
-            ha='center', va='center',
+            xy=(mx, my), xytext=(0, 12),
+            textcoords='offset points',
+            ha='center', va='bottom',
             fontsize=10, fontweight='bold', color='black',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
                       alpha=0.9, edgecolor='#888888'),
             zorder=32,
         )
-        self._ruler_artists = [line, dot1, dot2, ann]
+        dot_mid, = self.ax.plot(mx, my, 's', color='#DDDDDD', markersize=7, zorder=31)
+        self._ruler_artists = [line, dot1, dot2, ann, dot_mid]
         self._canvas.draw_idle()
         self._tools_status_lbl.setText(f"Distance:\n{dist:.1f} cm")
         self._tools_status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
 
     def _redraw_ruler(self) -> None:
-        """Update ruler artists in-place after an endpoint is dragged."""
-        if len(self._ruler_artists) < 4 or len(self._ruler_endpoints) < 2:
+        """Update ruler artists in-place after an endpoint or midpoint is dragged."""
+        if len(self._ruler_artists) < 5 or len(self._ruler_endpoints) < 2:
             return
         (x1, y1), (x2, y2) = self._ruler_endpoints
         dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
 
-        line, dot1, dot2, ann = self._ruler_artists
+        line, dot1, dot2, ann, dot_mid = self._ruler_artists
         line.set_xdata([x1, x2]); line.set_ydata([y1, y2])
         dot1.set_xdata([x1]);     dot1.set_ydata([y1])
         dot2.set_xdata([x2]);     dot2.set_ydata([y2])
-        ann.set_position((mx, my))
+        dot_mid.set_xdata([mx]);  dot_mid.set_ydata([my])
         ann.xy = (mx, my)
         ann.set_text(f"{dist:.1f} cm")
         self._canvas.draw_idle()
@@ -2194,6 +2306,15 @@ class BarrierDrawerPanel(QWidget):
             if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
                 return idx
         return None
+
+    def _hit_test_ruler_midpoint(self, event) -> bool:
+        """Return True if the cursor is within 12 px of the ruler midpoint dot."""
+        if len(self._ruler_artists) < 5 or event.x is None or event.y is None:
+            return False
+        dot_mid = self._ruler_artists[4]
+        mx, my = dot_mid.get_xdata()[0], dot_mid.get_ydata()[0]
+        disp = self.ax.transData.transform((mx, my))
+        return math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12
 
     def _on_canvas_key(self, event) -> None:
         """Handle Escape: cancel a pending ruler first-point."""

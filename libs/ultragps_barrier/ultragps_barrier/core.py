@@ -71,6 +71,24 @@ class TriggerWhen(Enum):
     OUTSIDE = "outside"
 
 
+class EventType(Enum):
+    """The type of event emitted by a barrier.
+
+    ``ENTER``   — fired once when the tracked point transitions *into* the
+                  active condition (EVENT mode only).
+    ``EXIT``    — fired once when the tracked point transitions *out of* the
+                  active condition (EVENT mode only).
+    ``INSIDE``  — fired every update while the point is inside the barrier
+                  (CONTINUOUS + TriggerWhen.INSIDE).
+    ``OUTSIDE`` — fired every update while the point is outside the barrier
+                  (CONTINUOUS + TriggerWhen.OUTSIDE).
+    """
+    ENTER   = "enter"
+    EXIT    = "exit"
+    INSIDE  = "inside"
+    OUTSIDE = "outside"
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -310,13 +328,13 @@ class BarrierEvent:
     Args:
         barrier_name:  Name of the barrier that triggered.
         callback_name: Callback name registered on the barrier (e.g. "on_barrier").
-        event_type:    One of "enter", "exit", "inside", "outside".
+        event_type:    One of :class:`EventType`.
         position:      (x, y) position that triggered the event.
         source:        Position source — "lm" or "cep".
     """
     barrier_name: str
     callback_name: str
-    event_type: str
+    event_type: EventType
     position: tuple
     source: str
 
@@ -422,7 +440,7 @@ class BarrierManager:
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
                         callback_name=barrier.callback_name,
-                        event_type="enter",
+                        event_type=EventType.ENTER,
                         position=point,
                         source=source,
                     ))
@@ -430,17 +448,19 @@ class BarrierManager:
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
                         callback_name=barrier.callback_name,
-                        event_type="exit",
+                        event_type=EventType.EXIT,
                         position=point,
                         source=source,
                     ))
             else:
                 if condition_met:
-                    event_type = "inside" if barrier.trigger_when == TriggerWhen.INSIDE else "outside"
+                    et = (EventType.INSIDE
+                          if barrier.trigger_when == TriggerWhen.INSIDE
+                          else EventType.OUTSIDE)
                     events.append(BarrierEvent(
                         barrier_name=barrier.name,
                         callback_name=barrier.callback_name,
-                        event_type=event_type,
+                        event_type=et,
                         position=point,
                         source=source,
                     ))
