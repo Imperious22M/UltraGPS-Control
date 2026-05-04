@@ -2,9 +2,9 @@ import os
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget,
+    QStackedWidget, QFrame,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from ultragps_client import UltraGPSClient
@@ -16,11 +16,13 @@ from ultragps_calibration import UltraGPSCalibration
 class UltraGPSMainWindow(QMainWindow):
     """Top-level application window.  Owns shared resources and manages panel navigation."""
 
-    def __init__(self, ip_address: str = "127.0.0.1", config_path: str = None):
+    def __init__(self, ip_address: str = "127.0.0.1", config_path: str = None,
+                 server=None):
         super().__init__()
         self.setWindowTitle("UltraGPS Control")
         self.setMinimumSize(1200, 900)
         self.setStyleSheet("background-color: black;")
+        self.server = server
 
         # Shared resources
         self.client = UltraGPSClient(host=ip_address)
@@ -49,12 +51,13 @@ class UltraGPSMainWindow(QMainWindow):
         from windows.barrier_drawer_window import BarrierDrawerPanel
 
         panels = [
-            ('main',           MainMenuPanel(main_window=self)),
+            ('main',           MainMenuPanel(main_window=self, server=self.server)),
             ('position',       PositionPanel(
                                    client=self.client,
                                    position_lib=self.position_lib,
                                    settings_module=self.settings_module,
-                                   main_window=self)),
+                                   main_window=self,
+                                   server=self.server)),
             ('calibration',    CalibrationPanel(
                                    cal=self.cal,
                                    settings_module=self.settings_module,
@@ -96,12 +99,79 @@ class UltraGPSMainWindow(QMainWindow):
         event.accept()
 
 
+class ServerStatusWidget(QFrame):
+    """A compact status panel that shows UltraGPSServer state."""
+
+    def __init__(self, server=None):
+        super().__init__()
+        self._server = server
+        self.setStyleSheet(
+            "background-color: #111111; border: 1px solid #333333; "
+            "border-radius: 4px; padding: 4px;"
+        )
+        self.setMaximumHeight(90)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+
+        title_lbl = QLabel("Server Status")
+        title_lbl.setStyleSheet("color: #FF8800; font: bold 11px Arial;")
+        layout.addWidget(title_lbl)
+
+        self._ip_label = QLabel("")
+        self._ip_label.setStyleSheet("color: #AAAAAA; font: 10px Arial;")
+        layout.addWidget(self._ip_label)
+
+        self._ports_label = QLabel("")
+        self._ports_label.setStyleSheet("color: #AAAAAA; font: 10px Arial;")
+        layout.addWidget(self._ports_label)
+
+        self._clients_label = QLabel("")
+        self._clients_label.setStyleSheet("color: #AAAAAA; font: 10px Arial;")
+        layout.addWidget(self._clients_label)
+
+        self._refresh()
+
+        if self._server is not None:
+            self._timer = QTimer(self)
+            self._timer.setInterval(1500)
+            self._timer.timeout.connect(self._refresh)
+            self._timer.start()
+
+    def _refresh(self) -> None:
+        if self._server is None:
+            for lbl in (self._ip_label, self._ports_label, self._clients_label):
+                lbl.setText("Server not running")
+            return
+
+        status = self._server.get_status()
+
+        streaming = status['streaming']
+        ip_text = f"IP: {status['ip']}  |  Streaming: {'ON' if streaming else 'OFF'}"
+        self._ip_label.setText(ip_text)
+        color = "#39FF14" if streaming else "#AAAAAA"
+        self._ip_label.setStyleSheet(f"color: {color}; font: 10px Arial;")
+
+        ports_parts = [
+            f"{p['proto']} {p['name']}:{p['port']} ({p['clients']} clients)"
+            for p in status['ports']
+        ]
+        self._ports_label.setText("  |  ".join(ports_parts))
+        self._ports_label.setStyleSheet("color: #AAAAAA; font: 10px Arial;")
+
+        self._clients_label.setText(f"Total connected: {status['total_clients']}")
+        self._clients_label.setStyleSheet("color: #AAAAAA; font: 10px Arial;")
+
+
 class MainMenuPanel(QWidget):
     """Main menu with navigation buttons."""
 
-    def __init__(self, main_window: UltraGPSMainWindow):
+    def __init__(self, main_window: UltraGPSMainWindow, server=None):
         super().__init__()
         self._main_window = main_window
+        self._server = server
         self.setStyleSheet("background-color: black;")
         self._build()
 
@@ -115,7 +185,11 @@ class MainMenuPanel(QWidget):
         title.setStyleSheet("color: #39FF14;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
-        layout.addSpacing(40)
+        layout.addSpacing(10)
+
+        status_widget = ServerStatusWidget(self._main_window.server)
+        layout.addWidget(status_widget, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(20)
 
         buttons = [
             ("Position",    'position',       '#39FF14', 'black',  '#2BCC10'),

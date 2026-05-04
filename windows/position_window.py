@@ -29,6 +29,12 @@ from ultragps_position import UltraGPSPositionLib
 from SettingsModule import SettingsModule
 from ultragps_barrier import BarrierManager, BarrierEvent, EventType, load_images
 from joy_tractor import Vehicle
+from ultragps_server import send_position, send_nmea, send_barrier_event
+
+_SRV_POS       = "pos"
+_SRV_NMEA      = "nmea"
+_SRV_BARR_TCP  = "barrier_tcp"
+_SRV_BARR      = "barrier"
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +62,13 @@ class NetworkThread(QThread):
         client: UltraGPSClient,
         position_lib: UltraGPSPositionLib,
         barrier_manager: BarrierManager,
+        server=None,
     ):
         super().__init__()
         self._client = client
         self._position_lib = position_lib
         self._barrier_manager = barrier_manager
+        self._server = server
         self._active = False
         self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
 
@@ -110,14 +118,25 @@ class NetworkThread(QThread):
                 if lm_pos is not None:
                     lx, ly = float(lm_pos[0]), float(lm_pos[1])
                     self.lm_updated.emit(lx, ly)
-                    for event in self._barrier_manager.check_position(lx, ly, 'lm'):
-                        self.barrier_triggered.emit(event)
+                    lm_events = self._barrier_manager.check_position(lx, ly, 'lm')
+                    for ev in lm_events:
+                        self.barrier_triggered.emit(ev)
+                    if self._server is not None and self._server.streaming:
+                        send_position(self._server, _SRV_POS, lx, ly, source='lm')
+                        send_nmea(self._server, _SRV_NMEA, num_satellites=len(sane_indices))
+                        for ev in lm_events:
+                            send_barrier_event(self._server, _SRV_BARR_TCP, _SRV_BARR, ev)
 
                 if cep_pos is not None:
                     cx, cy = float(cep_pos[0]), float(cep_pos[1])
                     self.cep_updated.emit(cx, cy)
-                    for event in self._barrier_manager.check_position(cx, cy, 'cep'):
-                        self.barrier_triggered.emit(event)
+                    cep_events = self._barrier_manager.check_position(cx, cy, 'cep')
+                    for ev in cep_events:
+                        self.barrier_triggered.emit(ev)
+                    if self._server is not None and self._server.streaming:
+                        send_position(self._server, _SRV_POS, cx, cy, source='cep')
+                        for ev in cep_events:
+                            send_barrier_event(self._server, _SRV_BARR_TCP, _SRV_BARR, ev)
 
                 if raw_distances is not None:
                     self.distances_updated.emit(list(raw_distances))
@@ -166,12 +185,14 @@ class PositionPanel(QWidget):
         position_lib: UltraGPSPositionLib,
         settings_module: SettingsModule,
         main_window,
+        server=None,
     ):
         super().__init__()
         self._client = client
         self._position_lib = position_lib
         self._settings = settings_module
         self._main_window = main_window
+        self._server = server
         self.setStyleSheet("background-color: black;")
 
         config_dir = os.path.dirname(self._settings._config_path)
@@ -205,7 +226,8 @@ class PositionPanel(QWidget):
 
         # NetworkThread
         self._net_thread = NetworkThread(
-            self._client, self._position_lib, self._barrier_manager)
+            self._client, self._position_lib, self._barrier_manager,
+            server=self._server)
         self._net_thread.lm_updated.connect(self._on_lm_updated)
         self._net_thread.cep_updated.connect(self._on_cep_updated)
         self._net_thread.distances_updated.connect(self._on_distances_updated)

@@ -1,3 +1,4 @@
+import atexit
 import sys
 import os
 import argparse
@@ -7,6 +8,13 @@ matplotlib.use('QtAgg')
 
 from PyQt6.QtWidgets import QApplication
 from windows.main_window import UltraGPSMainWindow
+from ultragps_server import UltraGPSServer
+
+SERVER_CMD_TCP     = "cmd"
+SERVER_POS_UDP     = "pos"
+SERVER_NMEA_UDP    = "nmea"
+SERVER_BARRIER_TCP = "barrier_tcp"
+SERVER_BARRIER_UDP = "barrier"
 
 
 def main():
@@ -18,7 +26,15 @@ def main():
 
     app = QApplication(sys.argv)
 
-    window = UltraGPSMainWindow(ip_address=args.ip, config_path=args.config)
+    server = UltraGPSServer()
+    server.start_tcp_port(8000, name=SERVER_CMD_TCP)
+    server.start_tcp_port(8004, name=SERVER_BARRIER_TCP)
+    server.start_udp_port(8001, name=SERVER_POS_UDP)
+    server.start_udp_port(8002, name=SERVER_NMEA_UDP)
+    server.start_udp_port(8003, name=SERVER_BARRIER_UDP)
+    atexit.register(server.stop_all)
+
+    window = UltraGPSMainWindow(ip_address=args.ip, config_path=args.config, server=server)
     window.show()
 
     sys.exit(app.exec())

@@ -78,6 +78,7 @@ pip install numpy scipy matplotlib filterpy
 # Install local libraries
 echo "Installing local libraries..."
 pip install -e libs/ultragps_position
+pip install -e libs/ultragps_server
 
 echo
 echo "=== Installation Complete ==="
