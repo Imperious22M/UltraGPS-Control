@@ -107,14 +107,13 @@ class ServerStatusWidget(QFrame):
         self._server = server
         self.setStyleSheet(
             "background-color: #111111; border: 1px solid #333333; "
-            "border-radius: 4px; padding: 4px;"
+            "border-radius: 4px;"
         )
-        self.setMaximumHeight(90)
         self.setMinimumWidth(400)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
 
         title_lbl = QLabel("Server Status")
         title_lbl.setStyleSheet("color: #FF8800; font: bold 11px Arial;")
