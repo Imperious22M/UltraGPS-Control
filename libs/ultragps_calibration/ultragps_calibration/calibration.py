@@ -326,6 +326,8 @@ class UltraGPSCalibration:
         min_reads: int,
         on_reading: Optional[Callable[[int, int], None]] = None,
         on_complete: Optional[Callable[[int], None]] = None,
+        on_error: Optional[Callable[[int, str], None]] = None,
+        max_consecutive_failures: int = 10,
     ) -> None:
         """Start a calibration data-collection run in a background thread.
 
@@ -373,7 +375,7 @@ class UltraGPSCalibration:
 
         self._cal_thread = threading.Thread(
             target=self._collection_loop,
-            args=(run_num, min_reads, on_reading, on_complete),
+            args=(run_num, min_reads, on_reading, on_complete, on_error, max_consecutive_failures),
             daemon=True,
             name=f"ultragps_cal_run_{run_num}",
         )
@@ -590,6 +592,8 @@ class UltraGPSCalibration:
         min_reads: int,
         on_reading: Optional[Callable[[int, int], None]],
         on_complete: Optional[Callable[[int], None]],
+        on_error: Optional[Callable[[int, str], None]],
+        max_consecutive_failures: int,
     ) -> None:
         """Background thread: collect pulse readings until the threshold is met.
 
@@ -604,6 +608,7 @@ class UltraGPSCalibration:
             print(f"[calibration] Warning: flush pulse failed: {exc}")
 
         read_count = 0
+        consecutive_failures = 0
         completed_naturally = False
 
         while True:
@@ -616,12 +621,34 @@ class UltraGPSCalibration:
                 ticks = self._client.pulse()
             except Exception as exc:
                 print(f"[calibration] Error during pulse: {exc}")
+                if on_error is not None:
+                    try:
+                        on_error(run_num, str(exc))
+                    except Exception:
+                        pass
                 break
 
             if ticks is not None and len(ticks) == self.RECEIVER_COUNT:
+                consecutive_failures = 0
                 for recv_id in range(self.RECEIVER_COUNT):
                     self.add_reading(recv_id, float(ticks[recv_id]), run_num)
                 read_count += 1
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(
+                        f"[calibration] Run {run_num}: {max_consecutive_failures} "
+                        "consecutive failures — aborting"
+                    )
+                    if on_error is not None:
+                        try:
+                            on_error(
+                                run_num,
+                                f"Server not responding ({max_consecutive_failures} consecutive timeouts)",
+                            )
+                        except Exception:
+                            pass
+                    break
 
             # Periodic reading callback
             if read_count > 0 and read_count % self.HISTOGRAM_UPDATE_INTERVAL == 0:

@@ -103,7 +103,7 @@ class UltraGPSPositionLib:
                           noisy.  Default: 30.
     """
 
-    def __init__(self, config_path: str, max_differential: float = 30.0):
+    def __init__(self, config_path: str, max_differential: float = 50.0):
         self._config_path: str = os.path.abspath(config_path)
         self.max_differential: float = max_differential
 
@@ -372,9 +372,7 @@ class UltraGPSPositionLib:
             lm_success = result is not None and result.success
             if lm_success:
                 self._lm_last_good_pos = position.copy()
-                lm_pos = position
-            else:
-                lm_pos = position  # still use even if not converged
+            lm_pos = position  # still use even if not converged
 
         # ── CEP subset selection ──────────────────────────────────────────────
         cep_pos     = self._cep_last_good_pos

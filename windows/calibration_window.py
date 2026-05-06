@@ -30,8 +30,9 @@ class CalibrationPanel(QWidget):
     # The calibration library calls on_reading/on_complete from a background
     # threading.Thread; emitting a pyqtSignal from any thread is safe and
     # automatically queued to the receiver's thread (the GUI thread here).
-    _sig_histogram_update = pyqtSignal(int)       # run_num
-    _sig_run_complete     = pyqtSignal(int, int)  # run_num, min_reads
+    _sig_histogram_update = pyqtSignal(int)        # run_num
+    _sig_run_complete     = pyqtSignal(int, int)   # run_num, min_reads
+    _sig_run_failed       = pyqtSignal(int, str)   # run_num, error_message
 
     def __init__(
         self,
@@ -69,6 +70,7 @@ class CalibrationPanel(QWidget):
         # Wire cross-thread signals to GUI slots
         self._sig_histogram_update.connect(self._update_all_histograms)
         self._sig_run_complete.connect(self._on_run_complete)
+        self._sig_run_failed.connect(self._on_run_failed)
 
     # ------------------------------------------------------------------
     # Figure
@@ -191,6 +193,11 @@ class CalibrationPanel(QWidget):
         """)
         start_btn.clicked.connect(self._start_calibration)
         top_layout.addWidget(start_btn)
+
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("color: #FFFF00; font: bold 11px Arial;")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top_layout.addWidget(self._status_label)
 
         top_layout.addStretch()
 
@@ -390,15 +397,24 @@ class CalibrationPanel(QWidget):
             self.hide_calibration_point()
             return
 
-        self._cal.clear_run_data(1)
-        self._cal.start_run(
-            1, min_reads,
-            on_reading=lambda run, n: self._sig_histogram_update.emit(run),
-            on_complete=lambda run: self._sig_run_complete.emit(run, min_reads),
-        )
+        try:
+            self._cal.clear_run_data(1)
+            self._cal.start_run(
+                1, min_reads,
+                on_reading=lambda run, n: self._sig_histogram_update.emit(run),
+                on_complete=lambda run: self._sig_run_complete.emit(run, min_reads),
+                on_error=lambda run, msg: self._sig_run_failed.emit(run, msg),
+            )
+            self._status_label.setText("● Collecting data for Run 1...")
+            print("Calibration run 1 started")
+        except Exception as exc:
+            self._status_label.setText("")
+            self.hide_calibration_point()
+            self._on_run_failed(1, str(exc))
 
     def _on_run_complete(self, run_num: int, min_reads: int) -> None:
         if run_num == 1:
+            self._status_label.setText("")
             cal_p2 = self._settings.cal_point_2
             self.show_calibration_point(cal_p2, 2)
 
@@ -415,12 +431,43 @@ class CalibrationPanel(QWidget):
                 2, min_reads,
                 on_reading=lambda run, n: self._sig_histogram_update.emit(run),
                 on_complete=lambda run: self._sig_run_complete.emit(run, min_reads),
+                on_error=lambda run, msg: self._sig_run_failed.emit(run, msg),
             )
+            self._status_label.setText("● Collecting data for Run 2...")
         else:
+            self._status_label.setText("")
             self.hide_calibration_point()
             self._cal.calculate_and_save_offsets()
             self._update_offset_display()
             self._completion_dialog()
+
+    def _on_run_failed(self, run_num: int, error_msg: str) -> None:
+        self._status_label.setText("")
+        self.hide_calibration_point()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Calibration Failed")
+        dlg.setStyleSheet("background-color: black; color: white;")
+        dlg.setFixedSize(420, 220)
+
+        layout = QVBoxLayout(dlg)
+        msg_lbl = QLabel(
+            f"Run {run_num} failed:\n\n{error_msg}\n\n"
+            "Check that the UltraGPS server is running\n"
+            "and the hardware is connected."
+        )
+        msg_lbl.setStyleSheet("color: #FF4444; font: 12px Arial;")
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg_lbl.setWordWrap(True)
+        layout.addWidget(msg_lbl)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("""
+            QPushButton { background-color: #FF4444; color: white;
+                          font: bold 12px Arial; padding: 8px 30px; }
+        """)
+        ok_btn.clicked.connect(dlg.accept)
+        layout.addWidget(ok_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Dialogs

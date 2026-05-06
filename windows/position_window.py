@@ -91,9 +91,12 @@ class NetworkThread(QThread):
                 # Send the continouous command only if needed to switch modes
                 # This is because the pulse command will automatically change the 
                 # mode on the Arduino to continouous.
-                if current_continuous:
-                    self._client.continuous()
-                    self._client.continuous()
+                try: 
+                    if current_continuous:
+                        self._client.continuous()
+                        self._client.continuous()
+                except Exception as exc:
+                    print(f"Error sending continuous command: {exc}")
                 prev_continuous = current_continuous
 
             try:
@@ -101,13 +104,13 @@ class NetworkThread(QThread):
                     ticks = self._client.get_latest_reading()
                 else:
                     ticks = self._client.pulse()
-
-                result = self._position_lib.get_position_full(ticks)
-
-                if result is None:
+                
+                if ticks is None:
                     if current_continuous:
-                        time.sleep(0.1)
+                        time.sleep(0.01)
                     continue
+                else:
+                    result = self._position_lib.get_position_full(ticks)
 
                 raw_distances = result.get("distances")
                 sane_indices  = result.get("sane_indices", [])
