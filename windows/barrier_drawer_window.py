@@ -2024,16 +2024,22 @@ class BarrierDrawerPanel(QWidget):
     # ---- image management buttons -------------------------------------------
 
     def _import_image(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Image", "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif)")
-        if not path:
-            return
+        self._refresh_timer.stop()
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import Image", "",
+                "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif)")
+            if not path:
+                return
+            print(f"Selected image path: {path}")
 
-        dlg = _ImportImageDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+            dlg = _ImportImageDialog(self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+        finally:
+            self._refresh_timer.start()
         width_cm, height_cm = dlg.values()
+        print(f"Imported image dimensions: {width_cm}×{height_cm} cm")
 
         x_range = self.ax.get_xlim()
         y_range = self.ax.get_ylim()

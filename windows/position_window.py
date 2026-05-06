@@ -104,13 +104,21 @@ class NetworkThread(QThread):
                     ticks = self._client.get_latest_reading()
                 else:
                     ticks = self._client.pulse()
-                
+
+                # DEBUG
+                #print(f"Raw ticks: {ticks}")
+                #time.sleep(10)
+
                 if ticks is None:
                     if current_continuous:
+                        print("No ticks received in continuous mode, retrying...")
                         time.sleep(0.01)
                     continue
                 else:
                     result = self._position_lib.get_position_full(ticks)
+                
+                # DEBUG
+                #print(f"Position result: {result.get('distances')}")
 
                 raw_distances = result.get("distances")
                 sane_indices  = result.get("sane_indices", [])

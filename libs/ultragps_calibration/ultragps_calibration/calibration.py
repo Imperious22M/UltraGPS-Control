@@ -327,7 +327,8 @@ class UltraGPSCalibration:
         on_reading: Optional[Callable[[int, int], None]] = None,
         on_complete: Optional[Callable[[int], None]] = None,
         on_error: Optional[Callable[[int, str], None]] = None,
-        max_consecutive_failures: int = 10,
+        on_tick: Optional[Callable[[int, list], None]] = None,
+        max_consecutive_failures: int = 5,
     ) -> None:
         """Start a calibration data-collection run in a background thread.
 
@@ -375,7 +376,7 @@ class UltraGPSCalibration:
 
         self._cal_thread = threading.Thread(
             target=self._collection_loop,
-            args=(run_num, min_reads, on_reading, on_complete, on_error, max_consecutive_failures),
+            args=(run_num, min_reads, on_reading, on_complete, on_error, on_tick, max_consecutive_failures),
             daemon=True,
             name=f"ultragps_cal_run_{run_num}",
         )
@@ -593,6 +594,7 @@ class UltraGPSCalibration:
         on_reading: Optional[Callable[[int, int], None]],
         on_complete: Optional[Callable[[int], None]],
         on_error: Optional[Callable[[int, str], None]],
+        on_tick: Optional[Callable[[int, list], None]],
         max_consecutive_failures: int,
     ) -> None:
         """Background thread: collect pulse readings until the threshold is met.
@@ -610,6 +612,7 @@ class UltraGPSCalibration:
         read_count = 0
         consecutive_failures = 0
         completed_naturally = False
+        last_ticks: Optional[list] = None
 
         while True:
             with self._lock:
@@ -630,6 +633,7 @@ class UltraGPSCalibration:
 
             if ticks is not None and len(ticks) == self.RECEIVER_COUNT:
                 consecutive_failures = 0
+                last_ticks = list(ticks)
                 for recv_id in range(self.RECEIVER_COUNT):
                     self.add_reading(recv_id, float(ticks[recv_id]), run_num)
                 read_count += 1
@@ -657,6 +661,11 @@ class UltraGPSCalibration:
                         on_reading(run_num, read_count)
                     except Exception as exc:
                         print(f"[calibration] on_reading callback error: {exc}")
+                if on_tick is not None and last_ticks is not None:
+                    try:
+                        on_tick(run_num, last_ticks)
+                    except Exception as exc:
+                        print(f"[calibration] on_tick callback error: {exc}")
 
             # Check whether all receivers have met the threshold
             all_met = all(

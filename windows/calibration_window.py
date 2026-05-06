@@ -33,6 +33,7 @@ class CalibrationPanel(QWidget):
     _sig_histogram_update = pyqtSignal(int)        # run_num
     _sig_run_complete     = pyqtSignal(int, int)   # run_num, min_reads
     _sig_run_failed       = pyqtSignal(int, str)   # run_num, error_message
+    _sig_tick_update      = pyqtSignal(int, object)  # run_num, list[float]
 
     def __init__(
         self,
@@ -59,6 +60,9 @@ class CalibrationPanel(QWidget):
         self.cal_point_scatter = None
         self.cal_point_label   = None
 
+        # Latest raw tick values per run/receiver for the "Current Reading" display
+        self._current_ticks: dict[int, dict[int, float]] = {1: {}, 2: {}}
+
         receiver_positions = self._settings.get_tower_coordinates()
         self._build_figure(receiver_positions)
         self._build_ui()
@@ -71,6 +75,7 @@ class CalibrationPanel(QWidget):
         self._sig_histogram_update.connect(self._update_all_histograms)
         self._sig_run_complete.connect(self._on_run_complete)
         self._sig_run_failed.connect(self._on_run_failed)
+        self._sig_tick_update.connect(self._on_tick_update)
 
     # ------------------------------------------------------------------
     # Figure
@@ -338,6 +343,15 @@ class CalibrationPanel(QWidget):
         ax.clear()
         self._style_hist_ax(ax, f"Receiver {receiver_id + 1}")
 
+        current = self._current_ticks[run_num].get(receiver_id)
+        if current is not None:
+            ax.text(
+                0.5, 0.89, f"Current: {int(current)}",
+                ha='center', va='top', fontsize=7, color='#FFD700',
+                transform=ax.transAxes,
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='black', alpha=0.6),
+            )
+
         if not data:
             return
 
@@ -360,6 +374,10 @@ class CalibrationPanel(QWidget):
             most_cnt = sorted_data[0][1]
             ax.set_xlabel(f'{int(most_val)} (n={most_cnt})',
                           color='#39FF14', fontsize=8, fontweight='bold')
+
+    def _on_tick_update(self, run_num: int, ticks: list) -> None:
+        for recv_id in range(min(6, len(ticks))):
+            self._current_ticks[run_num][recv_id] = ticks[recv_id]
 
     def _update_all_histograms(self, run_num: int) -> None:
         for recv_id in range(6):
@@ -404,6 +422,7 @@ class CalibrationPanel(QWidget):
                 on_reading=lambda run, n: self._sig_histogram_update.emit(run),
                 on_complete=lambda run: self._sig_run_complete.emit(run, min_reads),
                 on_error=lambda run, msg: self._sig_run_failed.emit(run, msg),
+                on_tick=lambda run, ticks: self._sig_tick_update.emit(run, ticks),
             )
             self._status_label.setText("● Collecting data for Run 1...")
             print("Calibration run 1 started")
@@ -432,12 +451,14 @@ class CalibrationPanel(QWidget):
                 on_reading=lambda run, n: self._sig_histogram_update.emit(run),
                 on_complete=lambda run: self._sig_run_complete.emit(run, min_reads),
                 on_error=lambda run, msg: self._sig_run_failed.emit(run, msg),
+                on_tick=lambda run, ticks: self._sig_tick_update.emit(run, ticks),
             )
             self._status_label.setText("● Collecting data for Run 2...")
         else:
             self._status_label.setText("")
             self.hide_calibration_point()
             self._cal.calculate_and_save_offsets()
+            self._settings.reload_config()
             self._update_offset_display()
             self._completion_dialog()
 
@@ -543,6 +564,7 @@ class CalibrationPanel(QWidget):
 
     def on_panel_show(self) -> None:
         self.update_arena(self._settings.get_tower_coordinates())
+        self._settings.reload_config()
         self._update_offset_display()
         self._refresh_timer.start()
 
