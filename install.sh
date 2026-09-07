@@ -1,10 +1,13 @@
 #!/bin/bash
 
-# UltraGPS-Python Installation Script
+# UltraGPS-Control Installation Script
 
 set -e
 
-echo "=== UltraGPS-Python Installer ==="
+# requirements.txt uses paths relative to the project root, so always run from there.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "=== UltraGPS-Control Installer ==="
 echo
 
 # Check Python version
@@ -30,23 +33,6 @@ if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" 
     exit 1
 fi
 
-# Check for tkinter (required but often missing on Linux)
-echo "Checking for tkinter..."
-if ! $PYTHON_CMD -c "import tkinter" 2>/dev/null; then
-    echo "Warning: tkinter is not installed."
-    echo "On Debian/Ubuntu, install it with: sudo apt install python3-tk"
-    echo "On Fedora, install it with: sudo dnf install python3-tkinter"
-    echo "On Arch, install it with: sudo pacman -S tk"
-    echo
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-else
-    echo "tkinter: OK"
-fi
-
 # Create virtual environment
 VENV_DIR="venv"
 if [ -d "$VENV_DIR" ]; then
@@ -63,27 +49,29 @@ else
     $PYTHON_CMD -m venv "$VENV_DIR"
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
-
 # Upgrade pip
 echo "Upgrading pip..."
-pip install --upgrade pip
+"$VENV_DIR/bin/pip" install --upgrade pip
 
-# Install dependencies
-echo "Installing dependencies..."
-pip install numpy scipy matplotlib filterpy
+# Install third-party dependencies and the five local libraries.
+# The -e entries in requirements.txt cover libs/ultragps_{client,position,
+# calibration,barrier,server}; pip resolves ultragps-calibration's dependency
+# on ultragps-client from the local editable install in the same run.
+echo "Installing dependencies and local libraries..."
+"$VENV_DIR/bin/pip" install -r requirements.txt
 
-# Install local libraries
-echo "Installing local libraries..."
-pip install -e libs/ultragps_position
-pip install -e libs/ultragps_server
+# Sanity check: the GUI must be able to import every module it needs.
+echo "Verifying installation..."
+MPLBACKEND=Agg "$VENV_DIR/bin/python" -c "
+import PyQt6, matplotlib, numpy, scipy
+import ultragps_client, ultragps_position, ultragps_calibration
+import ultragps_barrier, ultragps_server
+print('All modules import correctly.')
+"
 
 echo
 echo "=== Installation Complete ==="
 echo
 echo "To run the application:"
-echo "  source venv/bin/activate"
-echo "  python main.py"
+echo "  ./run.sh [--ip <server-address>]"
 echo
