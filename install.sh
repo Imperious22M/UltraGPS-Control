@@ -34,7 +34,7 @@ if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" 
 fi
 
 # Create virtual environment
-VENV_DIR="venv"
+VENV_DIR=".venv"
 if [ -d "$VENV_DIR" ]; then
     echo "Virtual environment already exists."
     read -p "Recreate it? (y/n) " -n 1 -r
