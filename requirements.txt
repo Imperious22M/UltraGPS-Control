@@ -3,9 +3,6 @@ numpy==2.4.4
 PyQt6>=6.4.0
 scipy==1.17.1
 
-# Test-only (needed by tests/test_barrier_geometry.py)
-pytest>=7.0
-
 # Local libraries (editable installs)
 -e libs/ultragps_client
 -e libs/ultragps_position
