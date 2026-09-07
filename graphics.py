@@ -2,6 +2,7 @@ import atexit
 import sys
 import os
 import argparse
+import logging
 
 import matplotlib
 matplotlib.use('QtAgg')
@@ -41,4 +42,7 @@ def main():
 
 
 if __name__ == "__main__":
+     # Enable logging
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
     main()

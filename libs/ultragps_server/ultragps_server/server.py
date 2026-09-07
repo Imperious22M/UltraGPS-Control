@@ -387,20 +387,28 @@ class UltraGPSServer:
     # ------------------------------------------------------------------
 
     def _handle_command(self, cmd: str, addr: tuple, reply_fn=None) -> None:
+        handler = self._command_handlers.get(cmd, None)
+        cmd_success = False
+
         if cmd == 'Ready':
             with self._streaming_lock:
                 self._streaming = True
+                cmd_success = True
             logger.info("Streaming enabled by client %s (cmd='Ready')", addr)
 
-        handler = self._command_handlers.get(cmd)
         if handler is not None:
             try:
                 handler(cmd)
+                cmd_success = True
             except Exception as exc:
+                cmd_success = False
                 logger.error("Command handler error for '%s': %s", cmd, exc)
 
         if reply_fn is not None:
             try:
-                reply_fn("<Ok>\n")
+                if cmd_success:
+                    reply_fn("<Ok>\n")
+                else:
+                    reply_fn("<Error>\n")
             except Exception as exc:
                 logger.debug("Reply error to %s: %s", addr, exc)

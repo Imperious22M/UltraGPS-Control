@@ -28,7 +28,6 @@ from ultragps_client import UltraGPSClient
 from ultragps_position import UltraGPSPositionLib
 from SettingsModule import SettingsModule
 from ultragps_barrier import BarrierManager, BarrierEvent, EventType, load_images
-from joy_tractor import Vehicle
 from ultragps_server import send_position, send_nmea, send_barrier_event
 
 _SRV_POS       = "pos"
@@ -105,10 +104,6 @@ class NetworkThread(QThread):
                 else:
                     ticks = self._client.pulse()
 
-                # DEBUG
-                #print(f"Raw ticks: {ticks}")
-                #time.sleep(10)
-
                 if ticks is None:
                     if current_continuous:
                         print("No ticks received in continuous mode, retrying...")
@@ -116,9 +111,6 @@ class NetworkThread(QThread):
                     continue
                 else:
                     result = self._position_lib.get_position_full(ticks)
-                
-                # DEBUG
-                #print(f"Position result: {result.get('distances')}")
 
                 raw_distances = result.get("distances")
                 sane_indices  = result.get("sane_indices", [])
