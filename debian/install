@@ -1,0 +1,21 @@
+# Application modules -> private directory (see debian/rules for why).
+graphics.py             usr/share/ultragps-control
+SettingsModule.py       usr/share/ultragps-control
+windows                 usr/share/ultragps-control
+
+# Launcher -> on the PATH.
+bin/ultragps-control    usr/bin
+
+# Default configuration.  Files under /etc are registered as conffiles
+# automatically, so local edits survive an upgrade.  At runtime the app copies
+# these into ~/.config/ultragps-control the first time it needs to save.
+config/config.toml      etc/ultragps-control
+config/barriers.toml    etc/ultragps-control
+
+# Image overlays referenced by barriers.toml are read from a resources/ dir
+# beside it, so it has to travel with the config files.  Ships the example
+# circles; user-imported images land in ~/.config/ultragps-control/resources.
+config/resources        etc/ultragps-control
+
+# Desktop launcher entry.
+debian/ultragps-control.desktop  usr/share/applications
