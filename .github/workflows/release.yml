@@ -64,7 +64,7 @@ jobs:
             # For a manual release, the tag is derived from the VERSION file.
             version="$(tr -d '[:space:]' < VERSION)"
             version="v$version"
-            tag="v$version"
+            tag="$version"
             echo "Manual release: using tag $tag from VERSION file ($version)"
           else
             # For a push of a version tag, the tag is derived from the Git ref.
