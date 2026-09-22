@@ -28,9 +28,11 @@ class UltraGPSMainWindow(QMainWindow):
         self.client = UltraGPSClient(host=ip_address)
         self.client.connect()
 
-        self.settings_module = SettingsModule()
-        if config_path is None:
-            config_path = self.settings_module._config_path
+        # SettingsModule resolves the config location when config_path is None;
+        # reuse whatever it settled on for the other consumers so all four
+        # (settings, position, calibration, barriers) read the same file.
+        self.settings_module = SettingsModule(config_path)
+        config_path = self.settings_module.config_path
         self._config_path = config_path
 
         self.position_lib = UltraGPSPositionLib(config_path)

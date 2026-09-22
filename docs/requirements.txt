@@ -1,0 +1,5 @@
+# Python dependencies for building the documentation.
+#   pip install -r docs/requirements.txt
+#
+# To upgrade to the Material theme, add:  mkdocs-material
+mkdocs>=1.5

@@ -1,0 +1,42 @@
+name: Deploy Docs
+
+# Build the MkDocs site and publish it to the gh-pages branch, which GitHub
+# Pages serves as the project page:
+#   https://imperious22m.github.io/UltraGPS-Control/
+#
+
+on:
+  push:
+    branches: [ release ]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# gh-deploy pushes the built site to the gh-pages branch, which needs write
+# access to repository contents.
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so ghp-import can update the gh-pages branch.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install MkDocs
+        run: pip install -r docs/requirements.txt
+
+      - name: Build and deploy to gh-pages
+        run: mkdocs gh-deploy --force --no-history

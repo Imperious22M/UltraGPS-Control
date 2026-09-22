@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+#
+# The five reusable ultragps_* libraries under libs/ are built and installed as
+# ordinary Python packages by pybuild/dh-python, driven by the root
+# pyproject.toml.
+#
+# The application itself (graphics.py, SettingsModule.py and windows/) is
+# installed by debian/install into /usr/share/ultragps-control, a private
+# directory that is NOT on the Python path.  Module names like "graphics" and
+# "windows" are too generic to install into dist-packages, so the
+# /usr/bin/ultragps-control launcher puts that directory on sys.path itself.
+
+export PYBUILD_NAME=ultragps-control
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild

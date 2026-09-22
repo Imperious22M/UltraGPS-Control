@@ -1,6 +1,5 @@
 import atexit
 import sys
-import os
 import argparse
 import logging
 
@@ -19,10 +18,14 @@ SERVER_BARRIER_UDP = "barrier"
 
 
 def main():
-    default_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.toml')
     parser = argparse.ArgumentParser(description="UltraGPS positioning system")
     parser.add_argument("--ip", default="127.0.0.1", help="IP address of the UltraGPS server")
-    parser.add_argument("--config", default=default_config, help="Path to config.toml")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to config.toml (default: search ~/.config/ultragps-control, "
+             "./config, then /etc/ultragps-control)",
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)

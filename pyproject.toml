@@ -1,0 +1,45 @@
+# Packaging metadata for the UltraGPS Control distribution.
+#
+# This declares only the five reusable ultragps_* libraries under libs/.  The
+# application itself (graphics.py, SettingsModule.py, windows/) is deliberately
+# NOT a Python package: its module names are too generic to sit on the global
+# Python path, so the Debian package installs it to /usr/share/ultragps-control
+# and reaches it through the /usr/bin/ultragps-control launcher instead.
+#
+# The version is read from the VERSION file, which is the single source of
+# truth — debian/changelog is generated from it by ./build.sh.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultragps-control"
+dynamic = ["version"]
+description = "Ground-station GUI for the St. Mary's University UltraGPS positioning system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "PyQt6>=6.4.0",
+    "scipy",
+]
+
+[project.urls]
+Homepage = "https://github.com/Imperious22M/UltraGPS-Control"
+Documentation = "https://imperious22m.github.io/UltraGPS-Control/"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+# Each library lives in its own root under libs/, so `where` lists them all.
+[tool.setuptools.packages.find]
+where = [
+    "libs/ultragps_client",
+    "libs/ultragps_position",
+    "libs/ultragps_calibration",
+    "libs/ultragps_barrier",
+    "libs/ultragps_server",
+]
+include = ["ultragps_*"]

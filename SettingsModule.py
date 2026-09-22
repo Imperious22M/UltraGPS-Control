@@ -1,17 +1,83 @@
-import tomllib
 import os
+import shutil
+import tomllib
+
+#: Directory name used under ~/.config and /etc.
+APP_NAME = 'ultragps-control'
+
+#: Name of the main settings file inside a config directory.
+CONFIG_FILENAME = 'config.toml'
+
+
+def user_config_dir():
+    """Per-user config directory: $XDG_CONFIG_HOME/ultragps-control (or ~/.config/...)."""
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    if not xdg:
+        xdg = os.path.join(os.path.expanduser('~'), '.config')
+    return os.path.join(xdg, APP_NAME)
+
+
+def local_config_dir():
+    """In-tree config directory, used when running from a source checkout."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
+
+
+def system_config_dir():
+    """System-wide config directory, populated by the Debian package."""
+    return os.path.join('/etc', APP_NAME)
+
+
+def config_search_path():
+    """Config directories in priority order: user, then local, then system."""
+    return [user_config_dir(), local_config_dir(), system_config_dir()]
+
+
+def find_config_dir():
+    """Return the first directory on the search path that holds a config.toml.
+
+    Returns None if no existing configuration was found anywhere.
+    """
+    for directory in config_search_path():
+        if os.path.isfile(os.path.join(directory, CONFIG_FILENAME)):
+            return directory
+    return None
+
+
+def resolve_config_path():
+    """Locate config.toml, or pick where a fresh default should be created.
+
+    Search order is user (~/.config) -> local (./config) -> system (/etc); the
+    first directory containing a config.toml wins.  When nothing is found the
+    default is created in the system directory, falling back to the user
+    directory when /etc is not writable (i.e. when not running as root).
+    """
+    found = find_config_dir()
+    if found is not None:
+        return os.path.join(found, CONFIG_FILENAME)
+
+    target = system_config_dir()
+    try:
+        os.makedirs(target, exist_ok=True)
+    except OSError:
+        target = user_config_dir()
+        os.makedirs(target, exist_ok=True)
+    return os.path.join(target, CONFIG_FILENAME)
 
 
 class SettingsModule:
-    def __init__(self):
+    def __init__(self, config_path=None):
         """
         Initialize the SettingsModule by loading config.toml into memory.
+
+        With no argument the file is located via resolve_config_path(); pass
+        config_path to point at a specific file (the --config option).
         If no config.toml exists, creates one with default empty values.
         All reads reference the internal copy, all writes immediately save to file.
         """
-        # Get the config file path
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        self._config_path = os.path.join(current_dir, 'config.toml')
+        if config_path is None:
+            self._config_path = resolve_config_path()
+        else:
+            self._config_path = os.path.abspath(config_path)
 
         # Load the config file into internal storage (or create default if missing)
         self._config = self._load_config()
@@ -135,8 +201,51 @@ class SettingsModule:
 
     def _save_config(self):
         """Save the internal config to the TOML file."""
+        self._ensure_writable()
         with open(self._config_path, 'w') as f:
             self._write_toml(f, self._config)
+
+    def _ensure_writable(self):
+        """Make sure the active config directory can be written to.
+
+        A packaged install resolves to /etc/ultragps-control, which an ordinary
+        user cannot write to.  Rather than failing the save, copy the whole
+        config directory (config.toml, barriers.toml and resources/) into the
+        per-user directory and switch to it, so the user's edits land in
+        ~/.config and take priority from then on.
+        """
+        current_dir = self.config_dir
+        if not os.path.isdir(current_dir):
+            # An explicit --config path may point somewhere that does not exist
+            # yet; create it rather than treating it as unwritable.
+            try:
+                os.makedirs(current_dir, exist_ok=True)
+            except OSError:
+                pass
+        if os.access(current_dir, os.W_OK):
+            return
+
+        target_dir = user_config_dir()
+        os.makedirs(target_dir, exist_ok=True)
+
+        # Seed the user directory from the read-only one, without clobbering
+        # anything the user already has there.
+        if os.path.isdir(current_dir):
+            for entry in os.listdir(current_dir):
+                source = os.path.join(current_dir, entry)
+                destination = os.path.join(target_dir, entry)
+                if os.path.exists(destination):
+                    continue
+                try:
+                    if os.path.isdir(source):
+                        shutil.copytree(source, destination)
+                    else:
+                        shutil.copy2(source, destination)
+                except OSError as err:
+                    print(f"Could not copy {source} to {target_dir}: {err}")
+
+        print(f"{current_dir} is not writable, switching to {target_dir}")
+        self._config_path = os.path.join(target_dir, CONFIG_FILENAME)
 
     def _write_toml(self, f, config):
         """Write config dictionary to TOML format."""
@@ -234,6 +343,16 @@ class SettingsModule:
         return (is_valid, errors)
 
     # ==================== Top-level field accessors ====================
+
+    @property
+    def config_path(self):
+        """Absolute path to the active config.toml."""
+        return self._config_path
+
+    @property
+    def config_dir(self):
+        """Directory holding config.toml, barriers.toml and resources/."""
+        return os.path.dirname(self._config_path)
 
     @property
     def valid_settings(self):

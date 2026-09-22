@@ -1,0 +1,68 @@
+name: Release
+
+# Cut a versioned GitHub Release with the .deb package attached.
+#
+# Trigger: pushing a version tag (e.g. v1.0) — conventionally on the `release`
+# branch, which is the stable snapshot of a released version.
+#
+# Release procedure:
+#   1. Make sure `release` is at the exact commit you want to ship, and that the
+#      VERSION file matches the version you are tagging.
+#   2. Tag it and push the tag:
+#          git checkout release
+#          git tag v1.0
+#          git push origin v1.0
+#   3. This workflow builds the .deb and publishes it under the Releases tab.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# gh release create needs write access to create the release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the Debian packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debhelper \
+            dh-python \
+            pybuild-plugin-pyproject \
+            python3-all \
+            python3-setuptools
+
+      - name: Verify the VERSION file matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"                       # v1.0 -> 1.0
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "tag version: $tag   VERSION file: $version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag ($tag) does not match the VERSION file ($version). \
+          Update VERSION to match the tag before releasing." >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build the .deb package
+        run: bash build.sh deb
+
+      - name: Create the GitHub Release and upload the .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "build/ultragps-control_${VERSION}_all.deb" \
+            --title "UltraGPS Control $GITHUB_REF_NAME" \
+            --generate-notes

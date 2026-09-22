@@ -1709,7 +1709,7 @@ class BarrierDrawerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _get_barriers_path(self) -> str:
-        config_dir = os.path.dirname(self._settings._config_path)
+        config_dir = self._settings.config_dir
         return os.path.join(config_dir, 'barriers.toml')
 
     def _save_barriers(self) -> None:
@@ -1757,7 +1757,7 @@ class BarrierDrawerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _get_resources_dir(self) -> str:
-        config_dir = os.path.dirname(self._settings._config_path)
+        config_dir = self._settings.config_dir
         return os.path.join(config_dir, 'resources')
 
     def _draw_image(self, overlay: ImageOverlay) -> None:

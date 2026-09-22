@@ -198,7 +198,7 @@ class PositionPanel(QWidget):
         self._server = server
         self.setStyleSheet("background-color: black;")
 
-        config_dir = os.path.dirname(self._settings._config_path)
+        config_dir = self._settings.config_dir
         print(f"Loading barriers from {config_dir}")
         self._barrier_manager = BarrierManager(config_dir)
         self._barrier_manager.load_barriers()
@@ -590,7 +590,7 @@ class PositionPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _get_resources_dir(self) -> str:
-        config_dir = os.path.dirname(self._settings._config_path)
+        config_dir = self._settings.config_dir
         return os.path.join(config_dir, 'resources')
 
     def _draw_images(self) -> None:
@@ -603,7 +603,7 @@ class PositionPanel(QWidget):
                 pass
         self._image_artists.clear()
 
-        config_dir = os.path.dirname(self._settings._config_path)
+        config_dir = self._settings.config_dir
         barriers_path = os.path.join(config_dir, 'barriers.toml')
         images = load_images(barriers_path)
 

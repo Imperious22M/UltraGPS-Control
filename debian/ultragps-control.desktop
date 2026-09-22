@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=UltraGPS Control
+GenericName=Indoor Positioning Control
+Comment=Ground-station GUI for the UltraGPS positioning system
+Exec=ultragps-control
+Terminal=false
+Categories=Science;Education;
+Keywords=ultragps;positioning;gps;

@@ -1,0 +1,26 @@
+#!/usr/bin/python3
+"""Launcher for the packaged UltraGPS Control GUI.
+
+The application modules (graphics, SettingsModule and the windows package) are
+installed to a private directory rather than to dist-packages, because names
+like "graphics" and "windows" are far too generic to occupy the global Python
+path.  The reusable ultragps_* libraries are installed normally, so they are
+importable from anywhere.
+"""
+
+import logging
+import sys
+
+APP_DIR = "/usr/share/ultragps-control"
+
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+from graphics import main  # noqa: E402  (import follows the sys.path setup)
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    main()
