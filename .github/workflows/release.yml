@@ -47,7 +47,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install the Debian packaging tools
+      - name: Install the Debian packaging tools and python tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -57,6 +57,11 @@ jobs:
             python3-all \
             python3-setuptools \
             build-essential
+
+      - name: Installs python dependencies
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        run: pip install -r requirements.txt
 
       - name: Verify the VERSION file matches the tag
         run: |
