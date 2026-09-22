@@ -73,8 +73,6 @@ jobs:
           fi
           if [ "$tag" != "$version" ]; then
             echo "::error::Tag ($tag) does not match the VERSION file ($version). \
-          if [ "$tag" != "$version" ]; then
-            echo "::error::Tag ($tag) does not match the VERSION file ($version). \
           Update VERSION to match the tag before releasing." >&2
             exit 1
           fi
