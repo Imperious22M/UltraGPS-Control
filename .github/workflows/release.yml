@@ -18,7 +18,21 @@ on:
   push:
     tags:
       - 'v*'
+    inputs:
+        manual_release:
+        description: 'Manual Release'
+        type: boolean
+        required: true
+        default: false
   workflow_dispatch:
+    inputs:
+      manual_release:
+        # Makes a manual release with the tag being the
+        # one in VERSION. (1.0 -> v1.0)
+        description: 'Manual Release'
+        type: boolean
+        required: true
+        default: true
 
 # gh release create needs write access to create the release and upload assets.
 permissions:
@@ -46,9 +60,19 @@ jobs:
 
       - name: Verify the VERSION file matches the tag
         run: |
-          tag="${GITHUB_REF_NAME#v}"                       # v1.0 -> 1.0
-          version="$(tr -d '[:space:]' < VERSION)"
-          echo "tag version: $tag   VERSION file: $version"
+          if [ "${{ github.event.inputs.manual_release }}" = "true" ]; then
+            # For a manual release, the tag is derived from the VERSION file.
+            version="$(tr -d '[:space:]' < VERSION)"
+            tag="v$version"
+            echo "Manual release: using tag $tag from VERSION file ($version)"
+          else
+            # For a push of a version tag, the tag is derived from the Git ref.
+            tag="${GITHUB_REF_NAME#v}"                       # v1.0 -> 1.0
+            version="$(tr -d '[:space:]' < VERSION)"
+            echo "Tag push: using tag $tag from Git ref ($GITHUB_REF_NAME) and VERSION file ($version)"
+          fi
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag ($tag) does not match the VERSION file ($version). \
           if [ "$tag" != "$version" ]; then
             echo "::error::Tag ($tag) does not match the VERSION file ($version). \
           Update VERSION to match the tag before releasing." >&2
