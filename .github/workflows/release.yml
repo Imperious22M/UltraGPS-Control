@@ -41,7 +41,8 @@ jobs:
             dh-python \
             pybuild-plugin-pyproject \
             python3-all \
-            python3-setuptools
+            python3-setuptools \
+            build-essential
 
       - name: Verify the VERSION file matches the tag
         run: |
