@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://imperious22m.github.io/UltraGPS-Control/usage/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Usage - UltraGPS Control</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Usage";
+        var mkdocs_page_input_path = "usage.md";
+        var mkdocs_page_url = "/UltraGPS-Control/usage/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UltraGPS Control
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../configuration/">Configuration</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Usage</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#before-you-start">Before you start</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#running">Running</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#options">Options</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#the-main-menu">The main menu</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#setup">Setup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#calibration">Calibration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#position">Position</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#barriers">Barriers</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#consuming-the-position-feed">Consuming the position feed</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../developer-guide/">Developer's Guide</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UltraGPS Control</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Usage</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Imperious22M/UltraGPS-Control/edit/master/docs/usage.md">Edit on Imperious22M/UltraGPS-Control</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="usage">Usage<a class="headerlink" href="#usage" title="Permanent link">&para;</a></h1>
+<h2 id="before-you-start">Before you start<a class="headerlink" href="#before-you-start" title="Permanent link">&para;</a></h2>
+<p>The <a href="https://imperious22m.github.io/UltraGPS-Ground/"><code>UltraGpsXY</code></a> ground-station
+program must already be running on the host that has the base-station Arduino
+plugged into it. UltraGPS Control connects to it over the network; it does not
+talk to the hardware directly.</p>
+<h2 id="running">Running<a class="headerlink" href="#running" title="Permanent link">&para;</a></h2>
+<pre><code class="language-bash">ultragps-control                        # installed from the .deb
+./run.sh                                # from a development checkout
+</code></pre>
+<h3 id="options">Options<a class="headerlink" href="#options" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--ip &lt;address&gt;</code></td>
+<td><code>127.0.0.1</code></td>
+<td>Address of the ground-station host</td>
+</tr>
+<tr>
+<td><code>--config &lt;path&gt;</code></td>
+<td>search path</td>
+<td>Use a specific <code>config.toml</code></td>
+</tr>
+<tr>
+<td><code>-h</code>, <code>--help</code></td>
+<td>—</td>
+<td>Show usage</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash">ultragps-control --ip 192.168.1.100
+ultragps-control --config ~/arenas/gym/config.toml
+</code></pre>
+<p>With no <code>--config</code>, the settings file is looked up in <code>~/.config</code>, then <code>./config</code>,
+then <code>/etc</code> — see <a href="../configuration/">Configuration</a>.</p>
+<p>The program connects to TCP <code>9000</code> and UDP <code>9001</code> on the <code>--ip</code> host, and binds
+its own ports <code>8000</code>–<code>8004</code> locally.</p>
+<h2 id="the-main-menu">The main menu<a class="headerlink" href="#the-main-menu" title="Permanent link">&para;</a></h2>
+<p>The window opens on a menu with a live server-status panel and four buttons. The
+status panel shows the address the server bound to, whether streaming is on, each
+port with its connected-client count, and the total.</p>
+<table>
+<thead>
+<tr>
+<th>Panel</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Position</strong></td>
+<td>live tracking</td>
+</tr>
+<tr>
+<td><strong>Calibration</strong></td>
+<td>two-run receiver calibration</td>
+</tr>
+<tr>
+<td><strong>Setup</strong></td>
+<td>arena and receiver geometry</td>
+</tr>
+<tr>
+<td><strong>Barriers</strong></td>
+<td>drawing virtual barriers</td>
+</tr>
+</tbody>
+</table>
+<p>A panel stops its background work when you leave it, so the network thread only
+runs while the Position panel is open.</p>
+<h2 id="setup">Setup<a class="headerlink" href="#setup" title="Permanent link">&para;</a></h2>
+<p>Start here on a new arena. The panel builds the receiver layout from the
+distances <em>between</em> receivers, which is far easier to measure accurately than
+absolute coordinates.</p>
+<ol>
+<li>Enter the measured inter-receiver distances, or give the arena's overall
+   dimensions to generate a rectangular layout.</li>
+<li>Place the two calibration points. These are the known positions the
+   transmitter will be put at during calibration.</li>
+<li>Press <strong>Verify</strong> to check the geometry is consistent, then save.</li>
+</ol>
+<p>Saving sets <code>valid_settings = true</code> in <code>config.toml</code>. Until then the program
+warns at startup that the settings are uninitialised and treats the arena size
+as zero.</p>
+<h2 id="calibration">Calibration<a class="headerlink" href="#calibration" title="Permanent link">&para;</a></h2>
+<p>Calibration turns raw tick counts into centimetres, and has to be redone whenever
+receivers move.</p>
+<ol>
+<li>Put the transmitter on <strong>calibration point 1</strong> and start run 1. The panel
+   collects readings and shows a live histogram per receiver.</li>
+<li>Move the transmitter to <strong>calibration point 2</strong> and run it again.</li>
+<li>Save. The modal tick value from each run is paired with the known distance
+   from that receiver to each point, giving a slope and intercept per receiver:</li>
+</ol>
+<pre><code>slope     = (dist_1 - dist_2) / (tick_1 - tick_2)
+intercept = dist_1 - slope * tick_1
+</code></pre>
+<p>The histograms are the useful diagnostic here — a receiver with a broad or
+double-peaked distribution is picking up reflections rather than the direct
+pulse, and its calibration will be poor.</p>
+<h2 id="position">Position<a class="headerlink" href="#position" title="Permanent link">&para;</a></h2>
+<p>The tracking view. The arena plot shows the receivers, the current position, and
+a fading trail of the last 50 fixes; six mini-plots around it show each
+receiver's recent distance history.</p>
+<p>Two solutions are drawn at once — <strong>LM</strong> and <strong>CEP</strong> (see
+<a href="../architecture/">Architecture</a>). Comparing them is the quickest way to judge
+whether a fix is trustworthy: when they disagree, at least one receiver is
+feeding bad data.</p>
+<p>Indicators to watch:</p>
+<ul>
+<li><strong>positions/sec</strong> — the achieved update rate.</li>
+<li><strong>Per-receiver LEDs</strong> — which receivers passed the sanity filter for the
+  current reading.</li>
+<li><strong>Insufficient receivers</strong> — fewer than three passed, so the displayed position
+  is a stale fallback rather than a new fix.</li>
+</ul>
+<p>The panel can poll in either mode: <strong>continuous</strong> (the ground station streams
+over UDP) or <strong>pulse</strong> (one TCP request per fix). Continuous is faster; pulse is
+easier to reason about when debugging.</p>
+<p>Barriers are drawn on the arena and flash when they trigger.</p>
+<h2 id="barriers">Barriers<a class="headerlink" href="#barriers" title="Permanent link">&para;</a></h2>
+<p>An interactive editor for the virtual zones that fire events when the
+transmitter enters or leaves them.</p>
+<ul>
+<li><strong>Polygon</strong> — click to place vertices, close the shape to finish.</li>
+<li><strong>Circle</strong> — click the centre, drag out the radius.</li>
+<li><strong>Line</strong> — click both endpoints; <code>thickness</code> sets how close counts as crossing.</li>
+</ul>
+<p>For each barrier you set a name, colour and opacity, and choose:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Options</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>trigger_when</code></td>
+<td><code>inside</code> / <code>outside</code></td>
+<td>which condition is the active one</td>
+</tr>
+<tr>
+<td><code>trigger_mode</code></td>
+<td><code>event</code> / <code>continuous</code></td>
+<td>fire once on transition, or on every update while it holds</td>
+</tr>
+<tr>
+<td><code>callback_name</code></td>
+<td>any string</td>
+<td>passed through in the event, for consumers to dispatch on</td>
+</tr>
+</tbody>
+</table>
+<p>You can also import an image — a court or field diagram — as a backdrop, position
+and rotate it, and trace its outline into a polygon barrier automatically.</p>
+<p>Barriers are saved to <code>barriers.toml</code> in the configuration directory, and images
+are copied into <code>resources/</code> beside it.</p>
+<h2 id="consuming-the-position-feed">Consuming the position feed<a class="headerlink" href="#consuming-the-position-feed" title="Permanent link">&para;</a></h2>
+<p>Other programs receive the feed over the ports listed in
+<a href="../architecture/">Architecture</a>. Nothing is sent until a consumer enables
+streaming by sending <code>Ready</code> on the command port:</p>
+<pre><code class="language-python">import socket
+
+# Enable streaming.
+cmd = socket.create_connection((&quot;127.0.0.1&quot;, 8000))
+cmd.sendall(b&quot;Ready\n&quot;)          # server replies &quot;&lt;Ok&gt;&quot;
+
+# Receive positions.
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.bind((&quot;&quot;, 8001))
+udp.sendto(b&quot;register&quot;, (&quot;127.0.0.1&quot;, 8001))   # register as a listener
+
+while True:
+    data, _ = udp.recvfrom(1024)
+    print(data.decode().strip())    # N: POS lm -12.500 43.200
+</code></pre>
+<p>The NMEA stream on port 8002 carries a standard <code>$GPGGA</code> sentence, so software
+that already speaks NMEA can treat the arena as a GPS receiver. The satellite
+count field is reused to report how many receivers passed the sanity filter.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../configuration/" class="btn btn-neutral float-left" title="Configuration"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../developer-guide/" class="btn btn-neutral float-right" title="Developer's Guide">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Imperious22M/UltraGPS-Control" class="fa fa-code-fork" style="color: #fcfcfc"> Imperious22M/UltraGPS-Control</a>
+        </span>
+    
+    
+      <span><a href="../configuration/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../developer-guide/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

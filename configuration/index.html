@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://imperious22m.github.io/UltraGPS-Control/configuration/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Configuration - UltraGPS Control</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Configuration";
+        var mkdocs_page_input_path = "configuration.md";
+        var mkdocs_page_url = "/UltraGPS-Control/configuration/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UltraGPS Control
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Configuration</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#where-the-configuration-is-found">Where the configuration is found</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configtoml">config.toml</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#barrierstoml">barriers.toml</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../usage/">Usage</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../developer-guide/">Developer's Guide</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UltraGPS Control</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Configuration</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Imperious22M/UltraGPS-Control/edit/master/docs/configuration.md">Edit on Imperious22M/UltraGPS-Control</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
+<p>UltraGPS Control keeps its settings in a <strong>configuration directory</strong> holding
+three things:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config.toml</code></td>
+<td>receiver geometry and calibration</td>
+</tr>
+<tr>
+<td><code>barriers.toml</code></td>
+<td>virtual barriers and image overlays</td>
+</tr>
+<tr>
+<td><code>resources/</code></td>
+<td>image files referenced by the overlays</td>
+</tr>
+</tbody>
+</table>
+<p>They travel together, because a barrier is only meaningful relative to the arena
+the receivers define.</p>
+<h2 id="where-the-configuration-is-found">Where the configuration is found<a class="headerlink" href="#where-the-configuration-is-found" title="Permanent link">&para;</a></h2>
+<p>At startup the program looks for a <code>config.toml</code> in three places and uses the
+<strong>first</strong> one it finds:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Priority</th>
+<th>Directory</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1</td>
+<td><code>~/.config/ultragps-control/</code></td>
+<td>your own settings</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td><code>./config/</code> (next to the source)</td>
+<td>a development checkout</td>
+</tr>
+<tr>
+<td style="text-align: right;">3</td>
+<td><code>/etc/ultragps-control/</code></td>
+<td>defaults from the Debian package</td>
+</tr>
+</tbody>
+</table>
+<p><code>$XDG_CONFIG_HOME</code> is honoured if set, in which case it replaces <code>~/.config</code>.</p>
+<p>A per-user configuration therefore always wins, and a source checkout's own
+<code>config/</code> directory takes priority over the system-wide defaults — so running
+from a clone never silently picks up an installed package's settings.</p>
+<p>If no configuration exists in any of the three, a default is created in
+<code>/etc/ultragps-control/</code>, falling back to <code>~/.config/ultragps-control/</code> when
+<code>/etc</code> is not writable (that is, when not running as root). A freshly created
+default is <em>not</em> usable as-is: every receiver position is zero, and the program
+prints a warning telling you to initialise it from the <strong>Setup</strong> panel.</p>
+<p>Pass <code>--config</code> to bypass the search entirely:</p>
+<pre><code class="language-bash">ultragps-control --config /path/to/config.toml
+</code></pre>
+<p>The directory containing that file becomes the configuration directory, so
+<code>barriers.toml</code> and <code>resources/</code> are read from beside it.</p>
+<div class="admonition note">
+<p class="admonition-title">Saving from a read-only directory</p>
+<p>When the active configuration lives somewhere you cannot write — the usual
+case for <code>/etc</code> after installing the package — the first save copies the
+whole directory into <code>~/.config/ultragps-control/</code> and switches to it.
+Nothing already in the user directory is overwritten. From then on the user
+copy is found first, so your settings persist and the packaged defaults stay
+pristine.</p>
+</div>
+<h2 id="configtoml">config.toml<a class="headerlink" href="#configtoml" title="Permanent link">&para;</a></h2>
+<pre><code class="language-toml">valid_settings = true       # set by the Setup panel once verification passes
+cal_state = 1               # how far calibration has progressed
+calibration_reads = 5       # readings per receiver per calibration run
+number_of_receivers = 6
+serial_port = '/dev/ttyACM0'
+units = 'cm'
+cal_point_1 = [0.0, 76.0]   # known positions used for calibration
+cal_point_2 = [-76.0, 0.0]
+
+[[receivers]]
+id = 0
+position = [-127.0, -186.94]          # where the receiver sits, in cm
+cal_distances = [292.004, 193.772]    # distance to cal_point_1 and _2
+
+    [receivers.offset]
+    slope = 0.9630612464305284        # ticks -&gt; cm
+    intercept = -139.44725418428027
+</code></pre>
+<p>There are six <code>[[receivers]]</code> blocks, with ids 0 through 5.</p>
+<p>All coordinates and distances are <strong>centimetres</strong>, with the origin at the centre
+of the arena — receiver positions are signed. The arena size is not stored; it is
+derived from the receiver positions.</p>
+<p>The <code>offset</code> values are what calibration produces. Each receiver converts ticks
+to centimetres with <code>distance = tick * slope + intercept</code>.</p>
+<h2 id="barrierstoml">barriers.toml<a class="headerlink" href="#barrierstoml" title="Permanent link">&para;</a></h2>
+<p>Each barrier is a <code>[[barrier]]</code> block:</p>
+<pre><code class="language-toml">[[barrier]]
+name = &quot;Goal-Barrier&quot;
+type = &quot;polygon&quot;            # polygon | circle | line
+trigger_mode = &quot;event&quot;      # event (on transition) | continuous (every update)
+trigger_when = &quot;inside&quot;     # inside | outside
+callback_name = &quot;on_barrier&quot;
+color = &quot;#00FF00&quot;
+alpha = 0.3
+vertices = [[-35.6, 8.88], [-30.9, -3.08], [-15.96, -0.09], [-18.95, 12.29]]
+</code></pre>
+<p>A <code>circle</code> uses <code>center</code> and <code>radius</code> instead of <code>vertices</code>; a <code>line</code> uses
+<code>point1</code>, <code>point2</code>, and a <code>thickness</code> (the total proximity margin in cm, not the
+half-width).</p>
+<p>Optional <code>[[image]]</code> blocks place a picture on the arena as a backdrop — a court
+diagram, say — and can be traced into a polygon barrier from the Barriers panel.
+Their image files live in <code>resources/</code> beside <code>barriers.toml</code>.</p>
+<p>Barriers are normally drawn in the GUI rather than written by hand; see
+<a href="../usage/">Usage</a>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../installation/" class="btn btn-neutral float-left" title="Installation"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../usage/" class="btn btn-neutral float-right" title="Usage">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Imperious22M/UltraGPS-Control" class="fa fa-code-fork" style="color: #fcfcfc"> Imperious22M/UltraGPS-Control</a>
+        </span>
+    
+    
+      <span><a href="../installation/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../usage/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

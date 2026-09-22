@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://imperious22m.github.io/UltraGPS-Control/installation/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Installation - UltraGPS Control</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Installation";
+        var mkdocs_page_input_path = "installation.md";
+        var mkdocs_page_url = "/UltraGPS-Control/installation/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UltraGPS Control
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Installation</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#install-from-a-release-recommended">Install from a release (recommended)</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#what-the-package-installs">What the package installs</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#requirements">Requirements</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#development-checkout">Development checkout</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#building-the-debian-package-locally">Building the Debian package locally</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../configuration/">Configuration</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../usage/">Usage</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../developer-guide/">Developer's Guide</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UltraGPS Control</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Installation</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Imperious22M/UltraGPS-Control/edit/master/docs/installation.md">Edit on Imperious22M/UltraGPS-Control</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="installation">Installation<a class="headerlink" href="#installation" title="Permanent link">&para;</a></h1>
+<p>There are two ways to get UltraGPS Control onto a machine: install the prebuilt
+Debian package from a release, or set up a development checkout.</p>
+<h2 id="install-from-a-release-recommended">Install from a release (recommended)<a class="headerlink" href="#install-from-a-release-recommended" title="Permanent link">&para;</a></h2>
+<p>Each tagged version is published on the
+<a href="https://github.com/Imperious22M/UltraGPS-Control/releases">Releases page</a> with
+the <code>.deb</code> package attached. Download the latest
+<code>ultragps-control_&lt;version&gt;_all.deb</code> and install it:</p>
+<pre><code class="language-bash">sudo apt install ./ultragps-control_*_all.deb
+</code></pre>
+<p>Using <code>apt install ./file.deb</code> rather than <code>dpkg -i</code> lets apt pull in the
+runtime dependencies (<code>python3-pyqt6</code>, <code>python3-matplotlib</code>, <code>python3-numpy</code>,
+<code>python3-scipy</code>) in the same step. If you use <code>dpkg -i</code> instead, follow it with
+<code>sudo apt-get install -f</code> to resolve them.</p>
+<p>Then run it from a terminal or from your desktop's application menu:</p>
+<pre><code class="language-bash">ultragps-control            # see `ultragps-control --help` for options
+</code></pre>
+<p>The package is architecture-independent (<code>all</code>), since it ships pure Python.</p>
+<h3 id="what-the-package-installs">What the package installs<a class="headerlink" href="#what-the-package-installs" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/usr/bin/ultragps-control</code></td>
+<td>launcher</td>
+</tr>
+<tr>
+<td><code>/usr/lib/python3/dist-packages/ultragps_*</code></td>
+<td>the five libraries</td>
+</tr>
+<tr>
+<td><code>/usr/share/ultragps-control/</code></td>
+<td>application modules</td>
+</tr>
+<tr>
+<td><code>/etc/ultragps-control/</code></td>
+<td>default <code>config.toml</code> and <code>barriers.toml</code></td>
+</tr>
+<tr>
+<td><code>/usr/share/applications/</code></td>
+<td>desktop menu entry</td>
+</tr>
+</tbody>
+</table>
+<p>The application modules are installed to a private directory rather than to
+<code>dist-packages</code> because module names like <code>graphics</code> and <code>windows</code> are too
+generic to sit on the global Python path. The launcher adds that directory to
+<code>sys.path</code> before importing them.</p>
+<div class="admonition note">
+<p class="admonition-title">Your settings are never overwritten</p>
+<p>Files under <code>/etc</code> are registered as conffiles, so local edits survive an
+upgrade. In practice the program copies them into
+<code>~/.config/ultragps-control/</code> the first time it saves anything, and works
+from there afterwards. See <a href="../configuration/">Configuration</a>.</p>
+</div>
+<h2 id="requirements">Requirements<a class="headerlink" href="#requirements" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Python 3.11 or later (for <code>tomllib</code>)</li>
+<li>PyQt6, Matplotlib, NumPy, SciPy</li>
+</ul>
+<p>On Ubuntu 24.04 / Debian 12 and later these are all available as system
+packages, which is what the <code>.deb</code> depends on.</p>
+<h2 id="development-checkout">Development checkout<a class="headerlink" href="#development-checkout" title="Permanent link">&para;</a></h2>
+<p>Clone the repository and run the installer, which creates a virtual environment
+and installs the third-party dependencies plus the five local libraries as
+editable installs:</p>
+<pre><code class="language-bash">git clone https://github.com/Imperious22M/UltraGPS-Control.git
+cd UltraGPS-Control
+./install.sh
+./run.sh
+</code></pre>
+<p><code>run.sh</code> invokes <code>.venv/bin/python graphics.py</code> directly, so there is no
+<code>activate</code> step. Both scripts accept the program's options:</p>
+<pre><code class="language-bash">./run.sh --ip 192.168.1.100
+</code></pre>
+<p>Because the libraries are installed editable, changes under <code>libs/</code> take effect
+immediately with no reinstall.</p>
+<h2 id="building-the-debian-package-locally">Building the Debian package locally<a class="headerlink" href="#building-the-debian-package-locally" title="Permanent link">&para;</a></h2>
+<p><code>build.sh</code> is the single entry point for packaging, cleaning, and previewing the
+docs. Building a <code>.deb</code> needs the Debian packaging tools:</p>
+<pre><code class="language-bash">sudo apt-get install -y debhelper dh-python pybuild-plugin-pyproject \
+                        python3-all python3-setuptools
+./build.sh deb            # → ./build/ultragps-control_&lt;version&gt;_all.deb
+sudo apt install ./build/ultragps-control_*_all.deb
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>./build.sh deb</code></td>
+<td>Build the Debian package into <code>./build/</code></td>
+</tr>
+<tr>
+<td><code>./build.sh clean</code></td>
+<td>Remove <code>./build/</code> and <code>./site/</code></td>
+</tr>
+<tr>
+<td><code>./build.sh docs</code></td>
+<td>Preview the documentation with live reload</td>
+</tr>
+<tr>
+<td><code>./build.sh docs-build</code></td>
+<td>Render the static documentation into <code>./site/</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Packaging builds in an isolated directory</p>
+<p>The <code>deb</code> target stages the source tree into a temporary directory under
+<code>/tmp</code>, builds there, and copies the finished <code>.deb</code> back into <code>./build/</code>.
+The working tree is left untouched, and <code>debian/changelog</code> is generated from
+the <code>VERSION</code> file rather than being committed.</p>
+</div>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../architecture/" class="btn btn-neutral float-left" title="Architecture"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../configuration/" class="btn btn-neutral float-right" title="Configuration">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Imperious22M/UltraGPS-Control" class="fa fa-code-fork" style="color: #fcfcfc"> Imperious22M/UltraGPS-Control</a>
+        </span>
+    
+    
+      <span><a href="../architecture/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../configuration/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

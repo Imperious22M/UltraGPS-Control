@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://imperious22m.github.io/UltraGPS-Control/developer-guide/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Developer's Guide - UltraGPS Control</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Developer\u0027s Guide";
+        var mkdocs_page_input_path = "developer-guide.md";
+        var mkdocs_page_url = "/UltraGPS-Control/developer-guide/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UltraGPS Control
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../configuration/">Configuration</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../usage/">Usage</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Developer's Guide</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#getting-set-up">Getting set up</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#repository-layout">Repository layout</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#where-to-make-a-change">Where to make a change</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#threading-rules">Threading rules</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#adding-a-panel">Adding a panel</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#adding-a-library">Adding a library</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#documentation">Documentation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cutting-a-release">Cutting a release</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#packaging-notes">Packaging notes</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UltraGPS Control</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Developer's Guide</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Imperious22M/UltraGPS-Control/edit/master/docs/developer-guide.md">Edit on Imperious22M/UltraGPS-Control</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="developers-guide">Developer's Guide<a class="headerlink" href="#developers-guide" title="Permanent link">&para;</a></h1>
+<h2 id="getting-set-up">Getting set up<a class="headerlink" href="#getting-set-up" title="Permanent link">&para;</a></h2>
+<pre><code class="language-bash">git clone https://github.com/Imperious22M/UltraGPS-Control.git
+cd UltraGPS-Control
+./install.sh          # creates .venv and installs everything
+./run.sh
+</code></pre>
+<p><code>install.sh</code> installs the third-party dependencies and the five libraries under
+<code>libs/</code> as <strong>editable</strong> installs, so edits inside <code>libs/</code> take effect without a
+reinstall. It finishes by importing every module to prove the environment works.</p>
+<h2 id="repository-layout">Repository layout<a class="headerlink" href="#repository-layout" title="Permanent link">&para;</a></h2>
+<pre><code>graphics.py            entry point
+SettingsModule.py      config discovery and config.toml read/write
+bin/ultragps-control   launcher used by the Debian package
+build.sh               packaging and docs
+install.sh / run.sh    development environment
+VERSION                single source of truth for the package version
+config/                default config.toml and barriers.toml
+debian/                Debian packaging
+docs/                  this documentation
+libs/                  the five libraries
+windows/               PyQt6 panels
+</code></pre>
+<h2 id="where-to-make-a-change">Where to make a change<a class="headerlink" href="#where-to-make-a-change" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Change</th>
+<th>Where it belongs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A new panel or widget</td>
+<td><code>windows/</code></td>
+</tr>
+<tr>
+<td>Protocol or wire format</td>
+<td><code>libs/ultragps_client</code>, <code>libs/ultragps_server</code></td>
+</tr>
+<tr>
+<td>Positioning maths</td>
+<td><code>libs/ultragps_position</code></td>
+</tr>
+<tr>
+<td>Barrier geometry or persistence</td>
+<td><code>libs/ultragps_barrier</code></td>
+</tr>
+<tr>
+<td>Calibration procedure</td>
+<td><code>libs/ultragps_calibration</code></td>
+</tr>
+<tr>
+<td>A new setting</td>
+<td><code>SettingsModule.py</code> — and see the warning below</td>
+</tr>
+</tbody>
+</table>
+<p>The dependency direction is one-way: libraries never import from <code>windows/</code> or
+<code>SettingsModule.py</code>. Keeping the maths and the protocol out of the GUI is what
+makes them testable without a running Qt application.</p>
+<div class="admonition warning">
+<p class="admonition-title">config.toml has three independent parsers</p>
+<p><code>SettingsModule</code> (read/write, with a hand-rolled TOML writer because
+<code>tomllib</code> is read-only), <code>ultragps_position.load_config</code> (read-only), and
+<code>UltraGPSCalibration._write_config</code> (read/write) each parse the file
+separately. A schema change has to be made in all three.</p>
+</div>
+<h2 id="threading-rules">Threading rules<a class="headerlink" href="#threading-rules" title="Permanent link">&para;</a></h2>
+<p>Two rules cover almost everything:</p>
+<ol>
+<li><strong>Only the main thread touches widgets.</strong> <code>NetworkThread</code> emits Qt signals;
+   Qt's queued connections deliver them on the GUI thread. Never call into a
+   widget or a Matplotlib canvas from a worker.</li>
+<li><strong>Whatever a panel starts, it stops.</strong> Threads and timers begun in
+   <code>on_panel_show()</code> must be shut down in <code>on_panel_hide()</code>, which runs both on
+   panel switches and on window close.</li>
+</ol>
+<p>Redraws are decoupled from data: a 20 Hz <code>QTimer</code> repaints from cached values, so
+the redraw cost does not scale with the position rate.</p>
+<h2 id="adding-a-panel">Adding a panel<a class="headerlink" href="#adding-a-panel" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Write a <code>QWidget</code> subclass in <code>windows/</code>, with <code>on_panel_show()</code> /
+   <code>on_panel_hide()</code> if it owns any background work.</li>
+<li>Register it in <code>UltraGPSMainWindow._init_panels()</code> under a short name.</li>
+<li>Add a button to <code>MainMenuPanel._build()</code> that calls <code>show_panel(&lt;name&gt;)</code>.</li>
+</ol>
+<p>Panels receive the shared <code>SettingsModule</code>, <code>UltraGPSClient</code>, position library
+and calibration objects from the main window — construct nothing that already
+exists there.</p>
+<h2 id="adding-a-library">Adding a library<a class="headerlink" href="#adding-a-library" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Create <code>libs/ultragps_&lt;name&gt;/</code> with a <code>pyproject.toml</code> and the package inside.</li>
+<li>Add <code>-e libs/ultragps_&lt;name&gt;</code> to <code>requirements.txt</code>.</li>
+<li>Add the import to the sanity check at the end of <code>install.sh</code>.</li>
+<li>Add the path to <code>.vscode/settings.json</code> so the editor resolves it.</li>
+<li>Add the source root to <code>[tool.setuptools.packages.find] where</code> in the root
+   <code>pyproject.toml</code>, or the Debian package will not ship it.</li>
+</ol>
+<h2 id="documentation">Documentation<a class="headerlink" href="#documentation" title="Permanent link">&para;</a></h2>
+<p>The site is MkDocs with the built-in <code>readthedocs</code> theme, built in <code>strict</code> mode
+so a broken internal link fails the build.</p>
+<pre><code class="language-bash">pip install -r docs/requirements.txt
+./build.sh docs          # live preview on http://127.0.0.1:8000
+./build.sh docs-build    # render into ./site
+</code></pre>
+<p>Pushing a change under <code>docs/</code> or <code>mkdocs.yml</code> to the <code>release</code> branch triggers
+<code>.github/workflows/docs.yml</code>, which runs <code>mkdocs gh-deploy</code> and publishes to the
+<code>gh-pages</code> branch. New pages must be added to the <code>nav:</code> list in <code>mkdocs.yml</code>.</p>
+<h2 id="cutting-a-release">Cutting a release<a class="headerlink" href="#cutting-a-release" title="Permanent link">&para;</a></h2>
+<p>A release is a <code>.deb</code> built and attached to a GitHub Release automatically.</p>
+<ol>
+<li>Bump the <code>VERSION</code> file. It is the only place the version is written —
+   <code>pyproject.toml</code> reads it, and <code>build.sh</code> generates <code>debian/changelog</code> from it.</li>
+<li>Test the package locally:</li>
+</ol>
+<p><code>bash
+   ./build.sh deb
+   sudo apt install ./build/ultragps-control_*_all.deb</code></p>
+<ol>
+<li>Commit, make sure <code>release</code> points at the commit you want to ship, then tag
+   and push:</li>
+</ol>
+<p><code>bash
+   git checkout release
+   git tag v1.0
+   git push origin v1.0</code></p>
+<p><code>.github/workflows/release.yml</code> takes over: it checks the tag matches <code>VERSION</code>
+(failing loudly if not), builds the <code>.deb</code>, and publishes it under the Releases
+tab with generated notes.</p>
+<h2 id="packaging-notes">Packaging notes<a class="headerlink" href="#packaging-notes" title="Permanent link">&para;</a></h2>
+<p>The package is built with <code>debhelper</code> and <code>dh-python</code>, driven by the root
+<code>pyproject.toml</code>.</p>
+<p>The five <code>ultragps_*</code> libraries install normally into <code>dist-packages</code>. The
+application itself does not: <code>graphics</code>, <code>SettingsModule</code> and <code>windows</code> are far
+too generic to occupy the global Python path, so they are installed to
+<code>/usr/share/ultragps-control/</code>, and <code>/usr/bin/ultragps-control</code> prepends that
+directory to <code>sys.path</code> before importing them.</p>
+<p>Runtime dependencies are satisfied by Debian's own packages
+(<code>python3-pyqt6</code>, <code>python3-matplotlib</code>, <code>python3-numpy</code>, <code>python3-scipy</code>) rather
+than by pip, which is why the package is <code>Architecture: all</code> and needs Ubuntu
+24.04 / Debian 12 or newer.</p>
+<p><code>build.sh deb</code> stages the tree into <code>/tmp</code>, builds there, and copies the result
+back into <code>./build/</code> — the working tree is never touched, and <code>debian/changelog</code>
+is generated rather than committed.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../usage/" class="btn btn-neutral float-left" title="Usage"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Imperious22M/UltraGPS-Control" class="fa fa-code-fork" style="color: #fcfcfc"> Imperious22M/UltraGPS-Control</a>
+        </span>
+    
+    
+      <span><a href="../usage/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
