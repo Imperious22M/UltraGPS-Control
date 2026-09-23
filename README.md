@@ -119,10 +119,22 @@ env -u VIRTUAL_ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
     ./build.sh deb
 ```
 
-The same applies to any other caller. `.github/workflows/release.yml` pins its
-build step to the system directories for this reason: GitHub's runners put a
-hosted tool-cache Python ahead of `/usr/bin`, and that one cannot import
-`build` either.
+The same guard rejects any other non-Debian interpreter, not just virtualenvs —
+only `/usr/bin/python3` can import `build` from `/usr/lib/python3/dist-packages`:
+
+```
+error: ./build.sh deb needs the system Python, but python3 here is
+    /opt/hostedtoolcache/Python/3.12.14/x64/bin/python3
+```
+
+This is why `.github/workflows/release.yml` leads with `/usr/bin` in its build
+step — GitHub's runners put a hosted tool-cache Python ahead of `/usr/bin`:
+
+```yaml
+run: |
+  export PATH="/usr/bin:$PATH"
+  bash build.sh deb
+```
 
 ### Building the documentation
 

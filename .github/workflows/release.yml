@@ -88,9 +88,16 @@ jobs:
         # /usr/lib/python3/dist-packages, where Debian's 'build' module lives --
         # pybuild would fail with "No module named build".  Pin the step to the
         # system directories so python3 is /usr/bin/python3.
-        run: bash build.sh deb
-        #env:
-        #  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        # build.sh uses the Python environment it is called in, so the caller
+        # supplies a system one.  Runners put a hosted tool-cache Python ahead
+        # of /usr/bin (/opt/hostedtoolcache/Python/<ver>/x64/bin), and that
+        # interpreter cannot import Debian's 'build' module from
+        # /usr/lib/python3/dist-packages -- pybuild then fails with "No module
+        # named build".  Leading with /usr/bin pins python3 to Debian's own,
+        # leaving the rest of PATH untouched.
+        run: |
+          export PATH="/usr/bin:$PATH"
+          bash build.sh deb
 
       - name: Create the GitHub Release and upload the .deb
         env:

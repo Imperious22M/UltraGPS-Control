@@ -102,14 +102,42 @@ require_debtools() {
 # from one fails with "No module named build".  A .deb has to be built against
 # the system Python, so say that plainly here instead of failing deeper in.
 require_system_python() {
-    local venv=""
+    local venv="" py
+    py="$(command -v python3 2>/dev/null || true)"
 
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then
         venv="$VIRTUAL_ENV"
-    elif python3 -c 'import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)' \
+    elif [[ -n "$py" ]] \
+         && python3 -c 'import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)' \
             2>/dev/null; then
         # Catches a venv that is on PATH without VIRTUAL_ENV being exported.
         venv="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)"
+    fi
+
+    # Not a virtualenv, but it still has to be Debian's own interpreter.  A
+    # second Python installed alongside the system one is just as unusable:
+    # 'build' lives in /usr/lib/python3/dist-packages, which only /usr/bin/python3
+    # has on sys.path.  CI images routinely ship one -- GitHub runners put
+    # /opt/hostedtoolcache/Python/<ver>/x64/bin ahead of /usr/bin.
+    if [[ -z "$venv" && -x /usr/bin/python3 && -n "$py" && "$py" != /usr/bin/python3 ]]; then
+        cat >&2 <<EOF
+error: ./build.sh deb needs the system Python, but python3 here is
+    ${py}
+
+A Debian package must be built with Debian's own interpreter.  pybuild builds
+the wheel with the python3 it finds in this environment, and only
+/usr/bin/python3 can import 'build' from /usr/lib/python3/dist-packages -- any
+other install fails with "No module named build".
+
+Put the system directories first and run it again:
+    PATH="/usr/bin:\$PATH" ./build.sh deb
+
+In GitHub Actions, do the same in the workflow step:
+    run: |
+      export PATH="/usr/bin:\$PATH"
+      bash build.sh deb
+EOF
+        exit 1
     fi
 
     [[ -z "$venv" ]] && return 0
