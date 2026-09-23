@@ -55,7 +55,10 @@ jobs:
       #    python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt --break-system-packages
+
+      #- name: Install Python numpy
+      #  run: pip install numpy
 
 
       - name: Determine the tag and verify it matches VERSION
