@@ -59,7 +59,9 @@ jobs:
             build-essential
 
       - name: Installs python dependencies
-      - uses: actions/setup-python@v7
+        uses: actions/setup-python@v7
+        with:
+          python-version: 3.12
         run: pip install -r requirements.txt
 
       - name: Verify the VERSION file matches the tag
