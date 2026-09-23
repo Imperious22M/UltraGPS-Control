@@ -14,3 +14,17 @@ export PYBUILD_NAME=ultragps-control
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
+
+# There are no tests in this source tree, but pybuild still runs
+# "python3 -m unittest discover" over the built wheel.  Discovery imports each
+# package it walks into, so ultragps_position pulls in numpy -- a *runtime*
+# dependency that is deliberately not a build dependency of this
+# Architecture: all package.  On a machine without python3-numpy installed that
+# import fails and the build dies:
+#
+#     ModuleNotFoundError: No module named 'numpy'
+#     dh_auto_test: error: pybuild --test ... returned exit code 13
+#
+# An empty override skips the step.  Restore it (and add the runtime modules to
+# Build-Depends) if real tests are ever added.
+override_dh_auto_test:
