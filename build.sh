@@ -54,50 +54,6 @@ Releasing:
 EOF
 }
 
-# Compute $PATH with any activated virtualenv removed.
-#
-# Debian packaging has to build against the system Python and Debian's own
-# python3-* modules.  When ./build.sh runs with the project venv activated, its
-# bin directory comes first on PATH, so pybuild invokes .venv/bin/python3.12 --
-# which has no 'build' module and fails with:
-#
-#     .venv/bin/python3.12: No module named build
-#
-# The venv exists for ./run.sh; packaging must never see it.
-#
-# Outputs of sanitize_path(): the cleaned PATH, and whether a virtualenv
-# directory was actually removed (so the notice only prints when it was).
-# Set directly rather than echoed, because a command substitution would run the
-# function in a subshell and lose the flag.
-CLEAN_PATH=""
-STRIPPED_VENV=0
-
-sanitize_path() {
-    local out="" entry
-    STRIPPED_VENV=0
-    while IFS= read -r entry; do
-        [[ -z "$entry" ]] && continue
-        # Drop the active venv's directories...
-        if [[ -n "${VIRTUAL_ENV:-}" && ( "$entry" == "$VIRTUAL_ENV" || "$entry" == "$VIRTUAL_ENV"/* ) ]]; then
-            STRIPPED_VENV=1
-            continue
-        fi
-        # ...and any bin dir inside the project tree (.venv/bin, venv/bin),
-        # which catches a venv that was put on PATH without VIRTUAL_ENV set.
-        if [[ "$entry" == "$PROJECT_DIR"/* ]]; then
-            STRIPPED_VENV=1
-            continue
-        fi
-        out="${out:+$out:}$entry"
-    done < <(printf '%s\n' "$PATH" | tr ':' '\n')
-
-    # Never hand back an empty PATH.
-    if [[ -z "$out" ]]; then
-        out="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    fi
-    CLEAN_PATH="$out"
-}
-
 # Staging directory for the 'deb' target, removed by cleanup_tmp() on exit.
 TMP_BUILD_DIR=""
 
@@ -135,6 +91,46 @@ require_debtools() {
         echo "    sudo apt-get install -y debhelper dh-python pybuild-plugin-pyproject python3-all python3-setuptools" >&2
         exit 1
     fi
+}
+
+# Refuse to package from inside a virtualenv.
+#
+# dpkg-buildpackage, debhelper and pybuild all inherit this environment, and
+# pybuild builds the wheel with whatever python3 it finds.  A virtualenv's
+# interpreter cannot see /usr/lib/python3/dist-packages -- where Debian's
+# 'build' module and the python3-* runtime dependencies live -- so packaging
+# from one fails with "No module named build".  A .deb has to be built against
+# the system Python, so say that plainly here instead of failing deeper in.
+require_system_python() {
+    local venv=""
+
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        venv="$VIRTUAL_ENV"
+    elif python3 -c 'import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)' \
+            2>/dev/null; then
+        # Catches a venv that is on PATH without VIRTUAL_ENV being exported.
+        venv="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)"
+    fi
+
+    [[ -z "$venv" ]] && return 0
+
+    cat >&2 <<EOF
+error: ./build.sh deb is running inside a virtualenv:
+    ${venv}
+
+A Debian package must be built against the system Python.  pybuild builds the
+wheel with the python3 it finds in this environment, and a virtualenv cannot
+import Debian's 'build' module from /usr/lib/python3/dist-packages, so the
+build would fail with "No module named build".
+
+Leave the virtualenv and run it again:
+    deactivate && ./build.sh deb
+
+If 'deactivate' is not defined -- the venv is on PATH from your shell profile
+rather than a sourced activate -- run it from a clean environment instead:
+    env -u VIRTUAL_ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ./build.sh deb
+EOF
+    exit 1
 }
 
 # Validate the version and pick up the maintainer before packaging.
@@ -183,6 +179,7 @@ EOF
 }
 
 cmd_deb() {
+    require_system_python
     require_debtools
     require_release_metadata
 
@@ -212,27 +209,8 @@ cmd_deb() {
 
     write_changelog "$src"
 
-    # Packaging runs under the system Python, never the project venv.
-    local clean_path
-    sanitize_path
-    clean_path="$CLEAN_PATH"
-    if (( STRIPPED_VENV )); then
-        echo ">> Ignoring the active virtualenv; packaging uses the system Python."
-    fi
-
-    # pybuild shells out to "python3 -m build"; check it up front so a missing
-    # python3-build is a one-line error instead of a pybuild traceback.
-    if ! env -u VIRTUAL_ENV -u PYTHONPATH -u PYTHONHOME PATH="$clean_path" \
-             python3 -c 'import build' 2>/dev/null; then
-        echo "error: the system python3 cannot import the 'build' module." >&2
-        echo "Install it with:" >&2
-        echo "    sudo apt-get install -y python3-build" >&2
-        exit 1
-    fi
-
     echo ">> Building the package (version ${VERSION}) ..."
-    ( cd "$src" && env -u VIRTUAL_ENV -u PYTHONPATH -u PYTHONHOME \
-        PATH="$clean_path" dpkg-buildpackage -us -uc -b )
+    ( cd "$src" && dpkg-buildpackage -us -uc -b )
 
     # dpkg-buildpackage writes the artefacts into the parent of the source dir.
     local built="$TMP_BUILD_DIR/ultragps-control_${VERSION}_all.deb"

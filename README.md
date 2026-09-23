@@ -96,15 +96,33 @@ sudo apt install ./build/ultragps-control_*_all.deb
 > `/tmp` and builds there, so the working tree is left untouched.
 
 A Debian package is built against the **system** Python and Debian's own
-`python3-*` modules — never the development virtualenv, which has no `build`
-module and would fail with `No module named build`. `build.sh` drops any
-activated virtualenv from the packaging environment itself, reporting
+`python3-*` modules. pybuild's `build` module ships in
+`/usr/lib/python3/dist-packages`, which only Debian's `/usr/bin/python3` has on
+`sys.path` — any other interpreter found first on `PATH` fails with
+`No module named build`.
+
+`build.sh` does not rearrange your environment — it builds with the Python it is
+called with, so **run `./build.sh deb` from a system shell, not from the
+development virtualenv**. It refuses to start inside one rather than failing
+halfway through:
 
 ```
->> Ignoring the active virtualenv; packaging uses the system Python.
+error: ./build.sh deb is running inside a virtualenv:
+    /path/to/UltraGPS-Control/.venv
 ```
 
-when it does, so `./build.sh deb` is safe to run with `.venv` on your `PATH`.
+If `deactivate` is not defined — the venv is on your `PATH` from a shell profile
+rather than a sourced `activate` — run it from a clean environment:
+
+```bash
+env -u VIRTUAL_ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    ./build.sh deb
+```
+
+The same applies to any other caller. `.github/workflows/release.yml` pins its
+build step to the system directories for this reason: GitHub's runners put a
+hosted tool-cache Python ahead of `/usr/bin`, and that one cannot import
+`build` either.
 
 ### Building the documentation
 
