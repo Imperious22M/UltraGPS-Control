@@ -89,8 +89,8 @@ jobs:
         # pybuild would fail with "No module named build".  Pin the step to the
         # system directories so python3 is /usr/bin/python3.
         run: bash build.sh deb
-        env:
-          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        #env:
+        #  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
       - name: Create the GitHub Release and upload the .deb
         env:
