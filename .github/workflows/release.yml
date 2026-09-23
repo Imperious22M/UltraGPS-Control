@@ -46,6 +46,7 @@ jobs:
             pybuild-plugin-pyproject \
             python3-all \
             python3-setuptools \
+            python3-build \
             build-essential
 
       - name: Set up Python
