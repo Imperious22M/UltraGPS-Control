@@ -37,6 +37,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
       - name: Install the Debian packaging tools
         run: |
           sudo apt-get update
@@ -48,14 +56,6 @@ jobs:
             python3-setuptools \
             python3-build \
             build-essential
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
 
       - name: Determine the tag and verify it matches VERSION
         run: |
