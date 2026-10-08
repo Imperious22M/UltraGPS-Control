@@ -100,7 +100,7 @@ class UltraGPSPositionLib:
                           positions and per-receiver calibration offsets.
         max_differential: Maximum allowed jump in distance (cm) between two
                           consecutive readings before a receiver is flagged as
-                          noisy.  Default: 30.
+                          noisy.  Default: 50.
     """
 
     def __init__(self, config_path: str, max_differential: float = 50.0):
