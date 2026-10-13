@@ -27,6 +27,9 @@ depend on the GUI.
 
 The ground-station program must be running before this one is started.
 
+To try the positioning algorithms without any hardware, see the
+[positioning simulator](simulator/README.md).
+
 See the [full documentation](https://imperious22m.github.io/UltraGPS-Control/)
 for architecture, configuration, and usage.
 
