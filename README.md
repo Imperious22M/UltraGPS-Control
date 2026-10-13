@@ -55,6 +55,16 @@ ultragps-control --ip 192.168.1.100
 On Ubuntu 24.04 / Debian 12 and later these are all available as system packages,
 which is what the `.deb` depends on — no pip needed for an installed copy.
 
+## Simulator
+
+`simulator/` holds a standalone simulator of the receivers that drives the real
+positioning library, for comparing the algorithms under noise, dropouts and
+dead receivers without any hardware. See [simulator/README.md](simulator/README.md).
+
+```bash
+python3 simulator/app.py
+```
+
 ## Development checkout
 
 ```bash
