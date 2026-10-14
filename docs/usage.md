@@ -110,6 +110,23 @@ easier to reason about when debugging.
 
 Barriers are drawn on the arena and flash when they trigger.
 
+### Logging
+
+While **Log to file** is ticked (the default), every fix is recorded to a
+`log` folder: `log/` beside the application when running from a source
+checkout, or `~/.local/share/ultragps-control/log` for an installed package.
+Each time the position view starts, or logging is switched back on, a new pair
+of files is created, named after the start time:
+
+- `positions_<date>_<time>.csv` — written row by row, so it survives a crash.
+- `positions_<date>_<time>.xlsx` — the same rows as a spreadsheet, saved when
+  logging stops (leaving the view, unticking the box, or closing the app).
+
+Columns: `timestamp_s` (monotonic seconds since the log started, always
+increasing), `mode` (continuous or pulse), the six raw `ticks_N`, the six
+calibrated `distance_N_cm`, the LM position and success flag, the CEP position
+and success flag, and the receivers that passed the sanity filter.
+
 ## Barriers
 
 An interactive editor for the virtual zones that fire events when the

@@ -24,6 +24,7 @@ dependencies = [
     "numpy",
     "PyQt6>=6.4.0",
     "scipy",
+    "openpyxl",
 ]
 
 [project.urls]

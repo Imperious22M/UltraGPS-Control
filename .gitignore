@@ -28,3 +28,6 @@ debian/*.debhelper.log
 # Agent instructions
 AGENTS.md
 CLAUDE.md
+
+# Position logs written by the position panel
+log/

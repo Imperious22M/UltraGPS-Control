@@ -18,7 +18,8 @@ Depends: ${python3:Depends},
          python3-matplotlib,
          python3-numpy,
          python3-pyqt6,
-         python3-scipy
+         python3-scipy,
+         python3-openpyxl
 Description: Ground-station GUI for the UltraGPS positioning system
  UltraGPS Control is the operator interface for the St. Mary's University
  UltraGPS indoor positioning system.

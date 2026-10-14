@@ -29,6 +29,7 @@ from ultragps_position import UltraGPSPositionLib
 from SettingsModule import SettingsModule
 from ultragps_barrier import BarrierManager, BarrierEvent, EventType, load_images
 from ultragps_server import send_position, send_nmea, send_barrier_event
+from windows.position_logger import PositionLogger
 
 _SRV_POS       = "pos"
 _SRV_NMEA      = "nmea"
@@ -70,9 +71,26 @@ class NetworkThread(QThread):
         self._server = server
         self._active = False
         self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
+        self._logging_enabled = True
+        self._logger = None
 
     def set_mode(self, use_continuous: bool) -> None:
         self._use_continuous = use_continuous
+
+    def set_logging(self, enabled: bool) -> None:
+        self._logging_enabled = enabled
+
+    def _update_logger(self) -> None:
+        """Open or close the log files to match the logging toggle."""
+        if self._logging_enabled and self._logger is None:
+            try:
+                self._logger = PositionLogger()
+            except Exception as exc:
+                print(f"Could not start position log: {exc}")
+                self._logging_enabled = False
+        elif not self._logging_enabled and self._logger is not None:
+            self._logger.close()
+            self._logger = None
 
     def run(self) -> None:
         self._active = True
@@ -84,6 +102,7 @@ class NetworkThread(QThread):
 
         while self._active:
             current_continuous = self._use_continuous
+            self._update_logger()
 
             # Handle mode transitions
             if current_continuous != prev_continuous:
@@ -111,6 +130,12 @@ class NetworkThread(QThread):
                     continue
                 else:
                     result = self._position_lib.get_position_full(ticks)
+
+                if self._logger is not None:
+                    try:
+                        self._logger.log(ticks, result, current_continuous)
+                    except Exception as exc:
+                        print(f"Position log error: {exc}")
 
                 raw_distances = result.get("distances")
                 sane_indices  = result.get("sane_indices", [])
@@ -163,6 +188,9 @@ class NetworkThread(QThread):
                 if current_continuous:
                     time.sleep(0.1)
 
+        if self._logger is not None:
+            self._logger.close()
+            self._logger = None
         print("NetworkThread stopped")
 
     def stop(self) -> None:
@@ -240,6 +268,7 @@ class PositionPanel(QWidget):
         self._net_thread.pos_per_sec_updated.connect(self._on_pos_sec_updated)
         self._net_thread.barrier_triggered.connect(self._handle_barrier_event)
         self._mode_cb.toggled.connect(self._net_thread.set_mode)
+        self._log_cb.toggled.connect(self._net_thread.set_logging)
 
         # Canvas refresh at every 50 ms (started/stopped with panel visibility)
         self._refresh_timer = QTimer(self)
@@ -483,6 +512,11 @@ class PositionPanel(QWidget):
         self._pos_sec_label.setStyleSheet("color:#AAAAAA;")
         self._pos_sec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         perf_layout.addWidget(self._pos_sec_label)
+
+        self._log_cb = QCheckBox("Log to file")
+        self._log_cb.setChecked(True)
+        self._log_cb.setStyleSheet("color:#AAAAAA; font:bold 10px Arial;")
+        perf_layout.addWidget(self._log_cb, alignment=Qt.AlignmentFlag.AlignCenter)
         ctrl_layout.addWidget(perf_group)
 
         # Navigation buttons
