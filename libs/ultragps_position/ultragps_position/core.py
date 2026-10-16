@@ -100,12 +100,23 @@ class UltraGPSPositionLib:
                           positions and per-receiver calibration offsets.
         max_differential: Maximum allowed jump in distance (cm) between two
                           consecutive readings before a receiver is flagged as
-                          noisy.  Default: 50.
+                          noisy.  Default: 30.
+        max_distance:     Top-band reject (cm): readings above this are
+                          discarded by the sanity filter.  A receiver that
+                          loses the signal can report a very high value.
+                          ``None`` (default) uses the maximum pairwise
+                          receiver distance.  May be changed at any time.
     """
 
-    def __init__(self, config_path: str, max_differential: float = 50.0):
+    def __init__(
+        self,
+        config_path: str,
+        max_differential: float = 50.0,
+        max_distance: Optional[float] = None,
+    ):
         self._config_path: str = os.path.abspath(config_path)
         self.max_differential: float = max_differential
+        self.max_distance: Optional[float] = max_distance
 
         # ── Geometry / calibration (populated by _init_from_config) ──────────
         self._receiver_count: int = 0
@@ -498,9 +509,12 @@ class UltraGPSPositionLib:
     def _filter_receivers(self, distances: tuple) -> np.ndarray:
         """Return indices of receivers that pass both sanity checks:
 
-        1. **Bounds check** — reported distance ≤ maximum pairwise receiver
-           distance (a reading larger than this cannot be physically valid
-           within the arena).
+        1. **Bounds check** — reported distance is > 0 and ≤ the top-band
+           reject ``max_distance`` (default: maximum pairwise receiver
+           distance, as a reading larger than this cannot be physically valid
+           within the arena; a receiver that loses the signal can report a
+           very high value).  A dead or missed receiver reports 0 ticks,
+           which calibrates to its negative intercept.
         2. **Differential check** — absolute change from the previous reading
            is below ``max_differential`` (cm).  This check is skipped on the
            first call when no prior data exists.
@@ -508,7 +522,8 @@ class UltraGPSPositionLib:
         Updates ``_last_distances`` and ``_last_sane_indices`` in-place.
         """
         arr           = np.array(distances, dtype=float)
-        within_bounds = arr <= self._max_receiver_dist
+        top           = self.max_distance if self.max_distance is not None else self._max_receiver_dist
+        within_bounds = (arr > 0) & (arr <= top)
 
         if self._last_distances is None:
             self._last_distances    = arr.copy()

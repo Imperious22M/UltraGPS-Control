@@ -4,60 +4,60 @@ calibration_reads = 5
 number_of_receivers = 6
 serial_port = '/dev/ttyACM0'
 units = 'cm'
-cal_point_1 = [0.0, 60.5]
-cal_point_2 = [-30.0, 0.0]
+cal_point_1 = [0.0, 59.0]
+cal_point_2 = [-59.0, 0.0]
 
 [[receivers]]
-cal_distances = [203.03511984104713, 135.50645741070792]
+cal_distances = [212.72752525237536, 131.9280106724876]
 id = 0
-position = [-91.0, -121.0]
+position = [-118.0, -118.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = -64.06260674436834
+    slope = 0.4143564850250654
 
 [[receivers]]
-cal_distances = [109.27602664811711, 61.0]
+cal_distances = [131.9280106724876, 59.0]
 id = 1
-position = [-91.0, 0.0]
+position = [-118.0, 0.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = -57.68481707598016
+    slope = 0.3942054630945276
 
 [[receivers]]
-cal_distances = [109.27602664811711, 135.50645741070792]
+cal_distances = [131.9280106724876, 131.9280106724876]
 id = 2
-position = [-91.0, 121.0]
+position = [-118.0, 118.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = 131.9280106724876
+    slope = 0.3942054630945276
 
 [[receivers]]
-cal_distances = [203.03509548844013, 171.11984104714452]
+cal_distances = [212.72752525237536, 212.72752525237536]
 id = 3
-position = [91.0, -121.0]
+position = [118.0, -118.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = 212.72752525237536
+    slope = 0.3942054630945276
 
 [[receivers]]
-cal_distances = [109.27602664811711, 121.0]
+cal_distances = [131.9280106724876, 177.0]
 id = 4
-position = [91.0, 0.0]
+position = [118.0, 0.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = -70.69291432236543
+    slope = 0.40605395790551707
 
 [[receivers]]
-cal_distances = [109.27602664811711, 171.1198410471445]
+cal_distances = [131.9280106724876, 212.72752525237536]
 id = 5
-position = [91.0, 121.0]
+position = [118.0, 118.0]
 
     [receivers.offset]
-    intercept = -135.98455877447253
-    slope = 0.9253547137589414
+    intercept = -71.09615032773797
+    slope = 0.4101498202024759
 
