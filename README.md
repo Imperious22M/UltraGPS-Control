@@ -13,19 +13,47 @@ host. It:
   per-receiver tick counts.
 - Converts them into a **2D position** by multilateration, running two solvers
   side by side — an OLS-seeded Levenberg-Marquardt fit and a CEP best-subset
-  search — so their disagreement flags an unreliable fix.
+  search — so their disagreement flags an unreliable fix. The position panel
+  also shows the **HDOP** of each fix and how many receivers passed the sanity
+  filter.
 - Displays the result live on an arena plot with per-receiver distance traces.
-- Provides panels for **arena setup**, **two-point calibration**, and drawing
-  **virtual barriers** that fire events when the transmitter crosses them.
+- **Calibrates** the receivers on 2 to 4 points placed anywhere in the arena:
+  click them on the arena, type their coordinates, or give them as an offset
+  from (0, 0), a receiver or another point. The arena is shaded **green where a
+  point calibrates best**, using the UltraGPS Simulator's scoring; **Find best
+  points** searches for the best set, and every point is checked before a run.
+  A separate **origin tool** moves (0, 0) — picked, typed, offset, or measured
+  by standing the transmitter on the mark — and an **accuracy check** measures
+  the transmitter on a known point.
+- Lays out the arena (**Setup**): receivers placed by clicking or dragging them
+  on the arena (or typed), each with a facing, or built from a W × H rectangle
+  or tape-measure distances. A **coverage estimate** shades how many receivers
+  hear each spot, or the fix precision (HDOP), under the simulator's receiver
+  model or the HC-SR04 datasheet's limits, with both summarised side by side.
+- Exposes the base station on a **Base Station** panel: trigger rate (`F`),
+  sampling window (`H`), baud rate (`B`, read-only), burst-delay sweep (`D`)
+  and default (`E`), reset transmitter (`R`), reset settings (`M`), and test
+  pulses (`P`, `S`, live `C`), each explained in terms of range, update rate
+  and calibration.
+- Draws **virtual barriers** that fire events when the transmitter crosses
+  them.
 - **Re-broadcasts** every position over TCP and UDP — as a coordinate, as an
   NMEA `$GPGGA` sentence, and as barrier events — so other programs on the
   network can consume the feed.
 
-It is a PyQt6 + Matplotlib application. The protocol, the positioning maths and
-the barrier geometry live in five separate libraries under `libs/`, none of which
-depend on the GUI.
+The window adapts to the screen: controls, text and plots scale with the window
+size, from a 1024×600 laptop screen up to a 4K monitor.
 
-The ground-station program must be running before this one is started.
+It is a PyQt6 + Matplotlib application. The protocol, the positioning maths, the
+calibration and coverage models and the barrier geometry live in five separate
+libraries under `libs/`, none of which depend on the GUI.
+
+The ground-station program must be running before this one is started. If it
+is not — or another program holds its only client slot — UltraGPS Control says
+so, shows how to start it, and offers **Retry** / **Quit** instead of crashing.
+Once running, a link indicator at the bottom of every panel shows the
+connection, and a lost ground station is reconnected automatically in the
+background.
 
 See the [full documentation](https://imperious22m.github.io/UltraGPS-Control/)
 for architecture, configuration, and usage.
@@ -47,10 +75,29 @@ Then run it, pointing it at the ground-station host:
 ultragps-control --ip 192.168.1.100
 ```
 
+### Options
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `--ip HOST` | `127.0.0.1` | Address (or host name) of the computer running `UltraGpsXY` |
+| `--ground-tcp-port PORT` | `9000` | Its TCP command port (`UltraGpsXY -t`) |
+| `--ground-udp-port PORT` | `9001` | Its UDP stream port (`UltraGpsXY -u`) |
+| `--config PATH` | search path | Use this `config.toml` (see [Configuration](#configuration)) |
+| `-v`, `--verbose` | off | Log debug messages |
+| `-h`, `--help` | — | Show usage |
+
+### Exit status
+
+| Status | When |
+|-------:|------|
+| `0` | The window was closed normally |
+| `1` | It could not start: no ground station (or it was busy) and you chose **Quit** or pressed Ctrl+C, a position-feed port (`8000`–`8004`) is already in use — usually by another UltraGPS Control — or `config.toml` could not be read |
+| `130` / `143` | Stopped by Ctrl+C (`SIGINT`) / `SIGTERM` once running (128 + the signal number); the window closes cleanly first |
+
 ## Requirements
 
 - Python 3.11 or later (for `tomllib`)
-- PyQt6, Matplotlib, NumPy, SciPy
+- PyQt6, Matplotlib, NumPy, SciPy, openpyxl
 
 On Ubuntu 24.04 / Debian 12 and later these are all available as system packages,
 which is what the `.deb` depends on — no pip needed for an installed copy.
@@ -67,6 +114,11 @@ cd UltraGPS-Control
 `install.sh` installs the libraries as editable installs, so changes under
 `libs/` take effect with no reinstall. `run.sh` calls `.venv/bin/python` directly
 — there is no `activate` step.
+
+The program will not start without a ground station. To try it on a computer
+with no UltraGPS hardware, run the small stand-in ground station from the
+[Developer's Guide](https://imperious22m.github.io/UltraGPS-Control/developer-guide/#running-without-the-hardware)
+first.
 
 ## Using the build script
 
@@ -168,6 +220,10 @@ the whole directory — `resources/` included — into `~/.config/ultragps-contr
 and continues from there, so an installed package's defaults are never modified.
 `--config <path>` bypasses the search.
 
+Every save keeps the keys it does not know about, so hand-added settings survive.
+Moving the arena's (0, 0) rewrites `config.toml` and `barriers.toml` together, so
+the barriers stay on the same spot of the floor.
+
 See [Configuration](https://imperious22m.github.io/UltraGPS-Control/configuration/)
 for the file formats.
 
@@ -187,4 +243,5 @@ workflow fails if the tag doesn't match `VERSION`.
 ## Developer's Guide
 
 See the **[Developer's Guide](https://imperious22m.github.io/UltraGPS-Control/developer-guide/)**
-in the documentation for the architecture, threading rules, and packaging notes.
+in the documentation for the architecture, threading and scaling rules, running
+without the hardware, and packaging notes.

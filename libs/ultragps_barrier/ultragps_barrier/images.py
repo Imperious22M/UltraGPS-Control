@@ -9,6 +9,7 @@ import os
 import tomllib
 
 from .core import ImageOverlay, BarrierData
+from .persistence import _atomic_write_text, _barriers_toml, _section, _toml_string
 
 
 # ---------------------------------------------------------------------------
@@ -23,8 +24,17 @@ def load_images(filepath: str) -> list[ImageOverlay]:
     with open(filepath, 'rb') as f:
         data = tomllib.load(f)
 
+    return _images_from_data(data)
+
+
+def _images_from_data(data: dict) -> list[ImageOverlay]:
+    """Build the image overlays of an already parsed barriers.toml.
+
+    Malformed entries are skipped with a printed warning, and so is an
+    ``image`` value that is not a list of tables (``image = 7``).
+    """
     images: list[ImageOverlay] = []
-    for entry in data.get('image', []):
+    for entry in _section(data, 'image'):
         try:
             overlay = ImageOverlay(
                 name=entry['name'],
@@ -35,7 +45,7 @@ def load_images(filepath: str) -> list[ImageOverlay]:
                 height_cm=float(entry['height_cm']),
                 rotation_deg=float(entry.get('rotation_deg', 0.0)),
             )
-        except (KeyError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             print(f"Warning: skipping malformed image entry: {exc}")
             continue
         images.append(overlay)
@@ -52,23 +62,28 @@ def save_all(
     barriers: list[BarrierData],
     images: list[ImageOverlay],
 ) -> None:
-    """Write barriers and image overlays to a single TOML file."""
-    from .persistence import save_barriers as _save_barriers
-    # Write barriers first (creates/overwrites the file)
-    _save_barriers(filepath, barriers)
+    """Write barriers and image overlays to a single TOML file.
 
-    # Append image sections
-    with open(filepath, 'a') as f:
-        for img in images:
-            f.write("[[image]]\n")
-            f.write(f'name = "{img.name}"\n')
-            f.write(f'filename = "{img.filename}"\n')
-            f.write(f'center_x = {float(img.center_x)}\n')
-            f.write(f'center_y = {float(img.center_y)}\n')
-            f.write(f'width_cm = {float(img.width_cm)}\n')
-            f.write(f'height_cm = {float(img.height_cm)}\n')
-            f.write(f'rotation_deg = {float(img.rotation_deg)}\n')
-            f.write('\n')
+    The ``[[barrier]]`` sections come first, then the ``[[image]]`` sections;
+    the file is replaced atomically.
+    """
+    _atomic_write_text(filepath, _barriers_toml(barriers) + _images_toml(images))
+
+
+def _images_toml(images: list[ImageOverlay]) -> str:
+    """The ``[[image]]`` sections for *images*, as barriers.toml text."""
+    lines: list[str] = []
+    for img in images:
+        lines.append("[[image]]")
+        lines.append(f'name = {_toml_string(img.name)}')
+        lines.append(f'filename = {_toml_string(img.filename)}')
+        lines.append(f'center_x = {float(img.center_x)}')
+        lines.append(f'center_y = {float(img.center_y)}')
+        lines.append(f'width_cm = {float(img.width_cm)}')
+        lines.append(f'height_cm = {float(img.height_cm)}')
+        lines.append(f'rotation_deg = {float(img.rotation_deg)}')
+        lines.append('')
+    return "".join(line + "\n" for line in lines)
 
 
 # ---------------------------------------------------------------------------

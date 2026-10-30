@@ -1,40 +1,125 @@
 """Position tracking panel.
 
-Contains NetworkThread (QThread) for continuous position calculation and
-PositionPanel (QWidget) for display.  All positioning logic lives here.
+``NetworkThread`` (a QThread) gets the transmitter's ticks from the ground
+station -- every continuous (UDP) reading exactly once, or one pulse (TCP)
+after another -- solves each with the position library, checks the barriers,
+feeds the position server and the position log, and hands every fix to the
+panel through a signal.  It rides out a lost ground-station link: it waits
+while the main window reconnects, then starts the continuous stream again (a
+reconnected client is back in normal mode), and it re-sends the continuous
+command, backing off, while the stream stays silent.
+
+``PositionPanel`` shows the arena (receivers, barriers, image overlays, the
+LM and CEP fixes with their trails), each receiver's distance history, the
+HDOP of the current fix, how many receivers passed the sanity filter, and the
+tracking state.  A timer redraws the canvas, and only when something changed,
+so the redraw cost does not follow the reading rate.
 """
 
+import functools
+import logging
 import math
 import os
+import threading
 import time
-import numpy as np
 from collections import deque
+from dataclasses import dataclass
 
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QFrame,
-    QMessageBox,
-)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+import numpy as np
 
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+import matplotlib.image as mpl_image
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Circle, Polygon as MplPolygon
 from matplotlib.transforms import Affine2D
-import matplotlib.image as mpl_image
 
-from ultragps_client import UltraGPSClient
-from ultragps_position import UltraGPSPositionLib
-from SettingsModule import SettingsModule
-from ultragps_barrier import BarrierManager, BarrierEvent, EventType, load_images
-from ultragps_server import send_position, send_nmea, send_barrier_event
+from SettingsModule import RECEIVER_COUNT, SettingsModule
+from ultragps_barrier import BarrierEvent, BarrierManager, EventType, load_images
+from ultragps_client import DEFAULT_TRIGGER_RATE_HZ, CommMode, UltraGPSClient
+from ultragps_position import UltraGPSPositionLib, coverage
+from ultragps_server import send_barrier_event, send_nmea, send_position
+from windows import ui_scale, widgets
+from windows.arena_view import RECEIVER_COLOR, ArenaView
 from windows.position_logger import PositionLogger
+from windows.ui_scale import ScalingCanvas
+
+log = logging.getLogger(__name__)
 
 _SRV_POS       = "pos"
 _SRV_NMEA      = "nmea"
 _SRV_BARR_TCP  = "barrier_tcp"
 _SRV_BARR      = "barrier"
+
+CEP_COLOR = "#FFFF00"
+
+# Tracking loop timing (seconds)
+READING_WAIT_S = 0.25                    # longest wait for a continuous reading between checks
+LINK_DOWN_POLL_S = 0.25                  # how often a lost link is checked again
+PULSE_RETRY_S = 0.5                      # pause after a pulse that failed at once
+STREAM_RETRY_S = (1.0, 2.0, 5.0, 10.0)   # gap before the 1st, 2nd, 3rd, later re-sent 'C'
+STALL_PERIODS = 3                        # trigger periods without a reading: the stream stalled
+STALL_MIN_S = 1.0                        # ... but never less than this
+ERROR_LOG_INTERVAL_S = 5.0               # a repeating error is logged at most this often
+STOP_TIMEOUT_MS = 10000                  # stop() waits this long at most (a pulse takes <= 3.3 s)
+
+#: HDOP up to these values is shown green / gold; above, orange.
+HDOP_GOOD = 1.5
+HDOP_FAIR = 3.0
+
+# Tracking states shown on the panel: (text, colour)
+STATE_LINK_DOWN = ("Ground station link down: tracking paused until it reconnects", widgets.RED)
+STATE_STARTING = ("Starting the continuous stream…", widgets.AMBER)
+STATE_STREAMING = ("Tracking: continuous stream (UDP)", widgets.GREEN)
+STATE_POLLING = ("Tracking: pulse mode (TCP)", widgets.GREEN)
+STATE_NO_REPLY = ("No reply to the pulses: is the base station running?", widgets.AMBER)
+
+
+@dataclass(frozen=True)
+class Fix:
+    """One solved reading.
+
+    Attributes:
+        ticks:       The 6 raw tick counts (0 = no echo).
+        distances:   Calibrated distance per receiver, cm.
+        sane:        Receivers (0-based ids) that passed the sanity filter.
+        lm:          LM position (x, y) or None; the library's last good
+                     position when this reading gave none.
+        lm_success:  The LM solve of this reading converged.
+        cep:         CEP position (x, y) or None (last good, as for ``lm``).
+        cep_success: The CEP solve of this reading found a valid position.
+        hdop:        HDOP of this fix over the sane receivers (inf: no fix).
+        continuous:  Read from the continuous stream (else a pulse).
+        session:     The thread's run that made it (``NetworkThread.session``).
+    """
+
+    ticks: tuple
+    distances: tuple
+    sane: tuple
+    lm: tuple | None
+    lm_success: bool
+    cep: tuple | None
+    cep_success: bool
+    hdop: float
+    continuous: bool
+    session: int = 0
+
+
+def _xy(position) -> tuple | None:
+    """A solver position as a finite (x, y) tuple, or None."""
+    if position is None:
+        return None
+    x, y = float(position[0]), float(position[1])
+    return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+
+def _close_log(logger: PositionLogger) -> None:
+    """Close ``logger`` (the CSV, then the spreadsheet); a failure is logged."""
+    try:
+        logger.close()
+    except Exception:
+        log.exception("Could not close the position log")
 
 
 # ---------------------------------------------------------------------------
@@ -42,20 +127,19 @@ _SRV_BARR      = "barrier"
 # ---------------------------------------------------------------------------
 
 class NetworkThread(QThread):
-    """Runs the continuous position loop in a background thread.
+    """Runs the position loop in a background thread.
 
     Emits signals for each piece of data so the GUI can update safely on the
-    main thread via Qt's queued connection mechanism.
+    main thread via Qt's queued connection mechanism.  ``stop()`` returns only
+    once the thread has ended, so the shared position library is free again
+    (the calibration panel's measurements reset it).
     """
 
-    lm_updated           = pyqtSignal(float, float)  # LM x, y
-    cep_updated          = pyqtSignal(float, float)  # CEP x, y
-    distances_updated    = pyqtSignal(object)         # list[float] raw distances
-    sane_updated         = pyqtSignal(object)         # list[int] sane receiver indices
-    cep_validity_changed = pyqtSignal(bool)           # True = invalid position
-    insuff_changed       = pyqtSignal(bool)           # True = < 3 sane receivers
-    pos_per_sec_updated  = pyqtSignal(float)          # positions calculated per second
-    barrier_triggered    = pyqtSignal(object)         # BarrierEvent
+    fix_ready         = pyqtSignal(object)     # Fix
+    barrier_triggered = pyqtSignal(object)     # BarrierEvent
+    rate_updated      = pyqtSignal(float)      # readings solved per second
+    state_changed     = pyqtSignal(str, str)   # tracking state: text, colour
+    log_failed        = pyqtSignal(str)        # the position log could not be opened
 
     def __init__(
         self,
@@ -67,18 +151,231 @@ class NetworkThread(QThread):
         super().__init__()
         self._client = client
         self._position_lib = position_lib
-        self._barrier_manager = barrier_manager
+        self.barrier_manager = barrier_manager   # replaced by the panel while stopped
         self._server = server
-        self._active = False
-        self._use_continuous = True  # True=UDP/continuous, False=TCP/pulse
+        self._use_continuous = True   # True=UDP/continuous, False=TCP/pulse
         self._logging_enabled = True
         self._logger = None
+        self._stopping = False
+        self._wakeup = threading.Event()
+        self.session = 0              # bumped by every start(); stamped on each Fix
+        self._state = None
+        self._reset_filter = False    # reset the library's filter before the next reading
+        self._rate_count = 0
+        self._rate_since = 0.0
+        self._error_logged_at = -math.inf
+        self._errors_suppressed = 0
+
+    # ------------------------------------------------------------------
+    # Control (GUI thread)
+    # ------------------------------------------------------------------
 
     def set_mode(self, use_continuous: bool) -> None:
-        self._use_continuous = use_continuous
+        self._use_continuous = bool(use_continuous)
+        self._wakeup.set()
 
     def set_logging(self, enabled: bool) -> None:
-        self._logging_enabled = enabled
+        self._logging_enabled = bool(enabled)
+
+    def start(self, *args) -> None:
+        self._stopping = False
+        self._wakeup.clear()
+        self._state = None
+        self.session += 1
+        super().start(*args)
+
+    def stop(self) -> bool:
+        """End the loop and wait until the thread has finished (at most one
+        pulse's reply timeout).  True if it ended."""
+        self._stopping = True
+        self._wakeup.set()
+        if not self.isRunning():
+            return True
+        ended = self.wait(STOP_TIMEOUT_MS)
+        if not ended:
+            log.error("The position thread did not stop within %d s", STOP_TIMEOUT_MS // 1000)
+        return ended
+
+    def wake(self) -> None:
+        """Cut a pause short (e.g. the link is back)."""
+        self._wakeup.set()
+
+    # ------------------------------------------------------------------
+    # The loop (worker thread)
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        try:
+            self._loop()
+        except Exception:      # an exception escaping run() would abort the application
+            log.exception("Position tracking stopped by an error")
+            self._set_state("Tracking stopped by an error (see the log)", widgets.RED)
+        finally:
+            self._close_logger()
+
+    def _loop(self) -> None:
+        client = self._client
+        self._position_lib.reset_state()
+        self._rate_count, self._rate_since = 0, time.monotonic()
+        count = client.reading_count   # last continuous reading handled
+        need_stream = True             # 'C' must be sent before readings can come
+        stream_tries = 0               # 'C' sent since the last reading
+        next_stream_at = 0.0           # earliest time for the next 'C' (backoff)
+        last_reading_at = time.monotonic()
+
+        while not self._stopping:
+            self._update_logger()
+            self._report_rate()
+
+            if not client.connected:
+                # The main window reconnects; a new link starts in normal mode
+                need_stream, stream_tries, next_stream_at = True, 0, 0.0
+                self._reset_filter = True
+                self._set_state(*STATE_LINK_DOWN)
+                self._sleep(LINK_DOWN_POLL_S)
+                continue
+
+            if not self._use_continuous:
+                need_stream, stream_tries, next_stream_at = True, 0, 0.0
+                ticks = self._pulse()
+                if ticks is not None:
+                    self._process(ticks, False)
+                continue
+
+            if need_stream or client.mode is not CommMode.CONTINUOUS:
+                now = time.monotonic()
+                if now < next_stream_at:
+                    self._sleep(min(next_stream_at - now, READING_WAIT_S))
+                    continue
+                count = client.reading_count     # continuous() drops older readings
+                stream_tries += 1
+                next_stream_at = now + STREAM_RETRY_S[min(stream_tries, len(STREAM_RETRY_S)) - 1]
+                if not client.continuous():
+                    continue      # link down (handled above) or another command held the lock
+                need_stream = False
+                last_reading_at = time.monotonic()
+                if stream_tries == 1:
+                    self._set_state(*STATE_STARTING)
+                else:
+                    self._set_state(f"No readings: re-sent the continuous command "
+                                    f"({stream_tries - 1}×)", widgets.AMBER)
+
+            item = client.wait_for_reading(count, READING_WAIT_S)
+            if item is None:
+                if client.mode is not CommMode.CONTINUOUS:
+                    need_stream = True    # a command or a reconnect ended the stream
+                elif time.monotonic() - last_reading_at > self._stall_timeout():
+                    need_stream = True    # 'C' sent but no stream (dropped, serial not ready)
+                    self._reset_filter = True
+                continue
+
+            count, ticks = item
+            stream_tries, next_stream_at = 0, 0.0
+            last_reading_at = time.monotonic()
+            self._set_state(*STATE_STREAMING)
+            self._process(ticks, True)
+
+    def _pulse(self) -> list | None:
+        """One pulse; None (after a pause if it failed at once) when there is
+        no reply.  A timed-out pulse has already waited its reply timeout."""
+        started = time.monotonic()
+        ticks = self._client.pulse()
+        if ticks is not None:
+            self._set_state(*STATE_POLLING)
+            return ticks
+        if self._client.connected:
+            self._set_state(*STATE_NO_REPLY)
+            if time.monotonic() - started < PULSE_RETRY_S:
+                self._sleep(PULSE_RETRY_S)
+        return None
+
+    def _stall_timeout(self) -> float:
+        """Seconds without a continuous reading after which 'C' is sent again:
+        a few trigger periods plus the sampling window."""
+        hz = self._client.trigger_rate_hz or DEFAULT_TRIGGER_RATE_HZ
+        window_ms = self._client.sampling_time_ms
+        window_s = window_ms / 1000.0 if window_ms is not None else 0.8 / hz
+        return max(STALL_MIN_S, STALL_PERIODS / hz + window_s)
+
+    def _sleep(self, seconds: float) -> None:
+        """Pause that ``stop()``, ``wake()`` and a mode change cut short."""
+        self._wakeup.wait(seconds)
+        self._wakeup.clear()
+
+    # ------------------------------------------------------------------
+    # One reading
+    # ------------------------------------------------------------------
+
+    def _process(self, ticks, continuous: bool) -> None:
+        """Solve one reading, log it, check the barriers, stream it and hand
+        the fix to the GUI.  A failure is logged; the loop carries on."""
+        try:
+            if self._reset_filter:        # after a gap the differential filter is stale
+                self._reset_filter = False
+                self._position_lib.reset_state()
+            result = self._position_lib.get_position_full(ticks)
+            fix = self._make_fix(ticks, result, continuous)
+        except Exception as exc:
+            self._log_error("Could not solve a reading", exc)
+            return
+
+        if self._logger is not None:
+            try:
+                self._logger.log(ticks, result, continuous)
+            except Exception as exc:
+                self._log_error("Position log error", exc)
+
+        try:
+            self._publish(fix)
+        except Exception as exc:
+            self._log_error("Could not check barriers or stream the position", exc)
+
+        self._rate_count += 1
+        self.fix_ready.emit(fix)
+
+    def _make_fix(self, ticks, result: dict, continuous: bool) -> Fix:
+        sane = tuple(int(i) for i in result.get("sane_indices", ()))
+        lm, cep = _xy(result.get("lm_position")), _xy(result.get("cep_position"))
+        lm_ok, cep_ok = bool(result.get("lm_success")), bool(result.get("cep_success"))
+        current = lm if lm_ok else cep if cep_ok else None
+        return Fix(
+            ticks=tuple(int(t) for t in ticks),
+            distances=tuple(float(d) for d in (result.get("distances") or ())),
+            sane=sane, lm=lm, lm_success=lm_ok and lm is not None,
+            cep=cep, cep_success=cep_ok and cep is not None,
+            hdop=self._hdop(current, sane), continuous=continuous, session=self.session,
+        )
+
+    def _hdop(self, point, sane) -> float:
+        """HDOP at ``point`` over the receivers that passed the sanity filter."""
+        if point is None or len(sane) < 3:
+            return math.inf
+        coords = self._position_lib.receiver_coords
+        heard = np.zeros((1, len(coords)), dtype=bool)
+        heard[0, [i for i in sane if 0 <= i < len(coords)]] = True
+        return float(coverage.hdop([point], coords, heard)[0])
+
+    def _publish(self, fix: Fix) -> None:
+        """Barrier events for both positions, and the position feed."""
+        manager = self.barrier_manager
+        server = self._server
+        streaming = server is not None and server.streaming
+        for source, xy in (("lm", fix.lm), ("cep", fix.cep)):
+            if xy is None:
+                continue
+            events = manager.check_position(xy[0], xy[1], source) if manager is not None else []
+            for ev in events:
+                self.barrier_triggered.emit(ev)
+            if streaming:
+                send_position(server, _SRV_POS, xy[0], xy[1], source=source)
+                if source == "lm":
+                    send_nmea(server, _SRV_NMEA, num_satellites=len(fix.sane))
+                for ev in events:
+                    send_barrier_event(server, _SRV_BARR_TCP, _SRV_BARR, ev)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _update_logger(self) -> None:
         """Open or close the log files to match the logging toggle."""
@@ -86,116 +383,179 @@ class NetworkThread(QThread):
             try:
                 self._logger = PositionLogger()
             except Exception as exc:
-                print(f"Could not start position log: {exc}")
+                log.warning("Could not start the position log: %s", exc)
                 self._logging_enabled = False
+                self.log_failed.emit(str(exc))
         elif not self._logging_enabled and self._logger is not None:
-            self._logger.close()
-            self._logger = None
+            self._close_logger()
 
-    def run(self) -> None:
-        self._active = True
-        self._position_lib.reset_state()
+    def _close_logger(self) -> None:
+        """Close the position log.  Saving the spreadsheet of a long session
+        takes seconds, so that runs on a thread of its own: ``stop()``, and
+        with it the panel's hide, only waits for the loop."""
+        logger, self._logger = self._logger, None
+        if logger is None:
+            return
+        if logger.xlsx_path is None:              # CSV only: closing it is instant
+            _close_log(logger)
+        else:
+            threading.Thread(target=_close_log, args=(logger,), name="position-log-save").start()
 
-        prev_continuous = None
-        rate_count = 0
-        rate_start = time.monotonic()
+    def _report_rate(self) -> None:
+        """Emit the readings solved per second about once a second."""
+        now = time.monotonic()
+        elapsed = now - self._rate_since
+        if elapsed >= 1.0:
+            self.rate_updated.emit(self._rate_count / elapsed)
+            self._rate_count, self._rate_since = 0, now
 
-        while self._active:
-            current_continuous = self._use_continuous
-            self._update_logger()
+    def _set_state(self, text: str, color: str) -> None:
+        if (text, color) != self._state:
+            self._state = (text, color)
+            self.state_changed.emit(text, color)
 
-            # Handle mode transitions
-            if current_continuous != prev_continuous:
-                # Send the continouous command only if needed to switch modes
-                # This is because the pulse command will automatically change the 
-                # mode on the Arduino to continouous.
-                try: 
-                    if current_continuous:
-                        self._client.continuous()
-                        self._client.continuous()
-                except Exception as exc:
-                    print(f"Error sending continuous command: {exc}")
-                prev_continuous = current_continuous
+    def _log_error(self, what: str, exc: Exception) -> None:
+        """Log a failure, at most once per ERROR_LOG_INTERVAL_S (with a count
+        of the ones left out), so a persistent fault does not flood the log."""
+        now = time.monotonic()
+        if now - self._error_logged_at < ERROR_LOG_INTERVAL_S:
+            self._errors_suppressed += 1
+            return
+        more = f" ({self._errors_suppressed} more errors not shown)" if self._errors_suppressed else ""
+        log.warning("%s: %s%s", what, exc, more, exc_info=exc)
+        self._error_logged_at, self._errors_suppressed = now, 0
 
-            try:
-                if current_continuous:
-                    ticks = self._client.get_latest_reading()
-                else:
-                    ticks = self._client.pulse()
 
-                if ticks is None:
-                    if current_continuous:
-                        print("No ticks received in continuous mode, retrying...")
-                        time.sleep(0.01)
-                    continue
-                else:
-                    result = self._position_lib.get_position_full(ticks)
+# ---------------------------------------------------------------------------
+# Small widgets
+# ---------------------------------------------------------------------------
 
-                if self._logger is not None:
-                    try:
-                        self._logger.log(ticks, result, current_continuous)
-                    except Exception as exc:
-                        print(f"Position log error: {exc}")
+def _label_css(color: str, px: int, bold: bool = False) -> str:
+    return f"color: {color}; font: {'bold ' if bold else ''}{px}px Arial; background: transparent;"
 
-                raw_distances = result.get("distances")
-                sane_indices  = result.get("sane_indices", [])
-                lm_pos        = result.get("lm_position")
-                cep_pos       = result.get("cep_position")
-                cep_success   = result.get("cep_success", False)
 
-                if lm_pos is not None:
-                    lx, ly = float(lm_pos[0]), float(lm_pos[1])
-                    self.lm_updated.emit(lx, ly)
-                    lm_events = self._barrier_manager.check_position(lx, ly, 'lm')
-                    for ev in lm_events:
-                        self.barrier_triggered.emit(ev)
-                    if self._server is not None and self._server.streaming:
-                        send_position(self._server, _SRV_POS, lx, ly, source='lm')
-                        send_nmea(self._server, _SRV_NMEA, num_satellites=len(sane_indices))
-                        for ev in lm_events:
-                            send_barrier_event(self._server, _SRV_BARR_TCP, _SRV_BARR, ev)
+def _label(text: str = "", color: str = "white", px: int = 12, bold: bool = False) -> QLabel:
+    lbl = QLabel(text)
+    ui_scale.style(lbl, _label_css(color, px, bold))
+    return lbl
 
-                if cep_pos is not None:
-                    cx, cy = float(cep_pos[0]), float(cep_pos[1])
-                    self.cep_updated.emit(cx, cy)
-                    cep_events = self._barrier_manager.check_position(cx, cy, 'cep')
-                    for ev in cep_events:
-                        self.barrier_triggered.emit(ev)
-                    if self._server is not None and self._server.streaming:
-                        send_position(self._server, _SRV_POS, cx, cy, source='cep')
-                        for ev in cep_events:
-                            send_barrier_event(self._server, _SRV_BARR_TCP, _SRV_BARR, ev)
 
-                if raw_distances is not None:
-                    self.distances_updated.emit(list(raw_distances))
+def _checkbox(text: str, color: str, checked: bool = True, tooltip: str = "") -> QCheckBox:
+    """A check box in ``color`` with a scaled indicator."""
+    cb = QCheckBox(text)
+    cb.setChecked(checked)
+    ui_scale.style(cb, f"""
+        QCheckBox {{ color: {color}; font: bold 12px Arial; spacing: 6px; background: transparent; }}
+        QCheckBox::indicator {{ width: 12px; height: 12px; border-radius: 3px; }}
+        QCheckBox::indicator:unchecked {{ background-color: #222222; border: 2px solid #666666; }}
+        QCheckBox::indicator:checked {{ background-color: {color}; border: 2px solid {color}; }}
+    """)
+    if tooltip:
+        cb.setToolTip(tooltip)
+    return cb
 
-                self.sane_updated.emit(list(sane_indices))
-                self.cep_validity_changed.emit(not cep_success)
-                self.insuff_changed.emit(len(sane_indices) < 3)
 
-                rate_count += 1
-                elapsed = time.monotonic() - rate_start
-                if elapsed >= 1.0:
-                    self.pos_per_sec_updated.emit(rate_count / elapsed)
-                    rate_count = 0
-                    rate_start = time.monotonic()
+def _apply_led(color: str, size: int, led: QFrame, factor: float) -> None:
+    """Size and style a status light for the UI scale ``factor``.  The radius
+    is half the scaled size: scaled on its own it could round above that, and
+    Qt then draws a square.  The rule names the light (``#led``) so that its
+    tooltip does not turn into a coloured bubble as well."""
+    px = ui_scale.scale_length(size, factor)
+    led.setFixedSize(px, px)
+    led.setStyleSheet(f"QFrame#led {{ background-color: {color}; border-radius: {px // 2}px; "
+                      f"border: {ui_scale.scale_length(2, factor)}px solid white; }}")
 
-                if current_continuous:
-                    time.sleep(0.1)
 
-            except Exception as exc:
-                print(f"NetworkThread error: {exc}")
-                if current_continuous:
-                    time.sleep(0.1)
+class _Led(QFrame):
+    """A round status light."""
 
-        if self._logger is not None:
-            self._logger.close()
-            self._logger = None
-        print("NetworkThread stopped")
+    def __init__(self, color: str = widgets.GREEN, size: int = 18, tooltip: str = ""):
+        super().__init__()
+        self.setObjectName("led")
+        self._size = size
+        self._color = None
+        self.set_color(color)
+        if tooltip:
+            self.setToolTip(tooltip)
 
-    def stop(self) -> None:
-        self._active = False
-        self.wait(2000)
+    def set_color(self, color: str) -> None:
+        if color != self._color:
+            self._color = color
+            ui_scale.bind(self, functools.partial(_apply_led, color, self._size), key="led")
+
+    def color(self) -> str:
+        return self._color
+
+
+class _StateLabel(QLabel):
+    """"● text" in a state's colour."""
+
+    def __init__(self):
+        super().__init__()
+        self._color = None
+
+    def set_state(self, text: str, color: str, tooltip: str = "") -> None:
+        self.setText(f"● {text}")
+        self.setToolTip(tooltip)
+        if color != self._color:
+            self._color = color
+            ui_scale.style(self, _label_css(color, 12, bold=True))
+
+    def color(self) -> str | None:
+        return self._color
+
+
+class _DistancePlot:
+    """One receiver's distance history: the line, the current distance and a
+    light that is green while the receiver passes the sanity filter.
+
+    The plots flank the arena; ``outer_side`` ('left' or 'right') is where
+    their tick labels go, away from the arena's own labels.
+    """
+
+    def __init__(self, fig, cell, rid: int, history: int, outer_side: str):
+        self.ax = ax = fig.add_subplot(cell)
+        ax.set_facecolor('black')
+        ax.set_title(f"R{rid + 1} distance (cm)", fontsize=9, fontweight='bold',
+                     color=RECEIVER_COLOR, pad=3)
+        ax.tick_params(axis='both', labelsize=7, colors='white')
+        ax.tick_params(axis='x', labelbottom=False)
+        ax.set_xlim(0, history - 1)
+        ax.set_ylim(0, 300)
+        if outer_side == 'right':
+            ax.yaxis.tick_right()
+            text_x, text_ha, led_x = 0.03, 'left', 0.92
+        else:
+            text_x, text_ha, led_x = 0.97, 'right', 0.08
+        ax.grid(True, alpha=0.3, color='gray')
+        for spine in ax.spines.values():
+            spine.set_color('white')
+
+        self.line, = ax.plot([], [], color=widgets.GREEN, linewidth=1)
+        self.text = ax.text(text_x, 0.94, '---', ha=text_ha, va='top', fontsize=11,
+                            fontweight='bold', transform=ax.transAxes, color='white', zorder=10,
+                            bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
+        self.led, = ax.plot([led_x], [0.86], 'o', transform=ax.transAxes, markersize=9,
+                            markerfacecolor=widgets.GREEN, markeredgecolor='white',
+                            markeredgewidth=1.5, clip_on=False, zorder=10)
+
+    def update(self, history, sane: bool) -> None:
+        values = np.asarray(history, dtype=float)
+        self.line.set_data(np.arange(len(values)), values)
+        finite = values[np.isfinite(values)]
+        if len(finite):
+            lo, hi = float(finite.min()), float(finite.max())
+            pad = max(5.0, 0.15 * (hi - lo))
+            self.ax.set_ylim(lo - pad, hi + pad)
+        last = values[-1] if len(values) else math.nan
+        self.text.set_text(f'{last:.1f} cm' if math.isfinite(last) else '---')
+        self.led.set_markerfacecolor(widgets.GREEN if sane else widgets.RED)
+
+    def clear(self) -> None:
+        self.line.set_data([], [])
+        self.ax.set_ylim(0, 300)
+        self.text.set_text('---')
+        self.led.set_markerfacecolor(widgets.GREEN)
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +565,19 @@ class NetworkThread(QThread):
 class PositionPanel(QWidget):
     """Full-page position tracking panel.
 
-    Owns the matplotlib figure (arena + 6 distance mini-plots) and the
-    NetworkThread.  Canvas is refreshed by a 30 Hz QTimer that is started/
-    stopped when the panel becomes visible/hidden.
+    Owns the matplotlib figure (arena + 6 distance plots) and the
+    NetworkThread.  The canvas is refreshed by a 20 Hz QTimer, only when
+    something changed; the timer and the thread run while the panel is shown.
     """
+
+    #: Positions kept in each trail and readings in each distance plot.
+    HISTORY = 50
+
+    #: Canvas refresh interval (ms).
+    REFRESH_MS = 50
+
+    #: How long a barrier stays highlighted after its last inside/outside event (ms).
+    BARRIER_HIGHLIGHT_MS = 300
 
     def __init__(
         self,
@@ -224,166 +593,91 @@ class PositionPanel(QWidget):
         self._settings = settings_module
         self._main_window = main_window
         self._server = server
-        self.setStyleSheet("background-color: black;")
+        # Scoped: an unscoped background would cascade into the panel's dialogs
+        self.setObjectName("positionPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("QWidget#positionPanel { background-color: black; }")
 
-        config_dir = self._settings.config_dir
-        print(f"Loading barriers from {config_dir}")
-        self._barrier_manager = BarrierManager(config_dir)
-        self._barrier_manager.load_barriers()
-        self._barrier_patches: dict[str, list] = {}
-        self._barrier_reset_timers: dict[str, QTimer] = {}
+        self._barrier_dir = self._settings.config_dir
+        self._barrier_manager = BarrierManager(self._barrier_dir)
+        self._barrier_artists: dict[str, dict] = {}
+        self._barrier_timers: dict[str, QTimer] = {}
+        self._barrier_alert: str | None = None     # the barrier the alert label names
         self._image_artists: list = []
-
-        self.grid_padding = 20
-        self.position_history    = deque(maxlen=50)
-        self.cep_history         = deque(maxlen=50)
-        self.distance_histories  = [deque(maxlen=50) for _ in range(6)]
-        self.distance_filter_buffers = [deque(maxlen=5) for _ in range(6)]
-        self._last_draw_time = time.monotonic()
-
-        # Compass rose artist handles
-        self._compass_x_arrow = None
-        self._compass_x_text  = None
-        self._compass_y_arrow = None
-        self._compass_y_text  = None
+        self._warned_images: set = set()
 
         # Display toggles (mirrored by QCheckBox widgets)
         self.show_multilateration = True
-        self.show_cep             = True
+        self.show_cep = True
 
-        receiver_positions = self._settings.get_tower_coordinates()
-        self._build_figure(receiver_positions)
+        self._fix: Fix | None = None
+        self._lm_history = deque(maxlen=self.HISTORY)
+        self._cep_history = deque(maxlen=self.HISTORY)
+        self._distance_histories = [deque(maxlen=self.HISTORY) for _ in range(RECEIVER_COUNT)]
+        self._shown = False
+        self._dirty = False
+        self._draws = 0
+        self._draws_since = time.monotonic()
+
+        self._build_figure()
         self._build_ui()
+        try:
+            self._view.set_receivers(self._settings.get_tower_coordinates())
+            self._view.set_limits()
+        except Exception:                 # drawn again (and reported) on show
+            log.exception("Could not draw the receivers")
 
         # NetworkThread
         self._net_thread = NetworkThread(
-            self._client, self._position_lib, self._barrier_manager,
-            server=self._server)
-        self._net_thread.lm_updated.connect(self._on_lm_updated)
-        self._net_thread.cep_updated.connect(self._on_cep_updated)
-        self._net_thread.distances_updated.connect(self._on_distances_updated)
-        self._net_thread.sane_updated.connect(self._on_sane_updated)
-        self._net_thread.cep_validity_changed.connect(self._on_cep_validity_changed)
-        self._net_thread.insuff_changed.connect(self._on_insuff_changed)
-        self._net_thread.pos_per_sec_updated.connect(self._on_pos_sec_updated)
+            self._client, self._position_lib, self._barrier_manager, server=self._server)
+        self._net_thread.fix_ready.connect(self._on_fix)
         self._net_thread.barrier_triggered.connect(self._handle_barrier_event)
-        self._mode_cb.toggled.connect(self._net_thread.set_mode)
-        self._log_cb.toggled.connect(self._net_thread.set_logging)
+        self._net_thread.rate_updated.connect(self._on_rate_updated)
+        self._net_thread.state_changed.connect(self._on_state_changed)
+        self._net_thread.log_failed.connect(self._on_log_failed)
+        self._mode_cb.toggled.connect(self._on_mode_toggled)
+        self._log_cb.toggled.connect(self._on_log_toggled)
 
-        # Canvas refresh at every 50 ms (started/stopped with panel visibility)
+        # Canvas refresh, and the redraw-rate read-out (started/stopped with the panel)
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(50)
+        self._refresh_timer.setInterval(self.REFRESH_MS)
         self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._fps_timer = QTimer(self)
+        self._fps_timer.setInterval(1000)
+        self._fps_timer.timeout.connect(self._update_fps)
+        self._canvas.mpl_connect('draw_event', self._on_draw)
+
+        main_window.config_changed.connect(self._on_config_changed)
+        main_window.link_changed.connect(self._on_link_changed)
 
     # ------------------------------------------------------------------
     # Figure construction
     # ------------------------------------------------------------------
 
-    def _build_figure(self, receiver_positions: list) -> None:
-        self.receiver_positions = receiver_positions
+    def _build_figure(self) -> None:
+        self.fig = Figure(facecolor='black')
+        gs = self.fig.add_gridspec(3, 3, width_ratios=[1, 4, 1], hspace=0.35, wspace=0.3,
+                                   left=0.04, right=0.96, top=0.93, bottom=0.07)
 
-        rx = [p[1][0] for p in receiver_positions]
-        ry = [p[1][1] for p in receiver_positions]
+        # Main arena: receivers, outline, origin and compass from ArenaView;
+        # the legend sits above the arena, clear of the receivers in the corners
+        self.ax = self.fig.add_subplot(gs[:, 1])
+        self._view = ArenaView(self.ax, legend_loc='lower center', legend_anchor=(0.5, 1.0),
+                               legend_ncol=4)
+        self._lm_trail, = self.ax.plot([], [], '-', color=widgets.GREEN, linewidth=1,
+                                       alpha=0.5, zorder=6)
+        self._cep_trail, = self.ax.plot([], [], '-', color=CEP_COLOR, linewidth=1,
+                                        alpha=0.5, zorder=6)
 
-        self.fig = Figure(figsize=(16, 10), facecolor='black')
-        gs = GridSpec(3, 3, figure=self.fig,
-                      width_ratios=[1, 5, 1], height_ratios=[1, 1, 1],
-                      hspace=0.3, wspace=0.4)
-
-        # Main arena subplot
-        self.ax = self.fig.add_subplot(gs[0:3, 1])
-        self.ax.set_facecolor('black')
-        self.ax.set_xlim(min(rx) - self.grid_padding, max(rx) + self.grid_padding)
-        self.ax.set_ylim(min(ry) - self.grid_padding, max(ry) + self.grid_padding)
-        self.ax.set_aspect('equal')
-        self.ax.grid(True, alpha=0.3, color='gray')
-        self.ax.set_xlabel('X Position', color='white')
-        self.ax.set_ylabel('Y Position', color='white')
-        self.ax.set_title('Vehicle Position Tracking', color='white')
-        self.ax.tick_params(colors='white')
-        for spine in self.ax.spines.values():
-            spine.set_color('white')
-
-        # Distance insets — left column: receivers 1-3 (indices 0-2)
-        #                    right column: receivers 4-6 (indices 3-5)
-        self.distance_insets  = []
-        self.distance_lines   = []
-        self.distance_windows = []
-        self.sane_leds        = []
-
-        for idx, row in enumerate([2, 1, 0]):   # top = receiver 3, bottom = receiver 1
-            ax_d = self._make_distance_inset(gs, row, 0, idx + 1,
-                                              label_side='right', led_x=0.08)
-            self.distance_insets.append(ax_d[0])
-            self.distance_lines.append(ax_d[1])
-            self.distance_windows.append(ax_d[2])
-            self.sane_leds.append(ax_d[3])
-
-        for idx, row in enumerate([2, 1, 0]):   # top = receiver 6, bottom = receiver 4
-            ax_d = self._make_distance_inset(gs, row, 2, idx + 4,
-                                              label_side='left', led_x=0.92)
-            self.distance_insets.append(ax_d[0])
-            self.distance_lines.append(ax_d[1])
-            self.distance_windows.append(ax_d[2])
-            self.sane_leds.append(ax_d[3])
-
-        self._draw_compass_rose()
-        self.ax.set_autoscale_on(False)
-
-        # Receivers
-        self.ax.scatter(rx, ry, c='#FF00FF', s=100, zorder=5, label='Receivers')
-        for rid, (x, y) in receiver_positions:
-            self.ax.text(x + 5, y + 5, str(rid + 1), color='white', fontsize=10,
-                         fontweight='bold', zorder=6, ha='left', va='bottom')
-
-        conn = [0, 1, 2, 5, 4, 3, 0]
-        self.ax.plot([rx[i] for i in conn], [ry[i] for i in conn],
-                     color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
-
-        # Vehicle plot artists
-        self.vehicle_point, = self.ax.plot(
-            [], [], 'o', color='#39FF14', markersize=10, zorder=6,
-            label='Multilateration Position')
-        self.vehicle_trail, = self.ax.plot(
-            [], [], '-', color='#39FF14', linewidth=1, alpha=0.5, label='Multilat Trail')
-        self.cep_point, = self.ax.plot(
-            [], [], 'o', color='#FFFF00', markersize=10, zorder=6, label='CEP Position')
-        self.cep_trail, = self.ax.plot(
-            [], [], '-', color='#FFFF00', linewidth=1, alpha=0.5, label='CEP Trail')
-
-        self.ax.legend(loc='upper right', facecolor='#222222',
-                       edgecolor='white', labelcolor='white')
-
-    def _make_distance_inset(self, gs, row, col, receiver_num, label_side, led_x):
-        ax = self.fig.add_subplot(gs[row, col])
-        ax.set_facecolor('black')
-        ax.set_title(f'Receiver {receiver_num}', fontsize=10, color='white')
-        ax.tick_params(axis='both', labelsize=8, colors='white')
-        ax.set_xlim(0, 50)
-        ax.set_ylim(0, 500)
-        ax.set_xlabel('Sample', fontsize=8, color='white')
-        ax.set_ylabel('Distance (cm)', fontsize=8, color='white')
-        if label_side == 'right':
-            ax.yaxis.set_label_position('right')
-            ax.yaxis.tick_right()
-            dw_ha, dw_x = 'right', 0.98
-        else:
-            ax.yaxis.set_label_position('left')
-            ax.yaxis.tick_left()
-            dw_ha, dw_x = 'left', 0.02
-        ax.grid(True, alpha=0.3, color='gray')
-        for spine in ax.spines.values():
-            spine.set_color('white')
-
-        line, = ax.plot([], [], color='#39FF14', linewidth=1)
-        dw = ax.text(dw_x, 0.95, '---', ha=dw_ha, va='top', fontsize=12,
-                     fontweight='bold', transform=ax.transAxes, color='white',
-                     bbox=dict(boxstyle='round', facecolor='#222222', alpha=0.8))
-        led = Circle((led_x, 0.88), 0.06, transform=ax.transAxes,
-                     facecolor='#39FF14', edgecolor='white', linewidth=1.5, zorder=10)
-        ax.add_patch(led)
-
-        return ax, line, dw, led
+        # Distance plots — left column: receivers 3, 2, 1 from the top,
+        #                  right column: receivers 6, 5, 4
+        self._distance_plots: list[_DistancePlot | None] = [None] * RECEIVER_COUNT
+        for row, rid in enumerate((2, 1, 0)):
+            self._distance_plots[rid] = _DistancePlot(self.fig, gs[row, 0], rid, self.HISTORY,
+                                                      outer_side='left')
+        for row, rid in enumerate((5, 4, 3)):
+            self._distance_plots[rid] = _DistancePlot(self.fig, gs[row, 2], rid, self.HISTORY,
+                                                      outer_side='right')
 
     # ------------------------------------------------------------------
     # Qt widget layout
@@ -394,511 +688,513 @@ class PositionPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # --- Top bar ---
+        # --- Top bar: title, tracking state, barrier alert, back ---
         top_bar = QWidget()
-        top_bar.setStyleSheet("background-color: black;")
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(10, 5, 10, 5)
+        ui_scale.margins(top_layout, 10, 5, 10, 5)
+        ui_scale.spacing(top_layout, 16)
 
         title = QLabel("Position Tracking")
-        title.setFont(QFont('Arial', 16, QFont.Weight.Bold))
+        ui_scale.font(title, 16, bold=True)
         title.setStyleSheet("color: #39FF14;")
         top_layout.addWidget(title)
-        top_layout.addStretch()
 
-        back_btn = QPushButton("← Back")
-        back_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 12px Arial;
-                          padding:5px 10px; border-radius:4px; }
-            QPushButton:hover { background-color:#2BCC10; }
-        """)
+        self._state_label = _StateLabel()
+        self._state_label.set_state("Stopped", widgets.DIM)
+        top_layout.addWidget(self._state_label)
+
+        # Barrier alerts and configuration problems; a long message is clipped
+        # (its tooltip has it all) instead of widening the panel past the screen
+        self._barrier_status_label = _label("", widgets.RED, 13, bold=True)
+        self._barrier_status_label.setMinimumWidth(1)
+        top_layout.addWidget(self._barrier_status_label)
+        top_layout.addStretch(1)
+
+        back_btn = widgets.neon_button("← Back", widgets.GREEN)
         back_btn.clicked.connect(lambda: self._main_window.show_panel('main'))
         top_layout.addWidget(back_btn)
         layout.addWidget(top_bar)
 
-        # --- Canvas ---
-        self._canvas = FigureCanvasQTAgg(self.fig)
+        # --- Canvas (ref_size: its size in a 1200 x 900 window) ---
+        self._canvas = ScalingCanvas(self.fig, ref_size=(1200, 770))
         layout.addWidget(self._canvas, stretch=1)
 
         # --- Control bar ---
         ctrl = QWidget()
-        ctrl.setStyleSheet("background-color: black;")
         ctrl_layout = QHBoxLayout(ctrl)
-        ctrl_layout.setContentsMargins(20, 5, 20, 10)
+        ui_scale.margins(ctrl_layout, 16, 4, 16, 8)
+        ui_scale.spacing(ctrl_layout, 20)
+        ctrl_layout.addStretch(1)
 
-        # Multilateration group
-        ml_group = QWidget()
-        ml_layout = QVBoxLayout(ml_group)
-        ml_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
+        # Multilateration
         self.multilat_label = QLabel("Multilat: (---, ---)")
-        self.multilat_label.setFont(QFont('Arial', 14, QFont.Weight.Bold))
+        ui_scale.font(self.multilat_label, 14, bold=True)
         self.multilat_label.setStyleSheet("color: #39FF14;")
-        self.multilat_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ml_layout.addWidget(self.multilat_label)
+        ui_scale.min_width(self.multilat_label, 250)
+        ml_cb = _checkbox("Show Multilateration", widgets.GREEN)
+        ml_cb.toggled.connect(self._on_show_multilateration)
+        ctrl_layout.addLayout(self._column(self.multilat_label, ml_cb))
 
-        ml_cb = QCheckBox("Show Multilateration")
-        ml_cb.setChecked(True)
-        ml_cb.setStyleSheet("color:#39FF14; font:bold 10px Arial;")
-        ml_cb.toggled.connect(lambda checked: setattr(self, 'show_multilateration', checked))
-        ml_layout.addWidget(ml_cb, alignment=Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addWidget(ml_group)
-
-        # Insufficient receivers group
-        insuff_group = QWidget()
-        insuff_layout = QVBoxLayout(insuff_group)
-        insuff_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        insuff_lbl = QLabel("Insufficient Receivers:")
-        insuff_lbl.setStyleSheet("color:white; font:bold 12px Arial;")
-        insuff_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        insuff_layout.addWidget(insuff_lbl)
-
-        self.insuff_led = QFrame()
-        self.insuff_led.setFixedSize(20, 20)
-        self.insuff_led.setStyleSheet(
-            "background-color:#39FF14; border-radius:10px; border:2px solid white;")
-        insuff_layout.addWidget(self.insuff_led, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        self._mode_cb = QCheckBox("Continuous:UDP")
-        self._mode_cb.setChecked(True)
-        self._mode_cb.setStyleSheet("color:#00FFFF; font:bold 10px Arial;")
-        self._mode_cb.toggled.connect(
-            lambda checked: self._mode_cb.setText("Continuous:UDP" if checked else "Normal:TCP"))
-        insuff_layout.addWidget(self._mode_cb, alignment=Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addWidget(insuff_group)
-
-        # CEP group
-        cep_group = QWidget()
-        cep_layout = QVBoxLayout(cep_group)
-        cep_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        cep_row = QWidget()
-        cep_row_layout = QHBoxLayout(cep_row)
-        cep_row_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
+        # CEP
         self.cep_label = QLabel("CEP: (---, ---)")
-        self.cep_label.setFont(QFont('Arial', 14, QFont.Weight.Bold))
-        self.cep_label.setStyleSheet("color:#FFFF00;")
-        cep_row_layout.addWidget(self.cep_label)
+        ui_scale.font(self.cep_label, 14, bold=True)
+        self.cep_label.setStyleSheet(f"color: {CEP_COLOR};")
+        ui_scale.min_width(self.cep_label, 215)
+        self.cep_validity_led = _Led(tooltip="Green: this reading gave a valid CEP position")
+        cep_row = QHBoxLayout()
+        ui_scale.spacing(cep_row, 8)
+        cep_row.addWidget(self.cep_validity_led)
+        cep_row.addWidget(self.cep_label)
+        cep_cb = _checkbox("Show CEP", CEP_COLOR)
+        cep_cb.toggled.connect(self._on_show_cep)
+        ctrl_layout.addLayout(self._column(cep_row, cep_cb))
 
-        self.cep_validity_led = QFrame()
-        self.cep_validity_led.setFixedSize(20, 20)
-        self.cep_validity_led.setStyleSheet(
-            "background-color:#39FF14; border-radius:10px; border:2px solid white;")
-        cep_row_layout.addWidget(self.cep_validity_led)
-        cep_layout.addWidget(cep_row)
+        # Fix quality: HDOP and the receivers that passed the sanity filter
+        self._hdop_label = QLabel("HDOP: ---")
+        ui_scale.font(self._hdop_label, 14, bold=True)
+        self._hdop_label.setStyleSheet(f"color: {widgets.DIM};")
+        ui_scale.min_width(self._hdop_label, 140)
+        self._hdop_label.setToolTip(
+            "Horizontal dilution of precision of the current fix, from the receivers that "
+            "passed the sanity filter: cm of position error per cm of range error.\n"
+            f"Up to {HDOP_GOOD:g} is good (green), up to {HDOP_FAIR:g} fair (gold); "
+            "higher means the receivers see the transmitter from too few directions.")
+        self.insuff_led = _Led(tooltip="Red: fewer than 3 receivers passed the sanity filter "
+                                       "(no new fix)")
+        self._sane_label = _label("Receivers: -/-", "white", 12, bold=True)
+        sane_row = QHBoxLayout()
+        ui_scale.spacing(sane_row, 6)
+        sane_row.addWidget(self.insuff_led)
+        sane_row.addWidget(self._sane_label)
+        sane_row.addStretch(1)
+        ctrl_layout.addLayout(self._column(self._hdop_label, sane_row))
 
-        cep_cb = QCheckBox("Show CEP")
-        cep_cb.setChecked(True)
-        cep_cb.setStyleSheet("color:#FFFF00; font:bold 10px Arial;")
-        cep_cb.toggled.connect(lambda checked: setattr(self, 'show_cep', checked))
-        cep_layout.addWidget(cep_cb, alignment=Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addWidget(cep_group)
+        # Mode and logging
+        self._mode_cb = _checkbox(
+            "Continuous (UDP)", widgets.CYAN,
+            tooltip="Checked: the base station streams every reading over UDP.\n"
+                    "Unchecked: one pulse at a time over TCP.")
+        self._log_cb = _checkbox("Log to file", widgets.DIM,
+                                 tooltip="Write every position to log/positions_<date>.csv/.xlsx")
+        ctrl_layout.addLayout(self._column(self._mode_cb, self._log_cb))
 
         # Performance counters
-        perf_group = QWidget()
-        perf_layout = QVBoxLayout(perf_group)
-        perf_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self._fps_label = QLabel("FPS: --")
-        self._fps_label.setFont(QFont('Courier', 11, QFont.Weight.Bold))
-        self._fps_label.setStyleSheet("color:#AAAAAA;")
-        self._fps_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        perf_layout.addWidget(self._fps_label)
-
-        self._pos_sec_label = QLabel("Pos/s: --")
-        self._pos_sec_label.setFont(QFont('Courier', 11, QFont.Weight.Bold))
-        self._pos_sec_label.setStyleSheet("color:#AAAAAA;")
-        self._pos_sec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        perf_layout.addWidget(self._pos_sec_label)
-
-        self._log_cb = QCheckBox("Log to file")
-        self._log_cb.setChecked(True)
-        self._log_cb.setStyleSheet("color:#AAAAAA; font:bold 10px Arial;")
-        perf_layout.addWidget(self._log_cb, alignment=Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addWidget(perf_group)
+        self._fps_label = _label("FPS: --", widgets.DIM, 13, bold=True)
+        self._pos_sec_label = _label("Pos/s: --", widgets.DIM, 13, bold=True)
+        for lbl in (self._fps_label, self._pos_sec_label):
+            ui_scale.min_width(lbl, 95)
+        self._fps_label.setToolTip("Canvas redraws per second")
+        self._pos_sec_label.setToolTip("Readings solved per second")
+        ctrl_layout.addLayout(self._column(self._fps_label, self._pos_sec_label))
 
         # Navigation buttons
-        nav_group = QWidget()
-        nav_layout = QVBoxLayout(nav_group)
-
-        cal_btn = QPushButton("Calibration")
-        cal_btn.setStyleSheet("""
-            QPushButton { background-color:#FF00FF; color:white; font:bold 12px Arial;
-                          padding:8px 15px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC00CC; }
-        """)
+        cal_btn = widgets.neon_button("Calibration", widgets.MAGENTA, "white", padding=(6, 15))
         cal_btn.clicked.connect(lambda: self._main_window.show_panel('calibration'))
-        nav_layout.addWidget(cal_btn)
-
-        arena_btn = QPushButton("Arena Maker")
-        arena_btn.setStyleSheet("""
-            QPushButton { background-color:#00FFFF; color:black; font:bold 12px Arial;
-                          padding:8px 15px; border-radius:4px; }
-            QPushButton:hover { background-color:#00CCCC; }
-        """)
+        arena_btn = widgets.neon_button("Arena Maker", widgets.CYAN, "black", padding=(6, 15))
         arena_btn.clicked.connect(lambda: self._main_window.show_panel('arena_maker'))
-        nav_layout.addWidget(arena_btn)
-        ctrl_layout.addWidget(nav_group)
-
-        self._barrier_status_label = QLabel("")
-        self._barrier_status_label.setFont(QFont('Arial', 11, QFont.Weight.Bold))
-        self._barrier_status_label.setStyleSheet("color: #FF4444;")
-        self._barrier_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addWidget(self._barrier_status_label)
+        ctrl_layout.addLayout(self._column(cal_btn, arena_btn))
+        ctrl_layout.addStretch(1)
 
         layout.addWidget(ctrl)
 
-    # ------------------------------------------------------------------
-    # Matplotlib helpers
-    # ------------------------------------------------------------------
-
-    def _draw_compass_rose(self) -> None:
-        for attr in ('_compass_x_arrow', '_compass_x_text',
-                     '_compass_y_arrow', '_compass_y_text'):
-            el = getattr(self, attr, None)
-            if el is not None:
-                el.remove()
-
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        al = min(x_max - x_min, y_max - y_min) * 0.08
-
-        self._compass_x_arrow = self.ax.annotate(
-            '', xy=(al, 0), xytext=(0, 0),
-            arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self._compass_x_text = self.ax.text(
-            al * 0.5, -al * 0.3, 'X', color='white', fontsize=12,
-            fontweight='bold', ha='center', va='top', zorder=7)
-        self._compass_y_arrow = self.ax.annotate(
-            '', xy=(0, al), xytext=(0, 0),
-            arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self._compass_y_text = self.ax.text(
-            -al * 0.3, al * 0.5, 'Y', color='white', fontsize=12,
-            fontweight='bold', ha='right', va='center', zorder=7)
-
-    def update_arena(self, receiver_positions: list) -> None:
-        """Refresh receiver layout on the arena and reload the position library."""
-        self.receiver_positions = receiver_positions
-        rx = [p[1][0] for p in receiver_positions]
-        ry = [p[1][1] for p in receiver_positions]
-
-        self.ax.set_xlim(min(rx) - self.grid_padding, max(rx) + self.grid_padding)
-        self.ax.set_ylim(min(ry) - self.grid_padding, max(ry) + self.grid_padding)
-        self._draw_compass_rose()
-
-        for artist in self.ax.collections[:]:
-            if artist.get_label() == 'Receivers':
-                artist.remove()
-        for text in self.ax.texts[:]:
-            t = text.get_text()
-            if t.isdigit() and 1 <= int(t) <= 6:
-                text.remove()
-        for line in self.ax.lines[:]:
-            if line.get_label() == 'Receiver Connections':
-                line.remove()
-
-        self.ax.scatter(rx, ry, c='#FF00FF', s=100, zorder=5, label='Receivers')
-        for rid, (x, y) in receiver_positions:
-            self.ax.text(x + 5, y + 5, str(rid + 1), color='white', fontsize=10,
-                         fontweight='bold', zorder=6, ha='left', va='bottom')
-
-        conn = [0, 1, 2, 5, 4, 3, 0]
-        self.ax.plot([rx[i] for i in conn], [ry[i] for i in conn],
-                     color='#00FFFF', linewidth=2, alpha=0.7, label='Receiver Connections')
-
-        self.position_history.clear()
-        self.cep_history.clear()
-        self._position_lib.reload()
-
-    def apply_median_filter(self, distances: list) -> np.ndarray:
-        filtered = np.zeros(6)
-        for i in range(6):
-            self.distance_filter_buffers[i].append(distances[i])
-            filtered[i] = np.median(list(self.distance_filter_buffers[i]))
-        return filtered
+    @staticmethod
+    def _column(*items) -> QVBoxLayout:
+        """A vertical group of widgets / layouts for the control bar."""
+        col = QVBoxLayout()
+        ui_scale.spacing(col, 4)
+        col.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        for item in items:
+            if isinstance(item, QWidget):
+                col.addWidget(item)
+            else:
+                col.addLayout(item)
+        return col
 
     # ------------------------------------------------------------------
-    # Image overlay rendering
+    # Arena contents
     # ------------------------------------------------------------------
+
+    def _refresh_from_settings(self) -> None:
+        """Receivers, barriers and image overlays from the configuration (on
+        show, and after a save while shown).  Problems are reported, never
+        raised."""
+        problems = []
+        self._barrier_alert = None
+        self._set_alert("")
+        try:
+            self._position_lib.reload(self._settings.config_path)
+        except Exception as exc:
+            problems.append(f"position library: {exc}")
+        try:
+            self._view.set_receivers(self._settings.get_tower_coordinates())
+            self._view.set_limits()
+        except Exception as exc:
+            problems.append(f"receivers: {exc}")
+
+        if self._settings.config_dir != self._barrier_dir:
+            self._rebuild_barrier_manager()
+        try:
+            self._barrier_manager.reload_barriers()
+        except Exception as exc:          # unreadable barriers.toml: track without barriers
+            self._barrier_manager.barriers = []
+            problems.append(f"barriers.toml: {exc}")
+        try:
+            self._draw_barriers()
+        except Exception as exc:
+            problems.append(f"barriers: {exc}")
+
+        try:
+            failed = self._draw_images()
+        except Exception as exc:
+            failed = []
+            problems.append(f"image overlays: {exc}")
+
+        for problem in problems:
+            log.warning("Position panel: %s", problem)
+        if problems:
+            self._set_alert("\u26a0 " + "; ".join(problems))
+        new_failures = set(failed) - self._warned_images
+        if new_failures:
+            self._warned_images |= new_failures
+            widgets.warning(self, "Image Error",
+                            "These image overlays could not be shown (missing or corrupted "
+                            "files in the resources folder):\n" + "\n".join(sorted(new_failures)))
+
+    def _rebuild_barrier_manager(self) -> None:
+        """A fresh BarrierManager for the settings' config directory (the
+        thread must be stopped)."""
+        self._barrier_dir = self._settings.config_dir
+        self._barrier_manager = BarrierManager(self._barrier_dir)
+        self._net_thread.barrier_manager = self._barrier_manager
 
     def _get_resources_dir(self) -> str:
-        config_dir = self._settings.config_dir
-        return os.path.join(config_dir, 'resources')
+        return os.path.join(self._settings.config_dir, 'resources')
 
-    def _draw_images(self) -> None:
-        """Load and render image overlays from barriers.toml onto the arena."""
-        # Remove any previously drawn image artists
+    def _draw_images(self) -> list[str]:
+        """Load and render image overlays from barriers.toml onto the arena;
+        returns the files that could not be shown."""
         for im in self._image_artists:
             try:
                 im.remove()
-            except Exception:
+            except (ValueError, NotImplementedError):
                 pass
         self._image_artists.clear()
 
-        config_dir = self._settings.config_dir
-        barriers_path = os.path.join(config_dir, 'barriers.toml')
-        images = load_images(barriers_path)
-
-        if not images:
-            return
-
+        images = load_images(os.path.join(self._settings.config_dir, 'barriers.toml'))
         resources_dir = self._get_resources_dir()
-        xlim = self.ax.get_xlim()
-        ylim = self.ax.get_ylim()
-        corrupted = []
-
+        xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
+        failed = []
         for overlay in images:
-            filepath = os.path.join(resources_dir, overlay.filename)
             try:
-                img_data = mpl_image.imread(filepath)
-            except Exception:
-                corrupted.append(overlay.filename)
-                continue
-
-            try:
+                img_data = mpl_image.imread(os.path.join(resources_dir, overlay.filename))
                 half_w = overlay.width_cm / 2.0
                 half_h = overlay.height_cm / 2.0
                 cx, cy = overlay.center_x, overlay.center_y
-                extent = [cx - half_w, cx + half_w, cy - half_h, cy + half_h]
-
                 im = self.ax.imshow(
                     img_data,
-                    extent=extent,
+                    extent=[cx - half_w, cx + half_w, cy - half_h, cy + half_h],
                     origin='upper',
-                    zorder=2,
+                    zorder=1.6,           # over the grid, under barriers and the outline
                     interpolation='bilinear',
                 )
-                tr = (
-                    Affine2D()
-                    .rotate_around(cx, cy, math.radians(overlay.rotation_deg))
-                    + self.ax.transData
-                )
-                im.set_transform(tr)
+                im.set_transform(
+                    Affine2D().rotate_around(cx, cy, math.radians(overlay.rotation_deg))
+                    + self.ax.transData)
                 self._image_artists.append(im)
-
-                # Restore arena limits — imshow must never resize the arena
-                self.ax.set_xlim(xlim)
-                self.ax.set_ylim(ylim)
-
             except Exception:
-                corrupted.append(overlay.filename)
-
-        if corrupted:
-            QMessageBox.warning(
-                self,
-                "Image Error",
-                "Image data files are corrupted.",
-            )
-
-    # ------------------------------------------------------------------
-    # Barrier rendering & event handling
-    # ------------------------------------------------------------------
+                failed.append(overlay.filename)
+        # imshow must never resize the arena
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+        return failed
 
     def _draw_barriers(self) -> None:
-        for artists in self._barrier_patches.values():
-            for artist in artists:
+        for artists in self._barrier_artists.values():
+            for artist in artists['shapes'] + artists['labels']:
                 try:
                     artist.remove()
-                except Exception:
+                except (ValueError, NotImplementedError):
                     pass
-        self._barrier_patches.clear()
+        self._barrier_artists.clear()
 
         for barrier in self._barrier_manager.barriers:
-            artists = []
-            color = barrier.color
-            alpha = barrier.alpha
+            shapes, labels = [], []
+            color, alpha = barrier.color, barrier.alpha
+            kind = barrier.barrier_type.value
 
-            if barrier.barrier_type.value == 'polygon' and barrier.vertices:
-                patch = MplPolygon(
-                    barrier.vertices, closed=True,
-                    facecolor=color, alpha=alpha,
-                    edgecolor=color, linewidth=2, zorder=3,
-                )
+            if kind == 'polygon' and barrier.vertices:
+                patch = MplPolygon(barrier.vertices, closed=True, facecolor=color, alpha=alpha,
+                                   edgecolor=color, linewidth=2, zorder=3)
                 self.ax.add_patch(patch)
-                artists.append(patch)
-
-            elif barrier.barrier_type.value == 'circle' and barrier.center and barrier.radius:
-                patch = Circle(
-                    barrier.center, barrier.radius,
-                    facecolor=color, alpha=alpha,
-                    edgecolor=color, linewidth=2, zorder=3,
-                )
+                shapes.append(patch)
+            elif kind == 'circle' and barrier.center and barrier.radius:
+                patch = Circle(barrier.center, barrier.radius, facecolor=color, alpha=alpha,
+                               edgecolor=color, linewidth=2, zorder=3)
                 self.ax.add_patch(patch)
-                artists.append(patch)
+                shapes.append(patch)
+            elif kind == 'line' and barrier.point1 and barrier.point2:
+                (x1, y1), (x2, y2) = barrier.point1, barrier.point2
+                line, = self.ax.plot([x1, x2], [y1, y2], color=color, alpha=alpha,
+                                     linewidth=max(2, barrier.thickness or 5), zorder=3,
+                                     solid_capstyle='round')
+                shapes.append(line)
 
-            elif barrier.barrier_type.value == 'line' and barrier.point1 and barrier.point2:
-                x1, y1 = barrier.point1
-                x2, y2 = barrier.point2
-                thickness_pts = max(2, barrier.thickness or 5)
-                line, = self.ax.plot(
-                    [x1, x2], [y1, y2],
-                    color=color, alpha=alpha,
-                    linewidth=thickness_pts, zorder=3,
-                    solid_capstyle='round',
-                )
-                artists.append(line)
+            centre = None
+            if shapes and barrier.vertices:
+                centre = (sum(v[0] for v in barrier.vertices) / len(barrier.vertices),
+                          sum(v[1] for v in barrier.vertices) / len(barrier.vertices))
+            elif shapes and barrier.center:
+                centre = barrier.center
+            if centre is not None:
+                labels.append(self.ax.text(          # names are plain text, never mathtext
+                    centre[0], centre[1], barrier.name, color='white', fontsize=8,
+                    ha='center', va='center', zorder=4, parse_math=False,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5)))
 
-            if artists and barrier.vertices:
-                cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
-                cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
-                lbl = self.ax.text(
-                    cx, cy, barrier.name, color='white',
-                    fontsize=8, ha='center', va='center', zorder=4,
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5))
-                artists.append(lbl)
-            elif artists and barrier.center:
-                lbl = self.ax.text(
-                    barrier.center[0], barrier.center[1], barrier.name,
-                    color='white', fontsize=8, ha='center', va='center', zorder=4,
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5))
-                artists.append(lbl)
+            self._barrier_artists[barrier.name] = {'barrier': barrier, 'shapes': shapes,
+                                                   'labels': labels}
+        self._dirty = True
 
-            self._barrier_patches[barrier.name] = artists
+    # ------------------------------------------------------------------
+    # Barrier events
+    # ------------------------------------------------------------------
 
     def _highlight_barrier(self, barrier_name: str) -> None:
-        for artist in self._barrier_patches.get(barrier_name, []):
-            try:
-                if hasattr(artist, 'set_edgecolor'):
-                    artist.set_edgecolor('#FF0000')
-                    artist.set_linewidth(3)
-                elif hasattr(artist, 'set_color'):
-                    artist.set_color('#FF0000')
-            except Exception:
-                pass
+        for artist in self._barrier_artists.get(barrier_name, {}).get('shapes', []):
+            if hasattr(artist, 'set_edgecolor'):
+                artist.set_edgecolor('#FF0000')
+                artist.set_linewidth(3)
+            else:
+                artist.set_color('#FF0000')
+        self._dirty = True
 
     def _reset_barrier_visual(self, barrier_name: str) -> None:
-        for barrier in self._barrier_manager.barriers:
-            if barrier.name == barrier_name:
-                for artist in self._barrier_patches.get(barrier_name, []):
-                    try:
-                        if hasattr(artist, 'set_edgecolor'):
-                            artist.set_edgecolor(barrier.color)
-                            artist.set_linewidth(2)
-                        elif hasattr(artist, 'set_color'):
-                            artist.set_color(barrier.color)
-                    except Exception:
-                        pass
-                break
-        self._barrier_status_label.setText("")
+        entry = self._barrier_artists.get(barrier_name)
+        if entry is not None:
+            for artist in entry['shapes']:
+                if hasattr(artist, 'set_edgecolor'):
+                    artist.set_edgecolor(entry['barrier'].color)
+                    artist.set_linewidth(2)
+                else:
+                    artist.set_color(entry['barrier'].color)
+        if barrier_name == self._barrier_alert:
+            self._barrier_alert = None
+            self._set_alert("")
+        self._dirty = True
 
     def _get_reset_timer(self, barrier_name: str) -> QTimer:
-        if barrier_name not in self._barrier_reset_timers:
+        if barrier_name not in self._barrier_timers:
             timer = QTimer(self)
             timer.setSingleShot(True)
-            timer.setInterval(10)
+            timer.setInterval(self.BARRIER_HIGHLIGHT_MS)
             timer.timeout.connect(lambda: self._reset_barrier_visual(barrier_name))
-            self._barrier_reset_timers[barrier_name] = timer
-        return self._barrier_reset_timers[barrier_name]
+            self._barrier_timers[barrier_name] = timer
+        return self._barrier_timers[barrier_name]
 
     def _handle_barrier_event(self, event: BarrierEvent) -> None:
-        if event.event_type == EventType.ENTER:
-            self._highlight_barrier(event.barrier_name)
-            self._barrier_status_label.setText(
-                f"\u26a0 BARRIER: {event.barrier_name} (enter)")
-            self._barrier_status_label.setStyleSheet(
-                "color: #FF4444; font: bold 11px Arial;")
-
-        elif event.event_type in (EventType.INSIDE, EventType.OUTSIDE):
-            self._highlight_barrier(event.barrier_name)
-            self._barrier_status_label.setText(
-                f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type.value})")
-            self._barrier_status_label.setStyleSheet(
-                "color: #FF4444; font: bold 11px Arial;")
-            timer = self._get_reset_timer(event.barrier_name)
-            timer.stop()
-            timer.start()
-
-        elif event.event_type == EventType.EXIT:
+        if event.event_type == EventType.EXIT:
             self._reset_barrier_visual(event.barrier_name)
+            return
+        self._highlight_barrier(event.barrier_name)
+        self._barrier_alert = event.barrier_name
+        self._set_alert(f"\u26a0 BARRIER: {event.barrier_name} ({event.event_type.value})")
+        if event.event_type in (EventType.INSIDE, EventType.OUTSIDE):
+            self._get_reset_timer(event.barrier_name).start()   # restarts it
+
+    def _set_alert(self, text: str) -> None:
+        """Show a barrier alert or the configuration problems in the top bar."""
+        self._barrier_status_label.setText(text)
+        self._barrier_status_label.setToolTip(text)
 
     # ------------------------------------------------------------------
     # NetworkThread signal handlers  (run on main thread via queued conn)
     # ------------------------------------------------------------------
 
-    def _on_lm_updated(self, x: float, y: float) -> None:
-        self.position_history.append((x, y))
-        self.multilat_label.setText(f'Multilat: ({x:.1f}, {y:.1f})')
+    def _on_fix(self, fix: Fix) -> None:
+        if fix.session != self._net_thread.session:
+            return                      # queued by a run that has been stopped since
+        self._fix = fix
+        if fix.lm is not None:
+            self._lm_history.append(fix.lm)
+        if fix.cep is not None:
+            self._cep_history.append(fix.cep)
+        for history, distance in zip(self._distance_histories, fix.distances):
+            history.append(distance)
+        self._dirty = True
 
-        if self.show_multilateration:
-            self.vehicle_point.set_data([x], [y])
-            if len(self.position_history) > 1:
-                tx = [p[0] for p in self.position_history]
-                ty = [p[1] for p in self.position_history]
-                self.vehicle_trail.set_data(tx, ty)
-        else:
-            self.vehicle_point.set_data([], [])
-            self.vehicle_trail.set_data([], [])
-
-    def _on_cep_updated(self, x: float, y: float) -> None:
-        self.cep_history.append((x, y))
-        self.cep_label.setText(f'CEP: ({x:.1f}, {y:.1f})')
-
-        if self.show_cep:
-            self.cep_point.set_data([x], [y])
-            if len(self.cep_history) > 1:
-                tx = [p[0] for p in self.cep_history]
-                ty = [p[1] for p in self.cep_history]
-                self.cep_trail.set_data(tx, ty)
-        else:
-            self.cep_point.set_data([], [])
-            self.cep_trail.set_data([], [])
-
-    def _on_distances_updated(self, distances: list) -> None:
-        for i in range(6):
-            d = distances[i]
-            self.distance_histories[i].append(d)
-            hist = list(self.distance_histories[i])
-            self.distance_lines[i].set_data(list(range(len(hist))), hist)
-            if hist:
-                yc = hist[-1]
-                yr = yc * 3
-                self.distance_insets[i].set_ylim(max(0, yc - yr), yc + yr)
-                self.distance_insets[i].set_xlim(0, max(50, len(hist)))
-            self.distance_windows[i].set_text(f'{d:.1f} cm')
-
-    def _on_sane_updated(self, sane_indices: list) -> None:
-        for i in range(6):
-            color = '#39FF14' if i in sane_indices else '#FF0000'
-            self.sane_leds[i].set_facecolor(color)
-
-    def _on_cep_validity_changed(self, invalid: bool) -> None:
-        color = '#FF0000' if invalid else '#39FF14'
-        self.cep_validity_led.setStyleSheet(
-            f"background-color:{color}; border-radius:10px; border:2px solid white;")
-
-    def _on_insuff_changed(self, insufficient: bool) -> None:
-        color = '#FF0000' if insufficient else '#39FF14'
-        self.insuff_led.setStyleSheet(
-            f"background-color:{color}; border-radius:10px; border:2px solid white;")
-
-    def _on_pos_sec_updated(self, rate: float) -> None:
+    def _on_rate_updated(self, rate: float) -> None:
         self._pos_sec_label.setText(f"Pos/s: {rate:.1f}")
 
+    def _on_state_changed(self, text: str, color: str) -> None:
+        tooltip = "" if color == widgets.GREEN else (self._client.last_error or "")
+        self._state_label.set_state(text, color, tooltip)
+
+    def _on_log_failed(self, message: str) -> None:
+        self._log_cb.blockSignals(True)
+        self._log_cb.setChecked(False)
+        self._log_cb.blockSignals(False)
+        self._log_cb.setText("Log to file (failed)")
+        self._log_cb.setToolTip(f"The position log could not be opened: {message}")
+
+    def _on_log_toggled(self, checked: bool) -> None:
+        self._log_cb.setText("Log to file")
+        self._net_thread.set_logging(checked)
+
+    def _on_mode_toggled(self, checked: bool) -> None:
+        self._mode_cb.setText("Continuous (UDP)" if checked else "Pulse (TCP)")
+        self._net_thread.set_mode(checked)
+
+    def _on_show_multilateration(self, checked: bool) -> None:
+        self.show_multilateration = checked
+        self._dirty = True
+
+    def _on_show_cep(self, checked: bool) -> None:
+        self.show_cep = checked
+        self._dirty = True
+
+    def _on_link_changed(self, up: bool) -> None:
+        if not self._shown:
+            return
+        if up:
+            self._net_thread.wake()     # restart the stream without waiting for the next check
+        else:                           # say so at once; the thread pauses at its next check
+            self._on_state_changed(*STATE_LINK_DOWN)
+
+    def _on_config_changed(self) -> None:
+        """The configuration was saved (receivers, calibration, origin ...):
+        barriers may have moved with the origin and the config directory may
+        have changed, so start from a fresh BarrierManager.  Redraw now while
+        shown, else on the next show."""
+        try:
+            if not self._shown:
+                self._rebuild_barrier_manager()
+                return
+            self._net_thread.stop()
+            self._rebuild_barrier_manager()
+            self._refresh_from_settings()
+            self._reset_display()
+            if self._shown:               # not hidden during an image warning meanwhile
+                self._net_thread.start()
+        except Exception:
+            log.exception("Position panel: could not apply the new configuration")
+
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def _reset_display(self) -> None:
+        """Forget the previous session's fixes and histories."""
+        self._fix = None
+        self._lm_history.clear()
+        self._cep_history.clear()
+        for history in self._distance_histories:
+            history.clear()
+        self.multilat_label.setText("Multilat: (---, ---)")
+        self.cep_label.setText("CEP: (---, ---)")
+        self._hdop_label.setText("HDOP: ---")
+        self._hdop_label.setStyleSheet(f"color: {widgets.DIM};")
+        self._sane_label.setText("Receivers: -/-")
+        self.cep_validity_led.set_color(widgets.GREEN)
+        self.insuff_led.set_color(widgets.GREEN)
+        self._pos_sec_label.setText("Pos/s: --")
+        self._fps_label.setText("FPS: --")
+        for plot in self._distance_plots:
+            plot.clear()
+        self._view.clear_points('lm')
+        self._view.clear_points('cep')
+        self._lm_trail.set_data([], [])
+        self._cep_trail.set_data([], [])
+        self._dirty = True
+
+    def _update_display(self) -> None:
+        """Push the latest fix and the histories to the labels and the plots."""
+        fix = self._fix
+        if fix is not None:
+            if fix.lm is not None:
+                self.multilat_label.setText(f"Multilat: ({fix.lm[0]:.1f}, {fix.lm[1]:.1f})")
+            if fix.cep is not None:
+                self.cep_label.setText(f"CEP: ({fix.cep[0]:.1f}, {fix.cep[1]:.1f})")
+            self.cep_validity_led.set_color(widgets.GREEN if fix.cep_success else widgets.RED)
+            n_sane = len(fix.sane)
+            self.insuff_led.set_color(widgets.GREEN if n_sane >= 3 else widgets.RED)
+            self._sane_label.setText(f"Receivers: {n_sane}/{len(fix.distances)}")
+            self._show_hdop(fix.hdop)
+            for rid, plot in enumerate(self._distance_plots):
+                plot.update(self._distance_histories[rid], rid in fix.sane)
+
+        # The LM marker is the larger one, under CEP's, so both show when they agree
+        self._draw_track('lm', self._lm_history, self._lm_trail, self.show_multilateration,
+                         widgets.GREEN, 'Multilateration (LM)', size=170, zorder=8.0)
+        self._draw_track('cep', self._cep_history, self._cep_trail, self.show_cep,
+                         CEP_COLOR, 'CEP', size=70, zorder=8.2)
+
+    def _show_hdop(self, hdop: float) -> None:
+        if not math.isfinite(hdop):
+            text, color = "HDOP: no fix", widgets.RED
+        else:
+            text = f"HDOP: {hdop:.2f}"
+            color = (widgets.GREEN if hdop <= HDOP_GOOD else
+                     widgets.GOLD if hdop <= HDOP_FAIR else widgets.ORANGE)
+        if text != self._hdop_label.text():
+            self._hdop_label.setText(text)
+            self._hdop_label.setStyleSheet(f"color: {color};")
+
+    def _draw_track(self, group: str, history, trail, shown: bool, color: str,
+                    legend: str, size: float, zorder: float) -> None:
+        """The current position (a point group, so it is in the legend) and the trail."""
+        if shown and history:
+            self._view.set_points(group, [history[-1]], color=color, marker='o', size=size,
+                                  zorder=zorder, legend=legend)
+            xs, ys = zip(*history)
+            trail.set_data(xs, ys)
+        else:
+            self._view.clear_points(group)
+            trail.set_data([], [])
+
     def _on_refresh_timer(self) -> None:
-        now = time.monotonic()
-        dt = now - self._last_draw_time
-        if dt > 0:
-            self._fps_label.setText(f"FPS: {1.0 / dt:.1f}")
-        self._last_draw_time = now
+        if not self._dirty:
+            return
+        self._dirty = False
+        try:
+            self._update_display()
+        except Exception:
+            log.exception("Position panel: could not update the display")
         self._canvas.draw_idle()
+
+    def _on_draw(self, _event) -> None:
+        self._draws += 1
+
+    def _update_fps(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._draws_since
+        if elapsed > 0:
+            self._fps_label.setText(f"FPS: {self._draws / elapsed:.1f}")
+        self._draws, self._draws_since = 0, now
 
     # ------------------------------------------------------------------
     # Panel lifecycle
     # ------------------------------------------------------------------
 
     def on_panel_show(self) -> None:
-        self.update_arena(self._settings.get_tower_coordinates())
-        self._barrier_manager.reload_barriers()
-        self._draw_barriers()
-        self._draw_images()
+        self._shown = True
+        self._refresh_from_settings()
+        if not self._shown:               # hidden during an image warning (window closed)
+            return
+        self._reset_display()
+        self._barrier_manager.clear_states()
+        self._state_label.set_state("Starting…", widgets.AMBER)
+        self._draws, self._draws_since = 0, time.monotonic()
         if not self._net_thread.isRunning():
             self._net_thread.start()
         self._refresh_timer.start()
+        self._fps_timer.start()
 
     def on_panel_hide(self) -> None:
+        self._shown = False
         self._refresh_timer.stop()
-        if self._net_thread.isRunning():
-            self._net_thread.stop()
+        self._fps_timer.stop()
+        self._net_thread.stop()           # synchronous: the position library is free after this
+        for timer in self._barrier_timers.values():
+            timer.stop()
         self._barrier_manager.clear_states()
+        self._state_label.set_state("Stopped", widgets.DIM)

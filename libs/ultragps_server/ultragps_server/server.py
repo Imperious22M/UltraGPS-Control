@@ -80,10 +80,14 @@ class UltraGPSServer:
                 raise ValueError(f"Port name '{name}' is already registered")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(1.0)
-        sock.bind((self._bind_ip, port))
-        sock.listen(5)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(1.0)
+            sock.bind((self._bind_ip, port))
+            sock.listen(5)
+        except OSError:
+            sock.close()            # e.g. EADDRINUSE: don't leak the socket
+            raise
 
         state = _PortState(name=name, port=port, proto='tcp', sock=sock)
 
@@ -109,9 +113,13 @@ class UltraGPSServer:
                 raise ValueError(f"Port name '{name}' is already registered")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(1.0)
-        sock.bind((self._bind_ip, port))
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(1.0)
+            sock.bind((self._bind_ip, port))
+        except OSError:
+            sock.close()
+            raise
 
         state = _PortState(name=name, port=port, proto='udp', sock=sock)
 

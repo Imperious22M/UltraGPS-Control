@@ -16,7 +16,7 @@ sudo apt install ./ultragps-control_*_all.deb
 
 Using `apt install ./file.deb` rather than `dpkg -i` lets apt pull in the
 runtime dependencies (`python3-pyqt6`, `python3-matplotlib`, `python3-numpy`,
-`python3-scipy`) in the same step. If you use `dpkg -i` instead, follow it with
+`python3-scipy`, `python3-openpyxl`) in the same step. If you use `dpkg -i` instead, follow it with
 `sudo apt-get install -f` to resolve them.
 
 Then run it from a terminal or from your desktop's application menu:
@@ -24,6 +24,10 @@ Then run it from a terminal or from your desktop's application menu:
 ```bash
 ultragps-control            # see `ultragps-control --help` for options
 ```
+
+The ground-station program (`UltraGpsXY`) must be running first; if it is not,
+the program says so and offers Retry / Quit. See [Usage](usage.md) for the
+options and the startup check.
 
 The package is architecture-independent (`all`), since it ships pure Python.
 
@@ -51,10 +55,16 @@ generic to sit on the global Python path. The launcher adds that directory to
 ## Requirements
 
 - Python 3.11 or later (for `tomllib`)
-- PyQt6, Matplotlib, NumPy, SciPy
+- PyQt6, Matplotlib, NumPy, SciPy, openpyxl
 
 On Ubuntu 24.04 / Debian 12 and later these are all available as system
 packages, which is what the `.deb` depends on.
+
+Of the five libraries, `ultragps_position` needs NumPy and SciPy, and
+`ultragps_calibration` needs NumPy (for choosing calibration points) and
+`ultragps_client`; the others use the standard library only. openpyxl is used
+only for the spreadsheet copy of the position log: without it the log is
+written as CSV alone.
 
 ## Development checkout
 
@@ -70,11 +80,16 @@ cd UltraGPS-Control
 ```
 
 `run.sh` invokes `.venv/bin/python graphics.py` directly, so there is no
-`activate` step. Both scripts accept the program's options:
+`activate` step, and passes the program's options on:
 
 ```bash
 ./run.sh --ip 192.168.1.100
+./run.sh --ip 192.168.1.100 --ground-tcp-port 9100 --ground-udp-port 9101 -v
 ```
+
+To try the program on a computer without the UltraGPS hardware, start the
+stand-in ground station from the
+[Developer's Guide](developer-guide.md#running-without-the-hardware) first.
 
 Because the libraries are installed editable, changes under `libs/` take effect
 immediately with no reinstall.

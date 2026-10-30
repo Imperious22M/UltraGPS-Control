@@ -5,10 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ultragps-calibration"
 version = "1.0.0"
-description = "Standalone two-point histogram calibration library for the UltraGPS system"
+description = "Standalone 2- to 4-point histogram calibration library for the UltraGPS system"
 requires-python = ">=3.11"
 dependencies = [
     "ultragps-client",
+    "numpy>=1.24",
 ]
 
 [tool.setuptools.packages.find]

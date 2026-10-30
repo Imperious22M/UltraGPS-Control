@@ -100,7 +100,7 @@ class UltraGPSPositionLib:
                           positions and per-receiver calibration offsets.
         max_differential: Maximum allowed jump in distance (cm) between two
                           consecutive readings before a receiver is flagged as
-                          noisy.  Default: 30.
+                          noisy.  Default: 50.
         max_distance:     Top-band reject (cm): readings above this are
                           discarded by the sanity filter.  A receiver that
                           loses the signal can report a very high value.
@@ -128,8 +128,7 @@ class UltraGPSPositionLib:
         self._init_from_config()
 
         # ── Differential-filter state ────────────────────────────────────────
-        self._last_distances:     Optional[np.ndarray] = None
-        self._last_sane_indices:  Optional[np.ndarray] = None
+        self._last_distances: Optional[np.ndarray] = None
 
         # ── OLS+LM last-good fallback ─────────────────────────────────────────
         self._lm_last_good_pos: Optional[np.ndarray] = None
@@ -317,7 +316,6 @@ class UltraGPSPositionLib:
         loaded from config.toml are preserved.
         """
         self._last_distances        = None
-        self._last_sane_indices     = None
         self._lm_last_good_pos      = None
         self._cep_last_good_pos     = None
         self._cep_last_good_cep     = float("inf")
@@ -519,25 +517,21 @@ class UltraGPSPositionLib:
            is below ``max_differential`` (cm).  This check is skipped on the
            first call when no prior data exists.
 
-        Updates ``_last_distances`` and ``_last_sane_indices`` in-place.
+        Updates ``_last_distances`` in-place.
         """
         arr           = np.array(distances, dtype=float)
         top           = self.max_distance if self.max_distance is not None else self._max_receiver_dist
         within_bounds = (arr > 0) & (arr <= top)
 
         if self._last_distances is None:
-            self._last_distances    = arr.copy()
-            sane                    = np.where(within_bounds)[0]
-            self._last_sane_indices = sane
-            return sane
+            self._last_distances = arr.copy()
+            return np.where(within_bounds)[0]
 
         diff      = np.abs(arr - self._last_distances)
         sane_mask = within_bounds & (diff < self.max_differential)
-        sane      = np.where(sane_mask)[0]
 
-        self._last_distances    = arr.copy()
-        self._last_sane_indices = sane
-        return sane
+        self._last_distances = arr.copy()
+        return np.where(sane_mask)[0]
 
     # ─── Multilateration core ─────────────────────────────────────────────────
 

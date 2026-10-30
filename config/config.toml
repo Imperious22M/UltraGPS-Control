@@ -4,11 +4,12 @@ calibration_reads = 5
 number_of_receivers = 6
 serial_port = '/dev/ttyACM0'
 units = 'cm'
-cal_point_1 = [0.0, 59.0]
+cal_point_1 = [-1.0, 59.0]
 cal_point_2 = [-59.0, 0.0]
+cal_points = [[-1.0, 59.0], [-59.0, 0.0]]
 
 [[receivers]]
-cal_distances = [212.72752525237536, 131.9280106724876]
+cal_distances = [212.17445652104308, 131.9280106724876]
 id = 0
 position = [-118.0, -118.0]
 
@@ -17,7 +18,7 @@ position = [-118.0, -118.0]
     slope = 0.3758116957204082
 
 [[receivers]]
-cal_distances = [131.9280106724876, 59.0]
+cal_distances = [131.03434664239754, 59.0]
 id = 1
 position = [-118.0, 0.0]
 
@@ -26,7 +27,7 @@ position = [-118.0, 0.0]
     slope = 0.35574639352432974
 
 [[receivers]]
-cal_distances = [131.9280106724876, 131.9280106724876]
+cal_distances = [131.03434664239754, 131.9280106724876]
 id = 2
 position = [-118.0, 118.0]
 
@@ -35,7 +36,7 @@ position = [-118.0, 118.0]
     slope = 0.35574639352432974
 
 [[receivers]]
-cal_distances = [212.72752525237536, 212.72752525237536]
+cal_distances = [213.283848427395, 212.72752525237536]
 id = 3
 position = [118.0, -118.0]
 
@@ -44,7 +45,7 @@ position = [118.0, -118.0]
     slope = 0.35574639352432974
 
 [[receivers]]
-cal_distances = [131.9280106724876, 177.0]
+cal_distances = [132.82319074619463, 177.0]
 id = 4
 position = [118.0, 0.0]
 
@@ -53,7 +54,7 @@ position = [118.0, 0.0]
     slope = 0.3694425354714131
 
 [[receivers]]
-cal_distances = [131.9280106724876, 212.72752525237536]
+cal_distances = [132.82319074619463, 212.72752525237536]
 id = 5
 position = [118.0, 118.0]
 

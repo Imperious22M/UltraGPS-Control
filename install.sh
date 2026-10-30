@@ -63,7 +63,7 @@ echo "Installing dependencies and local libraries..."
 # Sanity check: the GUI must be able to import every module it needs.
 echo "Verifying installation..."
 MPLBACKEND=Agg "$VENV_DIR/bin/python" -c "
-import PyQt6, matplotlib, numpy, scipy
+import PyQt6, matplotlib, numpy, scipy, openpyxl
 import ultragps_client, ultragps_position, ultragps_calibration
 import ultragps_barrier, ultragps_server
 print('All modules import correctly.')

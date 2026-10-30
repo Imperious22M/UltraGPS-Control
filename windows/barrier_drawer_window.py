@@ -2,81 +2,274 @@
 
 Interactive click-to-draw editor for creating, editing, and saving virtual
 barriers on the arena canvas.  Supports polygon, circle, and line barriers
-with configurable trigger modes, colours, and callbacks.
+with configurable trigger modes, colours, and callbacks, and image overlays
+(a court or field diagram, say) that can be moved, scaled, rotated and traced
+into a polygon barrier.
+
+The panel follows the window size: its controls through ``windows.ui_scale``
+and the arena plot through a ``ScalingCanvas``.  The arena itself (receivers
+joined in any layout, the origin and the compass rose) is the shared
+``ArenaView``.  Barriers and images are read from barriers.toml whenever the
+panel is shown and whenever the configuration changes (an origin shift
+translates that file), so an old frame is never saved over a translated one.
 """
 
-import os
 import math
+import os
+import re
 import shutil
+import tomllib
+from functools import partial
 
 import numpy as np
-
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QListWidget, QListWidgetItem, QComboBox, QDoubleSpinBox, QMessageBox,
-    QFrame, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QRadioButton,
-    QButtonGroup,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QComboBox, QDoubleSpinBox, QFrame, QDialog, QFileDialog, QGridLayout,
+    QRadioButton, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, QEvent
 
+import matplotlib.colors as mcolors
+import matplotlib.image as mpl_image
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 from matplotlib.transforms import Affine2D
-import matplotlib.image as mpl_image
-import matplotlib.lines as mlines
 
 from SettingsModule import SettingsModule
 from ultragps_barrier import (
     BarrierData, BarrierType, TriggerMode, TriggerWhen,
     ImageOverlay,
-    load_barriers, save_barriers, validate_barrier,
+    load_barriers, validate_barrier,
     check_point_in_barrier,
     load_images, save_all, polygon_from_image,
 )
+from windows import ui_scale, widgets
+from windows.arena_view import ArenaView
+
+#: The panel's accent colour (its main-menu button is orange).
+ACCENT = widgets.ORANGE
+
+#: Background of the ruler and image-import buttons.
+TOOL_BLUE = "#4444CC"
+
+#: Grey of the "Clear All" button.
+NEUTRAL_GREY = "#888888"
+
+#: Distance (logical pixels at the canvas's reference size) within which a
+#: click grabs a handle, a ruler end or a line barrier.
+PICK_PX = 12.0
+
+#: Canvas size (logical pixels) in a 1200 x 900 window: the plot's text,
+#: markers and lines have their design size there and scale with the canvas.
+CANVAS_REF_SIZE = (780, 780)
+
+#: Widths (design pixels) of the tools sidebar and the barrier side panel.
+TOOLS_WIDTH = 170
+SIDE_PANEL_WIDTH = 250
+
+#: Preset barrier colours; the combo's last entry, "Custom", asks for a hex value.
+PRESET_COLORS = [
+    ("Red",     "#FF0000"),
+    ("Orange",  "#FF8800"),
+    ("Yellow",  "#FFFF00"),
+    ("Green",   "#00FF00"),
+    ("Cyan",    "#00FFFF"),
+    ("Magenta", "#FF00FF"),
+]
+
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif)"
+
+_HEX_COLOR = re.compile(r'^#[0-9A-Fa-f]{6}$')
+
+_TYPE_NAMES = {BarrierType.POLYGON: "Polygon",
+               BarrierType.CIRCLE:  "Circle",
+               BarrierType.LINE:    "Line"}
+_TRIGGER_MODES = {"Event": TriggerMode.EVENT, "Continuous": TriggerMode.CONTINUOUS}
+_TRIGGER_WHEN = {"Inside": TriggerWhen.INSIDE, "Outside": TriggerWhen.OUTSIDE}
+
+# Style sheets (lengths in design pixels; ui_scale scales them)
+_LIST_CSS = """
+    QListWidget { background:#111111; color:white; font:12px Arial;
+                  border:1px solid #FF8800; }
+    QListWidget::item { background:#111111; color:white; }
+    QListWidget::item:focus { outline:0; }
+    QListWidget::item:selected { background:#FF8800; color:black; }
+    QListWidget::item:selected:!active { background:#FF8800; color:black; }
+    QListWidget::item:selected:focus { background:#FF8800; color:black; outline:0; }
+"""
+
+_FORM_CSS = """
+    QLabel { color:#AAAAAA; font:bold 12px Arial; }
+    QComboBox, QDoubleSpinBox, QLineEdit { background:#222222; color:white;
+                                           font:12px Arial; padding:2px 6px; }
+    QComboBox:disabled, QDoubleSpinBox:disabled, QLineEdit:disabled {
+        background:#1a1a1a; color:#555555; }
+    QComboBox QAbstractItemView { background:#222222; color:white;
+                                  selection-background-color:#FF8800;
+                                  selection-color:black; }
+"""
+
+_RADIO_CSS = """
+    QRadioButton { color:#CCCCCC; font:12px Arial; spacing:6px; }
+    QRadioButton::indicator { width:13px; height:13px; }
+    QRadioButton::indicator:checked { background-color:#FF8800;
+        border:2px solid #FF8800; border-radius:7px; }
+    QRadioButton::indicator:unchecked { background-color:#222222;
+        border:2px solid #666666; border-radius:7px; }
+"""
+
+_DIALOG_CSS = """
+    QDialog { background-color:#1a1a1a; }
+    QLabel { color:white; font:12px Arial; }
+    QLabel#error { color:#FF4444; font:italic 11px Arial; }
+    QLineEdit, QDoubleSpinBox { background:#222222; color:white; font:12px Arial;
+                                padding:4px; }
+"""
+
+
+# ---------------------------------------------------------------------------
+# Small widget helpers
+# ---------------------------------------------------------------------------
+
+def _style_inputs(widget, css: str) -> None:
+    """Give a box of input fields the style sheet *css*, scaled now and on
+    every change of the UI scale.
+
+    On a scaled-up UI the spin-box buttons get a width that grows with it (the
+    style's own stay 16 px wide, with tiny arrows); below that the style's own
+    are kept, since it draws no arrows in narrower ones.  A combo box's arrow
+    keeps the style's size (styling it would need an image), as in
+    ``windows.widgets``.
+    """
+    ui_scale.bind(widget, partial(_apply_input_css, css), key="style")
+
+
+def _apply_input_css(css: str, widget, factor: float) -> None:
+    sheet = ui_scale.scale_css(css, factor)
+    if factor > 1.0:
+        width = ui_scale.scale_length(16, factor)
+        sheet += f"QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width:{width}px; }}"
+    widget.setStyleSheet(sheet)
+
+
+def _title(text: str, size_pt: float) -> QLabel:
+    """A bold, centred title in the panel's accent colour."""
+    lbl = QLabel(text)
+    ui_scale.font(lbl, size_pt, bold=True)
+    lbl.setStyleSheet(f"color: {ACCENT};")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return lbl
+
+
+def _status_label() -> QLabel:
+    """A word-wrapped status line (its colour is set with each message)."""
+    lbl = QLabel()
+    lbl.setTextFormat(Qt.TextFormat.PlainText)      # messages quote names as typed
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+    lbl.setWordWrap(True)
+    # A word longer than the column (a file name full of underscores, say)
+    # must not widen the column past its scroll area, which would cut off
+    # everything on its right
+    lbl.setMinimumWidth(1)
+    _set_label(lbl, "Ready", "white")
+    return lbl
+
+
+def _set_label(lbl: QLabel, text: str, color: str) -> None:
+    """Show *text* in *color* on a status line."""
+    lbl.setText(text)
+    ui_scale.style(lbl, f"color: {color}; font: bold 13px Arial;")
+
+
+def _separator(shape: QFrame.Shape, css: str = "color: #333333;") -> QFrame:
+    """A thin horizontal or vertical rule."""
+    line = QFrame()
+    line.setFrameShape(shape)
+    ui_scale.style(line, css)
+    return line
+
+
+def _spacer(width: float) -> QWidget:
+    """A fixed horizontal gap (design pixels) that scales with the UI."""
+    gap = QWidget()
+    ui_scale.fixed_width(gap, width)
+    return gap
+
+
+def _form_grid(rows, spacing: float = 6) -> QGridLayout:
+    """Label / field rows; each label right-aligned and centred on its field
+    (which may be taller than the label, e.g. a spin box)."""
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    ui_scale.spacing(grid, spacing)
+    for row, (label, field) in enumerate(rows):
+        grid.addWidget(QLabel(label), row, 0,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(field, row, 1)
+    grid.setColumnStretch(1, 1)
+    return grid
+
+
+def _section_problem(path: str) -> str | None:
+    """Why barriers.toml cannot be shown as it is because its ``barrier`` or
+    ``image`` value is not a list of ``[[...]]`` tables (``barrier = 5``, a
+    hand edit), or None.  The loaders skip such a value; the drawer treats the
+    file as unreadable instead, so that saving asks before replacing it."""
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as fh:
+        data = tomllib.load(fh)
+    for key in ('barrier', 'image'):
+        if key in data and not isinstance(data[key], list):
+            return f"'{key}' is {data[key]!r}, not a list of [[{key}]] sections"
+    return None
+
+
+def _dialog_buttons(dialog: QDialog) -> QHBoxLayout:
+    """OK (answers Enter) and Cancel for one of the panel's dialogs."""
+    row = QHBoxLayout()
+    row.addStretch(1)
+    ok = widgets.neon_button("OK", widgets.GREEN, padding=(5, 18))
+    ok.setDefault(True)
+    ok.clicked.connect(dialog.accept)
+    cancel = widgets.neon_button("Cancel", "#555555", "white", padding=(5, 18))
+    cancel.clicked.connect(dialog.reject)
+    row.addWidget(ok)
+    row.addWidget(cancel)
+    return row
 
 
 class _CustomColorDialog(QDialog):
     """Small popup that lets the user enter a custom hex colour."""
 
-    import re as _re  # class-level so accept() can use it without a module import
-
     def __init__(self, parent=None, initial_hex: str = "#FF0000") -> None:
         super().__init__(parent)
         self.setWindowTitle("Custom Colour")
-        self.setStyleSheet("background-color: #1a1a1a; color: white;")
-        self.setMinimumWidth(280)
+        self.setModal(True)
+        _style_inputs(self, _DIALOG_CSS)
 
         layout = QVBoxLayout(self)
-
-        lbl = QLabel("Enter hex colour (#RRGGBB):")
-        lbl.setStyleSheet("color: white; font: 11px Arial;")
-        layout.addWidget(lbl)
+        ui_scale.margins(layout, 14, 12, 14, 12)
+        ui_scale.spacing(layout, 8)
+        layout.addWidget(QLabel("Enter hex colour (#RRGGBB):"))
 
         self._hex_edit = QLineEdit(initial_hex)
-        self._hex_edit.setStyleSheet(
-            "background:#222; color:white; font:12px Arial; padding:4px;")
+        ui_scale.min_width(self._hex_edit, 260)
         layout.addWidget(self._hex_edit)
 
         # Error label — hidden until validation fails
         self._error_lbl = QLabel("")
-        self._error_lbl.setStyleSheet("color: #FF4444; font: italic 10px Arial;")
+        self._error_lbl.setObjectName("error")
+        self._error_lbl.setWordWrap(True)
         self._error_lbl.setVisible(False)
         layout.addWidget(self._error_lbl)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.setStyleSheet("color: white; font: 11px Arial;")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        layout.addLayout(_dialog_buttons(self))
 
     def accept(self) -> None:
         """Validate before closing — show an inline error and stay open if invalid."""
-        import re
         hex_val = self.hex_value()
-        if re.match(r'^#[0-9A-Fa-f]{6}$', hex_val):
+        if _HEX_COLOR.match(hex_val):
             self._error_lbl.setVisible(False)
             super().accept()
         else:
@@ -99,42 +292,30 @@ class _ImportImageDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Image")
-        self.setStyleSheet("background-color: #1a1a1a; color: white;")
+        self.setModal(True)
+        _style_inputs(self, _DIALOG_CSS)
 
-        form = QFormLayout()
-        lbl_style = "color: white; font: 11px Arial;"
-
-        self._width_spin = QDoubleSpinBox()
-        self._width_spin.setRange(1.0, 10000.0)
-        self._width_spin.setValue(100.0)
-        self._width_spin.setSuffix(" cm")
-        self._width_spin.setStyleSheet("background:#222; color:white; font:11px Arial;")
-
-        self._height_spin = QDoubleSpinBox()
-        self._height_spin.setRange(1.0, 10000.0)
-        self._height_spin.setValue(100.0)
-        self._height_spin.setSuffix(" cm")
-        self._height_spin.setStyleSheet("background:#222; color:white; font:11px Arial;")
-
-        w_lbl = QLabel("Width (cm):")
-        w_lbl.setStyleSheet(lbl_style)
-        h_lbl = QLabel("Height (cm):")
-        h_lbl.setStyleSheet(lbl_style)
-
-        form.addRow(w_lbl, self._width_spin)
-        form.addRow(h_lbl, self._height_spin)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.setStyleSheet("color: white; font: 11px Arial;")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._width_spin = self._size_spin()
+        self._height_spin = self._size_spin()
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        ui_scale.margins(layout, 14, 12, 14, 12)
+        ui_scale.spacing(layout, 10)
+        layout.addLayout(_form_grid((("Width (cm):", self._width_spin),
+                                     ("Height (cm):", self._height_spin)), spacing=8))
+        layout.addLayout(_dialog_buttons(self))
+
+    @staticmethod
+    def _size_spin() -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(1.0, 10000.0)
+        spin.setValue(100.0)
+        spin.setSuffix(" cm")
+        ui_scale.min_width(spin, 140)
+        return spin
 
     def values(self) -> tuple[float, float]:
+        """The entered (width, height) in cm."""
         return self._width_spin.value(), self._height_spin.value()
 
 
@@ -149,24 +330,16 @@ class BarrierDrawerPanel(QWidget):
         super().__init__()
         self._settings = settings_module
         self._main_window = main_window
-        self.setStyleSheet("background-color: black;")
+        # Paint the panel's own black background (dialogs opened from it keep theirs)
+        self.setObjectName("barrierDrawerPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("QWidget#barrierDrawerPanel { background-color: black; }")
 
-        self.grid_padding = 20
-
-        # Compass rose handles
-        self._compass_x_arrow = None
-        self._compass_x_text = None
-        self._compass_y_arrow = None
-        self._compass_y_text = None
-
-        # Receiver plot elements
-        self.receiver_scatter = None
-        self.receiver_labels: list = []
-        self.connection_line = None
-
-        # Barrier storage
+        # Barrier storage; artists are keyed by id() of their barrier/overlay,
+        # so that two entries with the same name never share artists
         self._barriers: list[BarrierData] = []
-        self._barrier_patches: dict[str, list] = {}
+        self._barrier_artists: dict[int, list] = {}   # id -> [shape, name label]
+        self._load_error: str | None = None          # why barriers.toml could not be read
 
         # Drawing state machine
         self._drawing_mode = None  # None, "polygon", "circle", "line"
@@ -176,6 +349,7 @@ class BarrierDrawerPanel(QWidget):
         self._preview_artists: list = []
 
         # UI interaction state
+        self._active: bool = False      # between on_panel_show and on_panel_hide
         self._current_mode: str = 'normal'
         self._has_unsaved_changes: bool = False
         self._prev_color_idx: int = 0  # for reverting if Custom dialog is cancelled
@@ -183,134 +357,66 @@ class BarrierDrawerPanel(QWidget):
         # Drag-edit state
         self._drag_state = None
         self._handle_artists: list = []
-        self._handle_meta: list = []  # parallel: ('vertex', idx) | ('center',) | ('radius',)
+        self._handle_meta: list = []  # parallel: ('vertex', idx) | ('centroid',) | ('center',) | ('radius',)
 
         # Ruler tool state
         self._ruler_mode: bool = False
         self._ruler_p1: tuple | None = None    # pending first point (before ruler drawn)
         self._ruler_p1_dot = None              # dot artist for pending first point
         self._ruler_endpoints: list = []       # [(x1,y1),(x2,y2)] for complete ruler
-        self._ruler_artists: list = []         # [line, dot1, dot2, ann] for complete ruler
-        self._cid_key = None
+        self._ruler_artists: list = []         # [line, dot1, dot2, ann, dot_mid] for complete ruler
 
         # Image overlay state
         self._images: list[ImageOverlay] = []
-        self._image_artists: dict[str, object] = {}   # name -> AxesImage
+        self._image_artists: dict[int, object] = {}   # id(overlay) -> AxesImage
         self._selected_image_idx: int = -1
         self._img_handle_artists: list = []
         self._img_handle_meta: list = []  # ('img_center',)|('img_corner',i)|('img_rotate',)
 
-        # Canvas event connection IDs
-        self._cid_press = None
-        self._cid_release = None
-        self._cid_motion = None
+        # Canvas event connection IDs (connected while the panel is shown)
+        self._cids: list[int] = []
 
-        receiver_positions = self._settings.get_tower_coordinates()
-        self._build_figure(receiver_positions)
+        self._build_figure()
         self._build_ui()
+        self._refresh_arena()
 
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(33)
-        self._refresh_timer.timeout.connect(self._canvas.draw_idle)
+        main_window.config_changed.connect(self._on_config_changed)
 
     # ------------------------------------------------------------------
     # Figure
     # ------------------------------------------------------------------
 
-    def _build_figure(self, receiver_positions: list) -> None:
-        self.receiver_positions = receiver_positions
-        rx = [p[1][0] for p in receiver_positions]
-        ry = [p[1][1] for p in receiver_positions]
-
-        self.fig = Figure(figsize=(10, 10), facecolor='black')
+    def _build_figure(self) -> None:
+        """The arena figure on a canvas whose DPI follows its size."""
+        self.fig = Figure(facecolor='black')
+        self.fig.subplots_adjust(left=0.10, right=0.98, bottom=0.07, top=0.94)
         self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor('black')
-        self.ax.set_xlim(min(rx) - self.grid_padding, max(rx) + self.grid_padding)
-        self.ax.set_ylim(min(ry) - self.grid_padding, max(ry) + self.grid_padding)
-        self.ax.set_aspect('equal')
-        self.ax.grid(True, alpha=0.3, color='gray')
-        self.ax.set_xlabel('X Position', color='white')
-        self.ax.set_ylabel('Y Position', color='white')
-        self.ax.set_title('Barrier Drawer', color='white')
-        self.ax.tick_params(colors='white')
-        for spine in self.ax.spines.values():
-            spine.set_color('white')
+        self._canvas = ui_scale.ScalingCanvas(self.fig, ref_size=CANVAS_REF_SIZE)
+        # Take the keyboard focus on a click, so that Escape reaches the canvas
+        # (an embedded matplotlib canvas takes no focus by itself)
+        self._canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # Receivers, their outline, the origin and the compass rose.  The view
+        # also turns autoscaling off, so barriers and images never move the
+        # limits.  Its legend sits above the plot, right of the title, where it
+        # covers neither a receiver nor a barrier.
+        self._view = ArenaView(self.ax, title='Barrier Drawer', legend_loc='lower right',
+                               legend_anchor=(1.0, 1.0), legend_ncol=2)
 
-        self._draw_compass_rose()
-        self._init_receiver_plot(receiver_positions)
-        # Lock limits so imshow / add_patch never auto-rescale the arena
-        self.ax.set_autoscale_on(False)
+    def _refresh_arena(self) -> bool:
+        """Draw the receivers from the settings and fit the view to them.
 
-    def _init_receiver_plot(self, receiver_positions: list) -> None:
-        rx = [p[1][0] for p in receiver_positions]
-        ry = [p[1][1] for p in receiver_positions]
-
-        self.receiver_scatter = self.ax.scatter(
-            rx, ry, c='#FF00FF', s=100, zorder=5, label='Receivers')
-
-        self.receiver_labels = []
-        for rid, (x, y) in receiver_positions:
-            lbl = self.ax.text(
-                x + 5, y + 5, f"{rid + 1}\n({x:.1f}, {y:.1f})",
-                color='white', fontsize=9, fontweight='bold',
-                zorder=6, ha='left', va='bottom')
-            self.receiver_labels.append(lbl)
-
-        conn = [0, 1, 2, 5, 4, 3, 0]
-        self.connection_line, = self.ax.plot(
-            [rx[i] for i in conn], [ry[i] for i in conn],
-            color='#00FFFF', linewidth=2, alpha=0.7)
-
-        self.ax.legend(loc='upper right', facecolor='#222222',
-                       edgecolor='white', labelcolor='white')
-
-    def _draw_compass_rose(self) -> None:
-        for attr in ('_compass_x_arrow', '_compass_x_text',
-                     '_compass_y_arrow', '_compass_y_text'):
-            el = getattr(self, attr, None)
-            if el is not None:
-                el.remove()
-
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        al = min(x_max - x_min, y_max - y_min) * 0.08
-
-        self._compass_x_arrow = self.ax.annotate(
-            '', xy=(al, 0), xytext=(0, 0),
-            arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self._compass_x_text = self.ax.text(
-            al * 0.5, -al * 0.3, 'X', color='white', fontsize=12,
-            fontweight='bold', ha='center', va='top', zorder=7)
-        self._compass_y_arrow = self.ax.annotate(
-            '', xy=(0, al), xytext=(0, 0),
-            arrowprops=dict(arrowstyle='->', color='white', lw=2, zorder=7))
-        self._compass_y_text = self.ax.text(
-            -al * 0.3, al * 0.5, 'Y', color='white', fontsize=12,
-            fontweight='bold', ha='right', va='center', zorder=7)
-
-    def _update_arena(self, receiver_positions: list) -> None:
-        """Refresh receiver scatter and connection lines from new positions."""
-        self.receiver_positions = receiver_positions
-        rx = [p[1][0] for p in receiver_positions]
-        ry = [p[1][1] for p in receiver_positions]
-
-        self.ax.set_xlim(min(rx) - self.grid_padding, max(rx) + self.grid_padding)
-        self.ax.set_ylim(min(ry) - self.grid_padding, max(ry) + self.grid_padding)
-        self._draw_compass_rose()
-
-        if self.receiver_scatter:
-            self.receiver_scatter.set_offsets(np.column_stack([rx, ry]))
-
-        for i, (rid, (x, y)) in enumerate(receiver_positions):
-            txt = f"{rid + 1}\n({x:.1f}, {y:.1f})"
-            if i < len(self.receiver_labels):
-                self.receiver_labels[i].set_text(txt)
-                self.receiver_labels[i].set_position((x + 5, y + 5))
-
-        conn = [0, 1, 2, 5, 4, 3, 0]
-        if self.connection_line:
-            self.connection_line.set_data(
-                [rx[i] for i in conn], [ry[i] for i in conn])
+        Returns False (status set) if config.toml holds a receiver position
+        that cannot be drawn.
+        """
+        ok = True
+        try:
+            self._view.set_receivers(self._settings.get_tower_coordinates())
+        except (TypeError, ValueError, IndexError) as exc:   # a malformed position in config.toml
+            self._view.set_receivers([])
+            self._set_status(f"Could not draw the receivers: {exc}", widgets.RED)
+            ok = False
+        self._view.set_limits()
+        return ok
 
     # ------------------------------------------------------------------
     # Qt UI
@@ -320,191 +426,10 @@ class BarrierDrawerPanel(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        # --- Tools sidebar (far left) ---
-        tools_widget = QWidget()
-        tools_widget.setFixedWidth(170)
-        tools_widget.setStyleSheet("background-color: black;")
-        tools_layout = QVBoxLayout(tools_widget)
-        tools_layout.setContentsMargins(6, 8, 6, 8)
-        tools_layout.setSpacing(8)
-
-        tools_title = QLabel("Tools")
-        tools_title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
-        tools_title.setStyleSheet("color: #FF8800;")
-        tools_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tools_layout.addWidget(tools_title)
-
-        self._tools_status_lbl = QLabel("Ready")
-        self._tools_status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
-        self._tools_status_lbl.setAlignment(
-            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        self._tools_status_lbl.setWordWrap(True)
-        self._tools_status_lbl.setMinimumHeight(75)
-        tools_layout.addWidget(self._tools_status_lbl)
-
-        self._ruler_btn = QPushButton("Virtual Ruler")
-        self._ruler_btn.setStyleSheet("""
-            QPushButton { background-color:#4444CC; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#3333AA; }
-            QPushButton:disabled { background-color:#222244; color:#666666; }
-        """)
-        self._ruler_btn.clicked.connect(self._toggle_ruler)
-        tools_layout.addWidget(self._ruler_btn)
-
-        # --- Settings sub-section (inside Tools sidebar) ---
-        tools_sep = QFrame()
-        tools_sep.setFrameShape(QFrame.Shape.HLine)
-        tools_sep.setStyleSheet("color: #333333; margin-top: 4px; margin-bottom: 2px;")
-        tools_layout.addWidget(tools_sep)
-
-        settings_title = QLabel("Settings")
-        settings_title.setFont(QFont('Arial', 10, QFont.Weight.Bold))
-        settings_title.setStyleSheet("color: #FF8800;")
-        settings_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tools_layout.addWidget(settings_title)
-
-        _rb_ss = ("QRadioButton { color: #CCCCCC; font: 11px Arial; spacing: 6px; }"
-                  " QRadioButton::indicator { width: 13px; height: 13px; }"
-                  " QRadioButton::indicator:checked { background-color: #FF8800;"
-                  "   border: 2px solid #FF8800; border-radius: 7px; }"
-                  " QRadioButton::indicator:unchecked { background-color: #222222;"
-                  "   border: 2px solid #666666; border-radius: 7px; }")
-
-        self._show_all_names_rb = QRadioButton("Show all names")
-        self._show_all_names_rb.setStyleSheet(_rb_ss)
-        self._show_all_names_rb.setChecked(True)
-        self._show_all_names_rb.setAutoExclusive(False)
-        self._show_all_names_rb.clicked.connect(self._on_show_all_names_clicked)
-        tools_layout.addWidget(self._show_all_names_rb)
-
-        self._no_names_rb = QRadioButton("No barrier names")
-        self._no_names_rb.setStyleSheet(_rb_ss)
-        self._no_names_rb.setChecked(False)
-        self._no_names_rb.setAutoExclusive(False)
-        self._no_names_rb.clicked.connect(self._on_no_names_clicked)
-        tools_layout.addWidget(self._no_names_rb)
-
-        tools_layout.addStretch()
-        root.addWidget(tools_widget)
-
-        # Thin vertical separator
-        vsep = QFrame()
-        vsep.setFrameShape(QFrame.Shape.VLine)
-        vsep.setStyleSheet("color: #333333;")
-        root.addWidget(vsep)
-
-        # Left column: top bar + canvas + controls
-        left_col = QVBoxLayout()
-        left_col.setContentsMargins(0, 0, 0, 0)
-        left_col.setSpacing(0)
-
-        # --- Top bar ---
-        top_bar = QWidget()
-        top_bar.setStyleSheet("background-color: black;")
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(10, 5, 10, 5)
-
-        title_lbl = QLabel("Barrier Drawer")
-        title_lbl.setFont(QFont('Arial', 16, QFont.Weight.Bold))
-        title_lbl.setStyleSheet("color: #FF8800;")
-        top_layout.addWidget(title_lbl)
-        top_layout.addStretch()
-
-        back_btn = QPushButton("\u2190 Back")
-        back_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 14px Arial;
-                          padding:6px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#2BCC10; }
-        """)
-        back_btn.clicked.connect(lambda: self._main_window.show_panel('main'))
-        top_layout.addWidget(back_btn)
-        left_col.addWidget(top_bar)
-
-        # --- Canvas ---
-        self._canvas = FigureCanvasQTAgg(self.fig)
-        left_col.addWidget(self._canvas, stretch=1)
-
-        # --- Row 1: Drawing controls ---
-        row1 = QWidget()
-        row1.setStyleSheet("background-color: black;")
-        r1 = QHBoxLayout(row1)
-        r1.setContentsMargins(10, 5, 10, 5)
-        r1.setSpacing(4)
-
-        _combo_ss = ("QComboBox { background:#222222; color:white; font:11px Arial;"
-                     " padding:2px 6px; }"
-                     " QComboBox:disabled { background:#1a1a1a; color:#555555; }")
-        _spin_ss  = ("QDoubleSpinBox { background:#222222; color:white; font:11px Arial;"
-                     " padding:2px 6px; }"
-                     " QDoubleSpinBox:disabled { background:#1a1a1a; color:#555555; }")
-        _edit_ss  = ("QLineEdit { background:#222222; color:white; font:11px Arial;"
-                     " padding:2px 6px; }"
-                     " QLineEdit:disabled { background:#1a1a1a; color:#555555; }")
-
-        r1.addStretch(1)
-
-        self._type_combo = QComboBox()
-        self._type_combo.addItems(["Polygon", "Circle", "Line"])
-        self._type_combo.setStyleSheet(_combo_ss)
-        r1.addWidget(self._styled_label("Type:"))
-        r1.addWidget(self._type_combo)
-        r1.addSpacing(10)
-
-        self._trigger_combo = QComboBox()
-        self._trigger_combo.addItems(["Event", "Continuous"])
-        self._trigger_combo.setStyleSheet(_combo_ss)
-        r1.addWidget(self._styled_label("Trigger:"))
-        r1.addWidget(self._trigger_combo)
-        r1.addSpacing(10)
-
-        self._when_combo = QComboBox()
-        self._when_combo.addItems(["Inside", "Outside"])
-        self._when_combo.setStyleSheet(_combo_ss)
-        r1.addWidget(self._styled_label("When:"))
-        r1.addWidget(self._when_combo)
-        r1.addSpacing(10)
-
-        self._color_combo = QComboBox()
-        for _name, _hex in [
-            ("Red",     "#FF0000"),
-            ("Orange",  "#FF8800"),
-            ("Yellow",  "#FFFF00"),
-            ("Green",   "#00FF00"),
-            ("Cyan",    "#00FFFF"),
-            ("Magenta", "#FF00FF"),
-            ("Custom",  None),
-        ]:
-            self._color_combo.addItem(_name, _hex)
-        self._color_combo.setStyleSheet(_combo_ss)
-        r1.addWidget(self._styled_label("Color:"))
-        r1.addWidget(self._color_combo)
-        r1.addSpacing(10)
-
-        self._alpha_spin = QDoubleSpinBox()
-        self._alpha_spin.setRange(0.0, 1.0)
-        self._alpha_spin.setSingleStep(0.1)
-        self._alpha_spin.setValue(0.3)
-        self._alpha_spin.setStyleSheet(_spin_ss)
-        r1.addWidget(self._styled_label("Alpha:"))
-        r1.addWidget(self._alpha_spin)
-        r1.addSpacing(10)
-
-        self._name_edit = QLineEdit()
-        self._name_edit.setStyleSheet(_edit_ss)
-        self._name_edit.setFixedWidth(120)
-        r1.addWidget(self._styled_label("Name:"))
-        r1.addWidget(self._name_edit)
-        r1.addSpacing(10)
-
-        self._callback_edit = QLineEdit()
-        self._callback_edit.setStyleSheet(_edit_ss)
-        self._callback_edit.setFixedWidth(120)
-        r1.addWidget(self._styled_label("Callback:"))
-        r1.addWidget(self._callback_edit)
-
-        r1.addStretch(1)
+        root.addWidget(self._build_tools())
+        root.addWidget(_separator(QFrame.Shape.VLine))
+        root.addLayout(self._build_centre(), stretch=1)
+        root.addWidget(self._build_side_panel())
 
         # Controls that are editable when a barrier is selected (Type is always read-only)
         self._edit_controls = [
@@ -514,186 +439,10 @@ class BarrierDrawerPanel(QWidget):
         for w in self._edit_controls:
             w.setEnabled(False)
         self._type_combo.setEnabled(False)
-
-        left_col.addWidget(row1)
-
-        # --- Row 2: Action buttons ---
-        row2 = QWidget()
-        row2.setStyleSheet("background-color: black;")
-        r2 = QHBoxLayout(row2)
-        r2.setContentsMargins(10, 5, 10, 5)
-        r2.addStretch(1)
-
-        self._draw_btn = QPushButton("New Barrier")
-        self._draw_btn.setStyleSheet("""
-            QPushButton { background-color:#FF8800; color:black; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC6D00; }
-            QPushButton:disabled { background-color:#5C3100; color:#666666; }
-        """)
-        self._draw_btn.clicked.connect(self._start_drawing)
-        r2.addWidget(self._draw_btn)
-
-        self._finish_btn = QPushButton("Finish")
-        self._finish_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#2BCC10; }
-            QPushButton:disabled { background-color:#1A5508; color:#666666; }
-        """)
-        self._finish_btn.clicked.connect(self._finish_drawing)
-        r2.addWidget(self._finish_btn)
-
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC3333; }
-            QPushButton:disabled { background-color:#552222; color:#666666; }
-        """)
-        self._cancel_btn.clicked.connect(self._cancel_drawing)
-        r2.addWidget(self._cancel_btn)
-
-        r2.addSpacing(20)
-
-        self._clear_changes_btn = QPushButton("Clear All Changes")
-        self._clear_changes_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC3333; }
-            QPushButton:disabled { background-color:#552222; color:#666666; }
-        """)
-        self._clear_changes_btn.clicked.connect(self._clear_all_changes)
-        r2.addWidget(self._clear_changes_btn)
-
-        r2.addSpacing(20)
-
-        self._save_btn = QPushButton("Save All")
-        self._save_btn.setStyleSheet("""
-            QPushButton { background-color:#FFD700; color:black; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#FFC000; }
-            QPushButton:disabled { background-color:#554700; color:#666666; }
-        """)
-        self._save_btn.clicked.connect(self._save_barriers)
-        r2.addWidget(self._save_btn)
-
-        self._clear_btn = QPushButton("Clear All")
-        self._clear_btn.setStyleSheet("""
-            QPushButton { background-color:#888888; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#666666; }
-            QPushButton:disabled { background-color:#444444; color:#666666; }
-        """)
-        self._clear_btn.clicked.connect(self._clear_all)
-        r2.addWidget(self._clear_btn)
-
-        self._del_btn = QPushButton("Delete Barrier")
-        self._del_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC3333; }
-            QPushButton:disabled { background-color:#552222; color:#666666; }
-        """)
-        self._del_btn.clicked.connect(self._delete_selected)
-        r2.addWidget(self._del_btn)
-
-        r2.addStretch(1)
-        left_col.addWidget(row2)
-
-        root.addLayout(left_col, stretch=1)
-
-        # --- Right column: Barrier list ---
-        right_col = QVBoxLayout()
-        right_col.setContentsMargins(5, 5, 5, 5)
-
-        list_title = QLabel("Barriers")
-        list_title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
-        list_title.setStyleSheet("color: #FF8800;")
-        list_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_col.addWidget(list_title)
-
-        self._barrier_list = QListWidget()
-        self._barrier_list.setStyleSheet("""
-            QListWidget { background:#111111; color:white; font:11px Arial;
-                          border:1px solid #FF8800; }
-            QListWidget::item { background:#111111; color:white; }
-            QListWidget::item:focus { outline:0; }
-            QListWidget::item:selected { background:#FF8800; color:black; }
-            QListWidget::item:selected:!active { background:#FF8800; color:black; }
-            QListWidget::item:selected:focus { background:#FF8800; color:black; outline:0; }
-        """)
-        self._barrier_list.setFixedWidth(220)
-        self._barrier_list.viewport().installEventFilter(self)
-        right_col.addWidget(self._barrier_list, stretch=1)
-
-        # Status label at bottom of list
-        self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
-        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        self._status_lbl.setWordWrap(True)
-        self._status_lbl.setMinimumHeight(75)
-        right_col.addWidget(self._status_lbl)
+        self._update_button_states('normal')
 
         self._barrier_list.currentRowChanged.connect(self._on_barrier_selected)
-
-        # --- Images section ---
-        img_title = QLabel("Images")
-        img_title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
-        img_title.setStyleSheet("color: #FF8800;")
-        img_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_col.addWidget(img_title)
-
-        self._image_list = QListWidget()
-        self._image_list.setStyleSheet("""
-            QListWidget { background:#111111; color:white; font:11px Arial;
-                          border:1px solid #FF8800; }
-            QListWidget::item:selected { background:#FF8800; color:black; }
-            QListWidget::item:selected:!active { background:#FF8800; color:black; }
-        """)
-        self._image_list.setFixedWidth(220)
-        self._image_list.setMaximumHeight(120)
-        self._image_list.viewport().installEventFilter(self)
-        right_col.addWidget(self._image_list)
-
-        img_btn_row = QHBoxLayout()
-        self._import_img_btn = QPushButton("Import")
-        self._import_img_btn.setStyleSheet("""
-            QPushButton { background-color:#4444CC; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#3333AA; }
-        """)
-        self._import_img_btn.clicked.connect(self._import_image)
-        img_btn_row.addWidget(self._import_img_btn)
-
-        self._delete_img_btn = QPushButton("Delete")
-        self._delete_img_btn.setStyleSheet("""
-            QPushButton { background-color:#FF4444; color:white; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#CC3333; }
-            QPushButton:disabled { background-color:#552222; color:#666666; }
-        """)
-        self._delete_img_btn.setEnabled(False)
-        self._delete_img_btn.clicked.connect(self._delete_image_selected)
-        img_btn_row.addWidget(self._delete_img_btn)
-
-        self._extract_img_btn = QPushButton("→ Barrier")
-        self._extract_img_btn.setStyleSheet("""
-            QPushButton { background-color:#39FF14; color:black; font:bold 13px Arial;
-                          padding:5px 14px; border-radius:4px; }
-            QPushButton:hover { background-color:#2BCC10; }
-            QPushButton:disabled { background-color:#1A5508; color:#666666; }
-        """)
-        self._extract_img_btn.setEnabled(False)
-        self._extract_img_btn.clicked.connect(self._extract_image_as_barrier)
-        img_btn_row.addWidget(self._extract_img_btn)
-
-        right_col.addLayout(img_btn_row)
-
         self._image_list.currentRowChanged.connect(self._on_image_selected)
-
-        root.addLayout(right_col)
-        self._update_button_states('normal')
 
         # Live-edit signals — fire whenever a barrier is selected
         for sig in (
@@ -708,11 +457,198 @@ class BarrierDrawerPanel(QWidget):
         self._color_combo.activated.connect(self._on_color_activated)
         self._type_combo.currentTextChanged.connect(self._on_type_combo_changed)
 
-    @staticmethod
-    def _styled_label(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet("color:#AAAAAA; font:bold 10px Arial;")
-        return lbl
+    def _build_tools(self) -> QWidget:
+        """The tools sidebar (far left): ruler and name display settings."""
+        tools = QWidget()
+        ui_scale.fixed_width(tools, TOOLS_WIDTH)
+        layout = QVBoxLayout(tools)
+        ui_scale.margins(layout, 6, 8, 6, 8)
+        ui_scale.spacing(layout, 8)
+
+        layout.addWidget(_title("Tools", 12))
+
+        self._tools_status_lbl = _status_label()
+        ui_scale.min_height(self._tools_status_lbl, 75)
+        layout.addWidget(self._tools_status_lbl)
+
+        self._ruler_btn = widgets.neon_button(
+            "Virtual Ruler", TOOL_BLUE, "white", font_px=13, padding=(5, 14))
+        self._ruler_btn.clicked.connect(self._toggle_ruler)
+        layout.addWidget(self._ruler_btn)
+
+        # --- Settings sub-section ---
+        layout.addWidget(_separator(
+            QFrame.Shape.HLine, "color: #333333; margin-top: 4px; margin-bottom: 2px;"))
+        layout.addWidget(_title("Settings", 10))
+
+        # Two radios that are never both on: both off shows the selected
+        # barrier's name only
+        self._show_all_names_rb = QRadioButton("Show all names")
+        self._show_all_names_rb.setChecked(True)
+        self._show_all_names_rb.clicked.connect(self._on_show_all_names_clicked)
+        self._no_names_rb = QRadioButton("No barrier names")
+        self._no_names_rb.clicked.connect(self._on_no_names_clicked)
+        for rb in (self._show_all_names_rb, self._no_names_rb):
+            rb.setAutoExclusive(False)
+            ui_scale.style(rb, _RADIO_CSS)
+            layout.addWidget(rb)
+
+        layout.addStretch()
+        return tools
+
+    def _build_centre(self) -> QVBoxLayout:
+        """Title bar, the arena canvas and the drawing / saving buttons."""
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        # --- Top bar ---
+        top_layout = QHBoxLayout()
+        ui_scale.margins(top_layout, 10, 5, 10, 5)
+        title_lbl = QLabel("Barrier Drawer")
+        ui_scale.font(title_lbl, 16, bold=True)
+        title_lbl.setStyleSheet(f"color: {ACCENT};")
+        top_layout.addWidget(title_lbl)
+        top_layout.addStretch()
+        back_btn = widgets.neon_button("← Back", widgets.GREEN, font_px=14, padding=(6, 12))
+        back_btn.clicked.connect(lambda: self._main_window.show_panel('main'))
+        top_layout.addWidget(back_btn)
+        col.addLayout(top_layout)
+
+        # --- Canvas ---
+        col.addWidget(self._canvas, stretch=1)
+
+        # --- Action buttons ---
+        row = QHBoxLayout()
+        ui_scale.margins(row, 10, 5, 10, 5)
+        ui_scale.spacing(row, 6)
+        row.addStretch(1)
+
+        def button(text, bg, fg, slot):
+            btn = widgets.neon_button(text, bg, fg, font_px=13, padding=(5, 14))
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+            return btn
+
+        self._draw_btn = button("New Barrier", ACCENT, "black", self._start_drawing)
+        self._finish_btn = button("Finish", widgets.GREEN, "black", self._finish_drawing)
+        self._cancel_btn = button("Cancel", widgets.RED, "white", self._cancel_drawing)
+        row.addWidget(_spacer(20))
+        self._clear_changes_btn = button(
+            "Clear All Changes", widgets.RED, "white", self._clear_all_changes)
+        row.addWidget(_spacer(20))
+        self._save_btn = button("Save All", widgets.GOLD, "black", self._save_barriers)
+        row.addStretch(1)
+        col.addLayout(row)
+        return col
+
+    def _build_side_panel(self) -> QWidget:
+        """Barrier list, barrier properties, status line and image overlays,
+        scrolling when the window is too small to show them all."""
+        side = QWidget()
+        # A scroll area fills its widget's background: make that black too
+        side.setObjectName("barrierSidePanel")
+        side.setStyleSheet("QWidget#barrierSidePanel { background-color: black; }")
+        col = QVBoxLayout(side)
+        ui_scale.margins(col, 5, 5, 5, 5)
+        ui_scale.spacing(col, 6)
+
+        # --- Barriers ---
+        col.addWidget(_title("Barriers", 12))
+        self._barrier_list = QListWidget()
+        ui_scale.style(self._barrier_list, _LIST_CSS)
+        ui_scale.min_height(self._barrier_list, 90)
+        # The list takes whatever height is left; its default (unscaled) size
+        # hint would make the panel scroll on a small window for no reason
+        self._barrier_list.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Ignored)
+        self._barrier_list.viewport().installEventFilter(self)
+        col.addWidget(self._barrier_list, stretch=1)
+
+        list_row = QHBoxLayout()
+        ui_scale.spacing(list_row, 6)
+        self._del_btn = widgets.neon_button(
+            "Delete Barrier", widgets.RED, "white", font_px=12, padding=(5, 10))
+        self._del_btn.clicked.connect(self._delete_selected)
+        self._clear_btn = widgets.neon_button(
+            "Clear All", NEUTRAL_GREY, "white", font_px=12, padding=(5, 10))
+        self._clear_btn.clicked.connect(self._clear_all)
+        list_row.addWidget(self._del_btn)
+        list_row.addWidget(self._clear_btn)
+        col.addLayout(list_row)
+
+        # --- Properties of the barrier being drawn or selected ---
+        col.addWidget(_title("Properties", 10))
+        col.addWidget(self._build_properties())
+
+        self._status_lbl = _status_label()
+        ui_scale.min_height(self._status_lbl, 60)
+        col.addWidget(self._status_lbl)
+
+        # --- Images ---
+        col.addWidget(_title("Images", 12))
+        self._image_list = QListWidget()
+        ui_scale.style(self._image_list, _LIST_CSS)
+        ui_scale.max_height(self._image_list, 120)
+        self._image_list.viewport().installEventFilter(self)
+        col.addWidget(self._image_list)
+
+        img_row = QHBoxLayout()
+        ui_scale.spacing(img_row, 6)
+        self._import_img_btn = widgets.neon_button(
+            "Import", TOOL_BLUE, "white", font_px=12, padding=(5, 10))
+        self._import_img_btn.clicked.connect(self._import_image)
+        self._delete_img_btn = widgets.neon_button(
+            "Delete", widgets.RED, "white", font_px=12, padding=(5, 10))
+        self._delete_img_btn.setEnabled(False)
+        self._delete_img_btn.clicked.connect(self._delete_image_selected)
+        self._extract_img_btn = widgets.neon_button(
+            "→ Barrier", widgets.GREEN, font_px=12, padding=(5, 10))
+        self._extract_img_btn.setEnabled(False)
+        self._extract_img_btn.clicked.connect(self._extract_image_as_barrier)
+        for btn in (self._import_img_btn, self._delete_img_btn, self._extract_img_btn):
+            img_row.addWidget(btn)
+        col.addLayout(img_row)
+
+        scroll = widgets.scroll_area(side)
+        ui_scale.fixed_width(scroll, SIDE_PANEL_WIDTH)
+        return scroll
+
+    def _build_properties(self) -> QWidget:
+        """Type, trigger, colour, opacity, name and callback fields."""
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(list(_TYPE_NAMES.values()))
+        self._trigger_combo = QComboBox()
+        self._trigger_combo.addItems(list(_TRIGGER_MODES))
+        self._when_combo = QComboBox()
+        self._when_combo.addItems(list(_TRIGGER_WHEN))
+        self._color_combo = QComboBox()
+        for name, hex_value in PRESET_COLORS:
+            self._color_combo.addItem(name, hex_value)
+        self._color_combo.addItem("Custom", None)
+        self._alpha_spin = QDoubleSpinBox()
+        self._alpha_spin.setRange(0.0, 1.0)
+        self._alpha_spin.setSingleStep(0.1)
+        self._alpha_spin.setValue(0.3)
+        self._name_edit = QLineEdit()
+        self._callback_edit = QLineEdit()
+
+        box = QWidget()
+        _style_inputs(box, _FORM_CSS)
+        box.setLayout(_form_grid((
+            ("Type:", self._type_combo), ("Trigger:", self._trigger_combo),
+            ("When:", self._when_combo), ("Color:", self._color_combo),
+            ("Alpha:", self._alpha_spin), ("Name:", self._name_edit),
+            ("Callback:", self._callback_edit))))
+        return box
+
+    def _set_status(self, text: str, color: str = "white") -> None:
+        """Show a message under the barrier properties."""
+        _set_label(self._status_lbl, text, color)
+
+    def _set_tools_status(self, text: str, color: str = "white") -> None:
+        """Show a message in the tools sidebar (ruler state and distance)."""
+        _set_label(self._tools_status_lbl, text, color)
 
     def _update_button_states(self, mode: str = 'normal') -> None:
         """Enable/disable buttons and controls based on the current interaction mode."""
@@ -728,6 +664,15 @@ class BarrierDrawerPanel(QWidget):
         self._del_btn.setEnabled(not drawing and selected)
         self._save_btn.setEnabled(not drawing)
         self._clear_btn.setEnabled(not drawing)
+
+        # Selecting a barrier or an image (importing one selects it) would load
+        # other values into, or blank, the fields of the barrier being drawn
+        self._barrier_list.setEnabled(not drawing)
+        self._image_list.setEnabled(not drawing)
+        self._import_img_btn.setEnabled(not drawing)
+        image_selected = 0 <= self._selected_image_idx < len(self._images)
+        self._delete_img_btn.setEnabled(not drawing and image_selected)
+        self._extract_img_btn.setEnabled(not drawing and image_selected)
 
         if drawing:
             # All fields editable when configuring a new barrier
@@ -749,6 +694,12 @@ class BarrierDrawerPanel(QWidget):
         self._clear_changes_btn.setEnabled(
             self._current_mode != 'drawing' and self._has_unsaved_changes)
 
+    def _mark_unsaved(self) -> None:
+        """Note that memory now differs from barriers.toml."""
+        if not self._has_unsaved_changes:
+            self._has_unsaved_changes = True
+            self._update_unsaved_state()
+
     def _on_barrier_selected(self, row: int) -> None:
         """Called when the barrier list selection changes."""
         self._drag_state = None
@@ -766,6 +717,7 @@ class BarrierDrawerPanel(QWidget):
         self._update_button_states('normal')
         if self._name_display_mode() == 'selected':
             self._update_name_visibility()
+        self._canvas.draw_idle()
 
     def _blank_edit_controls(self) -> None:
         """Clear all edit controls to an empty/default state."""
@@ -784,35 +736,10 @@ class BarrierDrawerPanel(QWidget):
         self._callback_edit.clear()
         self._callback_edit.blockSignals(False)
 
-    def _auto_save(self) -> None:
-        """Persist barriers and images to disk without updating the status label."""
-        save_all(self._get_barriers_path(), self._barriers, self._images)
-        self._has_unsaved_changes = False
-        self._update_unsaved_state()
-
     def _clear_all_changes(self) -> None:
         """Revert all in-memory barrier and image edits to the last saved file state."""
-        saved_row = self._barrier_list.currentRow()
-        path = self._get_barriers_path()
-        self._barriers = load_barriers(path)
-        self._images = load_images(path)
-        for name in list(self._barrier_patches.keys()):
-            self._remove_barrier_patches(name)
-        self._remove_all_image_artists()
-        self._draw_all_barriers()
-        self._draw_all_images()
-        self._refresh_barrier_list()
-        self._refresh_image_list()
-        self._has_unsaved_changes = False
-        # Restore selection so controls reload
-        if 0 <= saved_row < len(self._barriers):
-            self._barrier_list.setCurrentRow(saved_row)
-        else:
-            self._blank_edit_controls()
-        self._update_button_states('normal')
-        self._canvas.draw_idle()
-        self._status_lbl.setText("All changes cleared — reverted to saved file")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+        if self._reload_from_disk(keep_row=self._barrier_list.currentRow()):
+            self._set_status("All changes cleared — reverted to saved file", widgets.RED)
 
     def eventFilter(self, obj, event) -> bool:
         """Deselect a list item when it is clicked while already selected."""
@@ -828,7 +755,6 @@ class BarrierDrawerPanel(QWidget):
                 item = self._image_list.itemAt(event.pos())
                 if item is not None and self._image_list.currentItem() is item:
                     self._deselect_image()
-                    self._clear_image_handles()
                     self._canvas.draw_idle()
                     return True
         return super().eventFilter(obj, event)
@@ -839,16 +765,36 @@ class BarrierDrawerPanel(QWidget):
         self._barrier_list.clearSelection()
         self._barrier_list.setCurrentRow(-1)
         self._barrier_list.clearFocus()
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Handle rendering and drag editing
     # ------------------------------------------------------------------
 
+    def _pick_radius(self) -> float:
+        """``PICK_PX`` at the canvas's current scale, in display pixels (the
+        pixels of matplotlib's mouse events: physical ones on a high-DPI
+        screen), so that picking keeps pace with the markers."""
+        ratio = float(getattr(self._canvas, 'device_pixel_ratio', 1) or 1)
+        return PICK_PX * self._canvas.scale_factor * ratio
+
+    def _hit_point(self, event, artists: list) -> 'int | None':
+        """Index of the first one-point marker in *artists* within the pick
+        radius of the mouse *event*, or None."""
+        if event.x is None or event.y is None:
+            return None
+        radius = self._pick_radius()
+        for i, artist in enumerate(artists):
+            px, py = self.ax.transData.transform(
+                (artist.get_xdata()[0], artist.get_ydata()[0]))
+            if math.hypot(px - event.x, py - event.y) <= radius:
+                return i
+        return None
+
     def _draw_selected_handles(self, barrier: BarrierData) -> None:
         """Render draggable vertex/control handles for the selected barrier."""
         self._clear_handles()
-        kw = dict(markersize=8, markeredgecolor='black', markeredgewidth=1.5,
-                  zorder=20, picker=False)
+        kw = dict(markersize=8, markeredgecolor='black', markeredgewidth=1.5, zorder=20)
 
         if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
             for i, (vx, vy) in enumerate(barrier.vertices):
@@ -857,7 +803,7 @@ class BarrierDrawerPanel(QWidget):
                 self._handle_meta.append(('vertex', i))
             cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
             cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
-            h, = self.ax.plot(cx, cy, 'D', color='#FF8800', **kw)
+            h, = self.ax.plot(cx, cy, 'D', color=ACCENT, **kw)
             self._handle_artists.append(h)
             self._handle_meta.append(('centroid',))
 
@@ -871,7 +817,7 @@ class BarrierDrawerPanel(QWidget):
             if barrier.point1 and barrier.point2:
                 mx = (barrier.point1[0] + barrier.point2[0]) / 2
                 my = (barrier.point1[1] + barrier.point2[1]) / 2
-                h, = self.ax.plot(mx, my, 'D', color='#FF8800', **kw)
+                h, = self.ax.plot(mx, my, 'D', color=ACCENT, **kw)
                 self._handle_artists.append(h)
                 self._handle_meta.append(('centroid',))
 
@@ -881,7 +827,7 @@ class BarrierDrawerPanel(QWidget):
             self._handle_artists.append(h)
             self._handle_meta.append(('center',))
             h, = self.ax.plot(cx, cy + (barrier.radius or 0), 's',
-                               color='#FFFF00', **kw)
+                              color='#FFFF00', **kw)
             self._handle_artists.append(h)
             self._handle_meta.append(('radius',))
 
@@ -897,15 +843,8 @@ class BarrierDrawerPanel(QWidget):
         self._handle_meta.clear()
 
     def _hit_test_handles(self, event) -> 'int | None':
-        """Return index of the handle under the cursor (12 px radius), or None."""
-        if event.x is None or event.y is None:
-            return None
-        for i, h in enumerate(self._handle_artists):
-            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
-            disp = self.ax.transData.transform((hx, hy))
-            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
-                return i
-        return None
+        """Return index of the handle under the cursor, or None."""
+        return self._hit_point(event, self._handle_artists)
 
     def _hit_test_barrier_body(self, event, barrier: BarrierData) -> bool:
         """Return True if the click lands on the barrier body."""
@@ -920,8 +859,8 @@ class BarrierDrawerPanel(QWidget):
             if seg_sq == 0:
                 return False
             t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_sq))
-            dist = math.sqrt((px - x1 - t * dx) ** 2 + (py - y1 - t * dy) ** 2)
-            return dist <= 12
+            dist = math.hypot(px - x1 - t * dx, py - y1 - t * dy)
+            return dist <= self._pick_radius()
         return check_point_in_barrier((event.xdata, event.ydata), barrier)
 
     def _update_handle_positions(self, barrier: BarrierData) -> None:
@@ -947,7 +886,8 @@ class BarrierDrawerPanel(QWidget):
                 if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
                     cx = sum(v[0] for v in barrier.vertices) / len(barrier.vertices)
                     cy = sum(v[1] for v in barrier.vertices) / len(barrier.vertices)
-                    h.set_xdata([cx]); h.set_ydata([cy])
+                    h.set_xdata([cx])
+                    h.set_ydata([cy])
                 elif (barrier.barrier_type == BarrierType.LINE
                         and barrier.point1 and barrier.point2):
                     h.set_xdata([(barrier.point1[0] + barrier.point2[0]) / 2])
@@ -973,8 +913,8 @@ class BarrierDrawerPanel(QWidget):
                 barrier.point2 = (barrier.point2[0] + dx, barrier.point2[1] + dy)
 
     def _apply_handle_move(self, barrier: BarrierData, meta: tuple,
-                            abs_x: float, abs_y: float,
-                            dx: float, dy: float) -> None:
+                           abs_x: float, abs_y: float,
+                           dx: float, dy: float) -> None:
         """Apply one drag increment to a single handle."""
         tag = meta[0]
         if tag == 'vertex':
@@ -997,7 +937,7 @@ class BarrierDrawerPanel(QWidget):
             barrier.center = (cx + dx, cy + dy)
         elif tag == 'radius' and barrier.center:
             cx, cy = barrier.center
-            barrier.radius = max(1.0, math.sqrt((abs_x - cx) ** 2 + (abs_y - cy) ** 2))
+            barrier.radius = max(1.0, math.hypot(abs_x - cx, abs_y - cy))
 
     def _apply_drag(self, event) -> None:
         """Apply the current drag delta and refresh."""
@@ -1009,6 +949,9 @@ class BarrierDrawerPanel(QWidget):
         dy = event.ydata - state['last_y']
         state['last_x'] = event.xdata
         state['last_y'] = event.ydata
+        if dx == 0 and dy == 0:
+            return
+        state['moved'] = True
 
         if state['type'] == 'ruler_endpoint':
             idx = state['idx']
@@ -1031,7 +974,7 @@ class BarrierDrawerPanel(QWidget):
                 img = self._images[idx]
                 img.center_x += dx
                 img.center_y += dy
-                self._redraw_image(img)
+                self._update_image_artist(img)
                 self._update_image_handle_positions(img)
                 self._canvas.draw_idle()
             return
@@ -1040,10 +983,9 @@ class BarrierDrawerPanel(QWidget):
             idx = self._selected_image_idx
             if 0 <= idx < len(self._images):
                 img = self._images[idx]
-                h_idx = state['handle_idx']
                 self._apply_image_handle_move(
-                    img, h_idx, event.xdata, event.ydata, dx, dy)
-                self._redraw_image(img)
+                    img, state['handle_idx'], event.xdata, event.ydata, dx, dy)
+                self._update_image_artist(img)
                 self._update_image_handle_positions(img)
                 self._canvas.draw_idle()
             return
@@ -1062,7 +1004,7 @@ class BarrierDrawerPanel(QWidget):
                     barrier, self._handle_meta[handle_idx],
                     event.xdata, event.ydata, dx, dy)
 
-        self._remove_barrier_patches(barrier.name)
+        self._remove_barrier_artists(barrier)
         self._draw_barrier(barrier)
         self._update_handle_positions(barrier)
         self._canvas.draw_idle()
@@ -1106,9 +1048,9 @@ class BarrierDrawerPanel(QWidget):
         self._circle_center = None
         self._line_point1 = None
         self._clear_preview()
-        self._status_lbl.setText(f"Drawing {type_text} \u2014 click on canvas")
-        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+        self._set_status(f"Drawing {type_text} — click on canvas", ACCENT)
         self._update_button_states('drawing')
+        self._canvas.draw_idle()
 
     def _on_color_activated(self, index: int) -> None:
         """Handle colour combo selection; open Custom dialog when needed."""
@@ -1130,11 +1072,11 @@ class BarrierDrawerPanel(QWidget):
             self._color_combo.blockSignals(False)
             self._prev_color_idx = idx
             self._live_update_barrier()
-            self._canvas.draw()   # force immediate repaint, not just idle schedule
         else:
             self._color_combo.blockSignals(True)
             self._color_combo.setCurrentIndex(self._prev_color_idx)
             self._color_combo.blockSignals(False)
+        dlg.deleteLater()
 
     def _on_type_combo_changed(self, text: str) -> None:
         if self._current_mode != 'drawing' or not text:
@@ -1145,18 +1087,17 @@ class BarrierDrawerPanel(QWidget):
         self._line_point1 = None
         self._clear_preview()
         self._canvas.draw_idle()
-        self._status_lbl.setText(f"Drawing {self._drawing_mode} — click on canvas")
-        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+        self._set_status(f"Drawing {self._drawing_mode} — click on canvas", ACCENT)
 
     def _finish_drawing(self) -> None:
         if self._drawing_mode == "polygon":
             self._finish_polygon()
         elif self._drawing_mode == "circle":
             if self._circle_center is not None:
-                self._status_lbl.setText("Click canvas to set radius")
+                self._set_status("Click canvas to set radius", ACCENT)
         elif self._drawing_mode == "line":
             if self._line_point1 is not None:
-                self._status_lbl.setText("Click canvas to set endpoint")
+                self._set_status("Click canvas to set endpoint", ACCENT)
 
     def _cancel_drawing(self) -> None:
         self._drawing_mode = None
@@ -1166,8 +1107,7 @@ class BarrierDrawerPanel(QWidget):
         self._clear_preview()
         self._barrier_list.clearSelection()
         self._barrier_list.setCurrentRow(-1)
-        self._status_lbl.setText("Drawing cancelled")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+        self._set_status("Drawing cancelled", widgets.RED)
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
@@ -1178,6 +1118,8 @@ class BarrierDrawerPanel(QWidget):
     def _on_canvas_click(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None:
             return
+        if self._view.legend_contains(event):
+            return      # the user is dragging the legend out of the way
 
         x, y = event.xdata, event.ydata
 
@@ -1189,8 +1131,9 @@ class BarrierDrawerPanel(QWidget):
                     return
                 self._polygon_vertices.append((x, y))
                 self._update_polygon_preview()
-                self._status_lbl.setText(
-                    f"Polygon: {len(self._polygon_vertices)} vertices (dbl-click to close)")
+                self._set_status(
+                    f"Polygon: {len(self._polygon_vertices)} vertices (dbl-click to close)",
+                    ACCENT)
 
             elif self._drawing_mode == "circle":
                 if self._circle_center is None:
@@ -1199,7 +1142,7 @@ class BarrierDrawerPanel(QWidget):
                                        markersize=6, zorder=10)
                     self._preview_artists.extend(dot)
                     self._canvas.draw_idle()
-                    self._status_lbl.setText("Circle: click to set radius")
+                    self._set_status("Circle: click to set radius", ACCENT)
                 else:
                     self._finish_circle(x, y)
 
@@ -1210,7 +1153,7 @@ class BarrierDrawerPanel(QWidget):
                                        markersize=6, zorder=10)
                     self._preview_artists.extend(dot)
                     self._canvas.draw_idle()
-                    self._status_lbl.setText("Line: click to set second endpoint")
+                    self._set_status("Line: click to set second endpoint", ACCENT)
                 else:
                     self._finish_line(x, y)
             return
@@ -1235,7 +1178,6 @@ class BarrierDrawerPanel(QWidget):
         # ---- barrier handles (highest priority — never blocked by images) --
         row = self._barrier_list.currentRow()
         if 0 <= row < len(self._barriers):
-            barrier = self._barriers[row]
             handle_idx = self._hit_test_handles(event)
             if handle_idx is not None:
                 self._drag_state = {
@@ -1255,8 +1197,7 @@ class BarrierDrawerPanel(QWidget):
 
         # ---- barrier body drag (already-selected barrier) -----------------
         if 0 <= row < len(self._barriers):
-            barrier = self._barriers[row]
-            if self._hit_test_barrier_body(event, barrier):
+            if self._hit_test_barrier_body(event, self._barriers[row]):
                 self._drag_state = {
                     'type': 'body', 'row': row,
                     'last_x': x, 'last_y': y,
@@ -1275,34 +1216,25 @@ class BarrierDrawerPanel(QWidget):
 
         # ---- ruler point placement (only in ruler mode, empty canvas) ------
         if self._ruler_mode:
-            if self._ruler_artists:
-                # Ruler already shown: clear it, this click becomes new first point
+            if self._ruler_artists or self._ruler_p1 is None:
+                # First point (a ruler already shown is replaced)
                 self._clear_ruler()
                 self._ruler_p1 = (x, y)
                 self._ruler_p1_dot, = self.ax.plot(
                     x, y, 'o', color='#DDDDDD', markersize=7, zorder=31)
                 self._canvas.draw_idle()
-                self._tools_status_lbl.setText("Ruler: click second point")
-                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
-            elif self._ruler_p1 is None:
-                # First point
-                self._ruler_p1 = (x, y)
-                self._ruler_p1_dot, = self.ax.plot(
-                    x, y, 'o', color='#DDDDDD', markersize=7, zorder=31)
-                self._canvas.draw_idle()
-                self._tools_status_lbl.setText("Ruler: click second point")
-                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+                self._set_tools_status("Ruler: click second point", ACCENT)
             else:
                 # Second point — draw the ruler
                 self._draw_ruler(self._ruler_p1, (x, y))
                 self._ruler_p1 = None
 
     def _on_canvas_release(self, event) -> None:
-        if self._drag_state is not None:
-            if not self._has_unsaved_changes:
-                self._has_unsaved_changes = True
-                self._update_unsaved_state()
-            self._drag_state = None
+        state, self._drag_state = self._drag_state, None
+        # The ruler is not saved, so moving it changes nothing on disk
+        if (state is not None and state.get('moved')
+                and state['type'] not in ('ruler_endpoint', 'ruler_midpoint')):
+            self._mark_unsaved()
 
     def _on_canvas_motion(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None:
@@ -1322,7 +1254,7 @@ class BarrierDrawerPanel(QWidget):
 
             elif self._drawing_mode == "circle" and self._circle_center is not None:
                 cx, cy = self._circle_center
-                r = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+                r = math.hypot(x - cx, y - cy)
                 circ = MplCircle((cx, cy), r, fill=False,
                                  edgecolor=self._current_color(), linewidth=1,
                                  linestyle='--', alpha=0.6, zorder=9)
@@ -1350,96 +1282,60 @@ class BarrierDrawerPanel(QWidget):
 
     def _finish_polygon(self) -> None:
         if len(self._polygon_vertices) < 3:
-            self._status_lbl.setText("Polygon needs at least 3 vertices")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status("Polygon needs at least 3 vertices", widgets.RED)
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.POLYGON)
         barrier.vertices = list(self._polygon_vertices)
-
-        ok, msg = validate_barrier(barrier)
-        if not ok:
-            self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
-            return
-
-        self._barriers.append(barrier)
-        self._clear_preview()
-        self._drawing_mode = None
-        self._polygon_vertices = []
-        self._draw_barrier(barrier)
-        self._refresh_barrier_list()
-        self._auto_save()
-        self._status_lbl.setText(f"Added and saved polygon '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
-        self._update_button_states('normal')
-        self._canvas.draw_idle()
+        self._add_drawn_barrier(barrier)
 
     def _finish_circle(self, x: float, y: float) -> None:
         cx, cy = self._circle_center
-        radius = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        radius = math.hypot(x - cx, y - cy)
         if radius <= 0:
-            self._status_lbl.setText("Circle radius must be > 0")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status("Circle radius must be > 0", widgets.RED)
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.CIRCLE)
         barrier.center = (cx, cy)
         barrier.radius = radius
-
-        ok, msg = validate_barrier(barrier)
-        if not ok:
-            self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
-            return
-
-        self._barriers.append(barrier)
-        self._clear_preview()
-        self._drawing_mode = None
-        self._circle_center = None
-        self._draw_barrier(barrier)
-        self._refresh_barrier_list()
-        self._auto_save()
-        self._status_lbl.setText(f"Added and saved circle '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
-        self._update_button_states('normal')
-        self._canvas.draw_idle()
+        self._add_drawn_barrier(barrier)
 
     def _finish_line(self, x: float, y: float) -> None:
         p1 = self._line_point1
         p2 = (x, y)
         if p1 == p2:
-            self._status_lbl.setText("Line endpoints must differ")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status("Line endpoints must differ", widgets.RED)
             return
 
         barrier = self._make_barrier_from_controls(BarrierType.LINE)
         barrier.point1 = p1
         barrier.point2 = p2
         barrier.thickness = 5.0  # default thickness in cm
+        self._add_drawn_barrier(barrier)
 
+    def _add_drawn_barrier(self, barrier: BarrierData) -> None:
+        """Validate a finished drawing, then add, draw and save it."""
         ok, msg = validate_barrier(barrier)
         if not ok:
-            self._status_lbl.setText(f"Invalid: {msg}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status(f"Invalid: {msg}", widgets.RED)
             return
 
         self._barriers.append(barrier)
         self._clear_preview()
         self._drawing_mode = None
+        self._polygon_vertices = []
+        self._circle_center = None
         self._line_point1 = None
         self._draw_barrier(barrier)
         self._refresh_barrier_list()
-        self._auto_save()
-        self._status_lbl.setText(f"Added and saved line '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        if self._write_barriers_file():
+            self._set_status(
+                f"Added and saved {barrier.barrier_type.value} '{barrier.name}'", widgets.GREEN)
         self._update_button_states('normal')
         self._canvas.draw_idle()
 
     def _make_barrier_from_controls(self, btype: BarrierType) -> BarrierData:
-        trigger_map = {"Event": TriggerMode.EVENT, "Continuous": TriggerMode.CONTINUOUS}
-        when_map = {"Inside": TriggerWhen.INSIDE, "Outside": TriggerWhen.OUTSIDE}
-
         name = self._name_edit.text().strip() or "unnamed"
         # Ensure unique name
         existing = {b.name for b in self._barriers}
@@ -1452,8 +1348,8 @@ class BarrierDrawerPanel(QWidget):
         return BarrierData(
             name=name,
             barrier_type=btype,
-            trigger_mode=trigger_map[self._trigger_combo.currentText()],
-            trigger_when=when_map[self._when_combo.currentText()],
+            trigger_mode=_TRIGGER_MODES[self._trigger_combo.currentText()],
+            trigger_when=_TRIGGER_WHEN[self._when_combo.currentText()],
             callback_name=self._callback_edit.text().strip() or "on_barrier",
             color=self._current_color(),
             alpha=self._alpha_spin.value(),
@@ -1511,21 +1407,18 @@ class BarrierDrawerPanel(QWidget):
 
     def _draw_barrier(self, barrier: BarrierData) -> None:
         artists = []
-        import matplotlib.colors as _mcolors
         try:
-            _mcolors.to_rgba(barrier.color)
+            mcolors.to_rgba(barrier.color)
             color = barrier.color
         except (ValueError, TypeError):
             color = '#FFFFFF'
         alpha = barrier.alpha
-
-        mode = self._name_display_mode()
-        row = self._barrier_list.currentRow()
-        selected_name = (self._barriers[row].name
-                         if 0 <= row < len(self._barriers) else None)
-
-        def _lbl_visible() -> bool:
-            return mode == 'all' or (mode == 'selected' and barrier.name == selected_name)
+        # Names are shown as typed: '$' starts no maths ('a_$b_$' would not
+        # parse, and the whole figure would fail to draw)
+        label_kw = dict(color='white', fontsize=8, fontweight='bold', parse_math=False,
+                        ha='center', va='center', zorder=9,
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
+                                  alpha=0.7, edgecolor=color))
 
         if barrier.barrier_type == BarrierType.POLYGON and barrier.vertices:
             verts = [(v[0], v[1]) for v in barrier.vertices]
@@ -1535,25 +1428,15 @@ class BarrierDrawerPanel(QWidget):
             artists.append(patch)
             cx = sum(v[0] for v in verts) / len(verts)
             cy = sum(v[1] for v in verts) / len(verts)
-            lbl = self.ax.text(cx, cy, barrier.name, color='white', fontsize=8,
-                               fontweight='bold', ha='center', va='center', zorder=9,
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
-                                         alpha=0.7, edgecolor=color))
-            lbl.set_visible(_lbl_visible())
-            artists.append(lbl)
+            artists.append(self.ax.text(cx, cy, barrier.name, **label_kw))
 
         elif barrier.barrier_type == BarrierType.CIRCLE and barrier.center:
             patch = MplCircle(barrier.center, barrier.radius, facecolor=color,
                               alpha=alpha, edgecolor=color, linewidth=2, zorder=8)
             self.ax.add_patch(patch)
             artists.append(patch)
-            lbl = self.ax.text(barrier.center[0], barrier.center[1], barrier.name,
-                               color='white', fontsize=8, fontweight='bold',
-                               ha='center', va='center', zorder=9,
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
-                                         alpha=0.7, edgecolor=color))
-            lbl.set_visible(_lbl_visible())
-            artists.append(lbl)
+            artists.append(self.ax.text(barrier.center[0], barrier.center[1],
+                                        barrier.name, **label_kw))
 
         elif barrier.barrier_type == BarrierType.LINE and barrier.point1 and barrier.point2:
             lw = max(2, (barrier.thickness or 5.0) * 0.5)
@@ -1564,60 +1447,56 @@ class BarrierDrawerPanel(QWidget):
             artists.append(ln)
             mx = (barrier.point1[0] + barrier.point2[0]) / 2
             my = (barrier.point1[1] + barrier.point2[1]) / 2
-            lbl = self.ax.text(mx, my, barrier.name, color='white', fontsize=8,
-                               fontweight='bold', ha='center', va='center', zorder=9,
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor='black',
-                                         alpha=0.7, edgecolor=color))
-            lbl.set_visible(_lbl_visible())
-            artists.append(lbl)
+            artists.append(self.ax.text(mx, my, barrier.name, **label_kw))
 
-        self._barrier_patches[barrier.name] = artists
+        if len(artists) == 2:
+            artists[1].set_visible(self._name_visible(barrier))
+        self._barrier_artists[id(barrier)] = artists
 
-    def _remove_barrier_patches(self, name: str) -> None:
-        for artist in self._barrier_patches.pop(name, []):
+    def _remove_barrier_artists(self, barrier: BarrierData) -> None:
+        for artist in self._barrier_artists.pop(id(barrier), []):
             try:
                 artist.remove()
             except (ValueError, AttributeError):
                 pass
 
-    def _redraw_all_barriers(self) -> None:
-        for name in list(self._barrier_patches.keys()):
-            self._remove_barrier_patches(name)
-        self._draw_all_barriers()
-        self._canvas.draw_idle()
+    def _remove_all_barrier_artists(self) -> None:
+        for artists in self._barrier_artists.values():
+            for artist in artists:
+                try:
+                    artist.remove()
+                except (ValueError, AttributeError):
+                    pass
+        self._barrier_artists.clear()
 
     # ------------------------------------------------------------------
     # Barrier list widget
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _list_text(barrier: BarrierData) -> str:
+        return f"{barrier.name} ({barrier.barrier_type.value}, {barrier.trigger_mode.value})"
+
     def _refresh_barrier_list(self) -> None:
         self._barrier_list.clear()
         for barrier in self._barriers:
-            text = f"{barrier.name} ({barrier.barrier_type.value}, {barrier.trigger_mode.value})"
-            item = QListWidgetItem(text)
-            self._barrier_list.addItem(item)
+            self._barrier_list.addItem(self._list_text(barrier))
 
     def _delete_selected(self) -> None:
         row = self._barrier_list.currentRow()
         if row < 0 or row >= len(self._barriers):
             return
         barrier = self._barriers[row]
-        reply = QMessageBox.question(
-            self, "Delete Barrier",
-            f"Delete barrier '{barrier.name}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not widgets.confirm(self, "Delete Barrier", f"Delete barrier '{barrier.name}'?",
+                               ok_text="Delete", danger=True):
             return
-        self._remove_barrier_patches(barrier.name)
+        self._remove_barrier_artists(barrier)
         self._barriers.pop(row)
         self._has_unsaved_changes = True
         self._refresh_barrier_list()
+        self._update_button_states('normal')
         self._canvas.draw_idle()
-        self._status_lbl.setText(f"Deleted '{barrier.name}'")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
-
+        self._set_status(f"Deleted '{barrier.name}'", widgets.RED)
 
     def _load_barrier_into_controls(self, barrier: BarrierData) -> None:
         _edit_widgets = (
@@ -1628,17 +1507,11 @@ class BarrierDrawerPanel(QWidget):
         for w in _edit_widgets:
             w.blockSignals(True)
 
-        type_map = {BarrierType.POLYGON: "Polygon",
-                    BarrierType.CIRCLE:  "Circle",
-                    BarrierType.LINE:    "Line"}
-        trigger_map = {TriggerMode.EVENT:       "Event",
-                       TriggerMode.CONTINUOUS:  "Continuous"}
-        when_map = {TriggerWhen.INSIDE:  "Inside",
-                    TriggerWhen.OUTSIDE: "Outside"}
-
-        self._type_combo.setCurrentText(type_map.get(barrier.barrier_type, "Polygon"))
-        self._trigger_combo.setCurrentText(trigger_map.get(barrier.trigger_mode, "Event"))
-        self._when_combo.setCurrentText(when_map.get(barrier.trigger_when, "Inside"))
+        trigger_names = {mode: name for name, mode in _TRIGGER_MODES.items()}
+        when_names = {when: name for name, when in _TRIGGER_WHEN.items()}
+        self._type_combo.setCurrentText(_TYPE_NAMES.get(barrier.barrier_type, "Polygon"))
+        self._trigger_combo.setCurrentText(trigger_names.get(barrier.trigger_mode, "Event"))
+        self._when_combo.setCurrentText(when_names.get(barrier.trigger_when, "Inside"))
 
         # Find predefined colour by stored data value; fall back to Custom
         color_idx = next(
@@ -1669,102 +1542,153 @@ class BarrierDrawerPanel(QWidget):
             return
 
         barrier = self._barriers[row]
-        old_name = barrier.name
-
-        trigger_map = {"Event": TriggerMode.EVENT, "Continuous": TriggerMode.CONTINUOUS}
-        when_map = {"Inside": TriggerWhen.INSIDE, "Outside": TriggerWhen.OUTSIDE}
-
         t = self._trigger_combo.currentText()
-        barrier.trigger_mode  = trigger_map[t] if t in trigger_map else barrier.trigger_mode
+        barrier.trigger_mode  = _TRIGGER_MODES.get(t, barrier.trigger_mode)
         w = self._when_combo.currentText()
-        barrier.trigger_when  = when_map[w] if w in when_map else barrier.trigger_when
+        barrier.trigger_when  = _TRIGGER_WHEN.get(w, barrier.trigger_when)
         barrier.color         = self._current_color()
         barrier.alpha         = self._alpha_spin.value()
         barrier.callback_name = self._callback_edit.text().strip() or "on_barrier"
 
-        new_name = self._name_edit.text().strip() or old_name
-        if new_name != old_name:
-            patches = self._barrier_patches.pop(old_name, [])
-            self._barrier_patches[new_name] = patches
-        barrier.name = new_name
+        # Names identify barriers (events, the position panel's state), so a
+        # name another barrier already has is not taken over
+        new_name = self._name_edit.text().strip() or barrier.name
+        if new_name != barrier.name and any(
+                other is not barrier and other.name == new_name for other in self._barriers):
+            self._set_status(f"Another barrier is already called '{new_name}'", widgets.RED)
+        else:
+            barrier.name = new_name
 
         # Update list item text directly to avoid clearing the selection
         item = self._barrier_list.item(row)
         if item:
-            item.setText(
-                f"{barrier.name} ({barrier.barrier_type.value},"
-                f" {barrier.trigger_mode.value})")
+            item.setText(self._list_text(barrier))
 
-        self._remove_barrier_patches(barrier.name)
+        self._remove_barrier_artists(barrier)
         self._draw_barrier(barrier)
         self._canvas.draw_idle()
-
-        if not self._has_unsaved_changes:
-            self._has_unsaved_changes = True
-            self._update_unsaved_state()
-
+        self._mark_unsaved()
 
     # ------------------------------------------------------------------
     # Save / Load / Clear
     # ------------------------------------------------------------------
 
     def _get_barriers_path(self) -> str:
-        config_dir = self._settings.config_dir
-        return os.path.join(config_dir, 'barriers.toml')
+        return os.path.join(self._settings.config_dir, 'barriers.toml')
 
-    def _save_barriers(self) -> None:
+    def _write_barriers_file(self) -> bool:
+        """Write the barriers and images in memory to barriers.toml.
+
+        Returns whether it was written; on failure the status line says why
+        and the changes stay marked as unsaved.  A file that could not be read
+        is only replaced after the user agrees, since whatever it holds is lost.
+        """
         path = self._get_barriers_path()
-        save_all(path, self._barriers, self._images)
+        if self._load_error is not None and os.path.exists(path):
+            if not widgets.confirm(
+                    self, "Replace barriers.toml?",
+                    f"{path} could not be read ({self._load_error}).\n\n"
+                    "Saving replaces it with the barriers and images shown here; "
+                    "anything else it holds is lost.",
+                    ok_text="Replace", danger=True):
+                self._set_status("Not saved: barriers.toml was left as it is", widgets.RED)
+                self._mark_unsaved()
+                return False
+        try:
+            save_all(path, self._barriers, self._images)
+        except (OSError, ValueError) as exc:     # ValueError: text UTF-8 cannot encode
+            self._set_status(f"Could not save {path}: {exc}", widgets.RED)
+            self._mark_unsaved()
+            return False
+        self._load_error = None
         self._has_unsaved_changes = False
         self._update_unsaved_state()
-        self._status_lbl.setText(
-            f"Saved {len(self._barriers)} barriers, {len(self._images)} images")
-        self._status_lbl.setStyleSheet("color: #FFD700; font: bold 13px Arial;")
+        return True
 
-    def _load_barriers(self) -> None:
+    def _save_barriers(self) -> None:
+        if self._write_barriers_file():
+            self._set_status(
+                f"Saved {len(self._barriers)} barriers, {len(self._images)} images", widgets.GOLD)
+
+    def _reload_from_disk(self, keep_row: int = -1) -> bool:
+        """Replace the barriers and images in memory (and on the canvas) with
+        the ones in barriers.toml, selecting barrier *keep_row* again if it
+        still exists.
+
+        Returns False (status set, nothing shown) if the file could not be
+        read; saving then asks before replacing it.
+        """
         path = self._get_barriers_path()
-        self._barriers = load_barriers(path)
-        self._images = load_images(path)
-        self._redraw_all_barriers()
+        try:
+            barriers = load_barriers(path)
+            images = load_images(path)
+            problem = _section_problem(path)
+            if problem is not None:
+                raise ValueError(problem)
+        except (OSError, ValueError, TypeError) as exc:
+            # tomllib.TOMLDecodeError is a ValueError
+            self._load_error = str(exc)
+            barriers, images = [], []
+        else:
+            self._load_error = None
+
+        self._drag_state = None
+        self._clear_handles()
+        self._deselect_image()
+        self._remove_all_barrier_artists()
+        self._remove_all_image_artists()
+        self._barriers = barriers
+        self._images = images
+        self._draw_all_barriers()
         self._draw_all_images()
         self._refresh_barrier_list()
         self._refresh_image_list()
         self._has_unsaved_changes = False
-        self._update_unsaved_state()
+        # Restore selection so controls reload
+        if 0 <= keep_row < len(self._barriers):
+            self._barrier_list.setCurrentRow(keep_row)
+        else:
+            self._blank_edit_controls()
+        self._update_button_states('normal')
+        self._canvas.draw_idle()
+
+        if self._load_error is not None:
+            self._set_status(
+                f"Could not read barriers.toml: {self._load_error}", widgets.RED)
+            return False
+        return True
 
     def _clear_all(self) -> None:
         if not self._barriers:
             return
-        reply = QMessageBox.question(
-            self, "Clear All Barriers",
-            f"Remove all {len(self._barriers)} barriers?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not widgets.confirm(self, "Clear All Barriers",
+                               f"Remove all {len(self._barriers)} barriers?",
+                               ok_text="Remove All", danger=True):
             return
 
-        for name in list(self._barrier_patches.keys()):
-            self._remove_barrier_patches(name)
+        self._remove_all_barrier_artists()
         self._barriers.clear()
+        self._has_unsaved_changes = True
         self._refresh_barrier_list()
+        self._update_button_states('normal')
         self._canvas.draw_idle()
-        self._status_lbl.setText("All barriers cleared")
-        self._status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+        self._set_status("All barriers cleared", "white")
 
     # ------------------------------------------------------------------
     # Image overlay rendering & editing
     # ------------------------------------------------------------------
 
     def _get_resources_dir(self) -> str:
-        config_dir = self._settings.config_dir
-        return os.path.join(config_dir, 'resources')
+        return os.path.join(self._settings.config_dir, 'resources')
 
     def _draw_image(self, overlay: ImageOverlay) -> None:
         """Render (or re-render) a single image overlay on the canvas."""
-        self._remove_image_artist(overlay.name)
-        resources_dir = self._get_resources_dir()
-        filepath = os.path.join(resources_dir, overlay.filename)
+        self._remove_image_artist(overlay)
+        geometry = (overlay.center_x, overlay.center_y, overlay.width_cm,
+                    overlay.height_cm, overlay.rotation_deg)
+        if not all(math.isfinite(value) for value in geometry):
+            return      # a nan or inf in barriers.toml: there is nowhere to put it
+        filepath = os.path.join(self._get_resources_dir(), overlay.filename)
         if not os.path.exists(filepath):
             return
 
@@ -1778,38 +1702,51 @@ class BarrierDrawerPanel(QWidget):
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
 
-        half_w = overlay.width_cm / 2.0
-        half_h = overlay.height_cm / 2.0
-        cx, cy = overlay.center_x, overlay.center_y
+        # A greyscale image is shown as grey, over its type's full range (not
+        # through a colour map stretched to its own darkest and lightest pixel)
+        grey = {}
+        if img_data.ndim == 2:
+            top = 1.0 if img_data.dtype.kind == 'f' else np.iinfo(img_data.dtype).max
+            grey = dict(cmap='gray', vmin=0.0, vmax=top)
 
-        # Place extent at actual arena coordinates so internal data-limit updates
-        # stay inside the arena rather than near the origin.
         # Do NOT pass aspect= — imshow(aspect='auto') calls ax.set_aspect('auto')
-        # internally which overrides the equal-aspect-ratio set in _build_figure.
-        extent = [cx - half_w, cx + half_w, cy - half_h, cy + half_h]
-
+        # internally which overrides the arena's equal aspect ratio.
         im = self.ax.imshow(
             img_data,
-            extent=extent,
             origin='upper',
             zorder=4,
             interpolation='bilinear',
+            **grey,
         )
-        # Rotation only — translation is already encoded in the extent
-        tr = (
-            Affine2D()
-            .rotate_around(cx, cy, math.radians(overlay.rotation_deg))
-            + self.ax.transData
-        )
-        im.set_transform(tr)
-        self._image_artists[overlay.name] = im
+        self._place_image(im, overlay)
+        self._image_artists[id(overlay)] = im
 
         # Hard-restore view limits — never let image drawing affect the arena
         self.ax.set_xlim(xlim)
         self.ax.set_ylim(ylim)
 
-    def _remove_image_artist(self, name: str) -> None:
-        artist = self._image_artists.pop(name, None)
+    def _place_image(self, im, overlay: ImageOverlay) -> None:
+        """Put image artist *im* where *overlay* says: its extent at the
+        overlay's arena coordinates, rotated about its centre."""
+        half_w = overlay.width_cm / 2.0
+        half_h = overlay.height_cm / 2.0
+        cx, cy = overlay.center_x, overlay.center_y
+        im.set_extent((cx - half_w, cx + half_w, cy - half_h, cy + half_h))
+        # Rotation only — translation is already encoded in the extent
+        im.set_transform(
+            Affine2D().rotate_around(cx, cy, math.radians(overlay.rotation_deg))
+            + self.ax.transData)
+
+    def _update_image_artist(self, overlay: ImageOverlay) -> None:
+        """Move an overlay's drawn image after a drag (without re-reading it)."""
+        im = self._image_artists.get(id(overlay))
+        if im is None:
+            self._draw_image(overlay)
+        else:
+            self._place_image(im, overlay)
+
+    def _remove_image_artist(self, overlay: ImageOverlay) -> None:
+        artist = self._image_artists.pop(id(overlay), None)
         if artist is not None:
             try:
                 artist.remove()
@@ -1817,12 +1754,12 @@ class BarrierDrawerPanel(QWidget):
                 pass
 
     def _remove_all_image_artists(self) -> None:
-        for name in list(self._image_artists.keys()):
-            self._remove_image_artist(name)
-
-    def _redraw_image(self, overlay: ImageOverlay) -> None:
-        """Remove and re-draw a single overlay (called after geometry changes)."""
-        self._draw_image(overlay)
+        for artist in self._image_artists.values():
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._image_artists.clear()
 
     def _draw_all_images(self) -> None:
         self._remove_all_image_artists()
@@ -1839,6 +1776,7 @@ class BarrierDrawerPanel(QWidget):
     def _on_image_selected(self, row: int) -> None:
         if row < 0:
             self._deselect_image()
+            self._canvas.draw_idle()
             return
         # Deselect barrier list when image is selected
         self._barrier_list.blockSignals(True)
@@ -1858,6 +1796,7 @@ class BarrierDrawerPanel(QWidget):
         self._barrier_list.blockSignals(False)
         self._clear_handles()
         self._blank_edit_controls()
+        self._update_button_states('normal')
 
         self._selected_image_idx = idx
         self._image_list.blockSignals(True)
@@ -1867,6 +1806,7 @@ class BarrierDrawerPanel(QWidget):
         self._extract_img_btn.setEnabled(True)
         if 0 <= idx < len(self._images):
             self._draw_image_handles(self._images[idx])
+        self._canvas.draw_idle()
 
     def _deselect_image(self) -> None:
         self._selected_image_idx = -1
@@ -1904,12 +1844,10 @@ class BarrierDrawerPanel(QWidget):
 
     def _draw_image_handles(self, overlay: ImageOverlay) -> None:
         self._clear_image_handles()
-        kw = dict(markersize=9, markeredgecolor='black', markeredgewidth=1.5,
-                  zorder=25, picker=False)
+        kw = dict(markersize=9, markeredgecolor='black', markeredgewidth=1.5, zorder=25)
 
         # Center handle
-        h, = self.ax.plot(overlay.center_x, overlay.center_y,
-                          'D', color='#FF8800', **kw)
+        h, = self.ax.plot(overlay.center_x, overlay.center_y, 'D', color=ACCENT, **kw)
         self._img_handle_artists.append(h)
         self._img_handle_meta.append(('img_center',))
 
@@ -1939,8 +1877,7 @@ class BarrierDrawerPanel(QWidget):
     def _update_image_handle_positions(self, overlay: ImageOverlay) -> None:
         corners = self._get_image_corner_positions(overlay)
         rx, ry = self._get_rotation_handle_pos(overlay)
-        for i, (h, meta) in enumerate(
-                zip(self._img_handle_artists, self._img_handle_meta)):
+        for h, meta in zip(self._img_handle_artists, self._img_handle_meta):
             tag = meta[0]
             if tag == 'img_center':
                 h.set_xdata([overlay.center_x])
@@ -1954,14 +1891,9 @@ class BarrierDrawerPanel(QWidget):
                 h.set_ydata([ry])
 
     def _hit_test_image_handles(self, event) -> 'int | None':
-        if self._selected_image_idx < 0 or event.x is None:
+        if self._selected_image_idx < 0:
             return None
-        for i, h in enumerate(self._img_handle_artists):
-            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
-            disp = self.ax.transData.transform((hx, hy))
-            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
-                return i
-        return None
+        return self._hit_point(event, self._img_handle_artists)
 
     def _hit_test_image_body(self, event) -> 'int | None':
         """Return the index of the image overlay under the cursor, or None."""
@@ -2024,22 +1956,26 @@ class BarrierDrawerPanel(QWidget):
     # ---- image management buttons -------------------------------------------
 
     def _import_image(self) -> None:
-        self._refresh_timer.stop()
-        try:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Import Image", "",
-                "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif)")
-            if not path:
-                return
-            print(f"Selected image path: {path}")
-
-            dlg = _ImportImageDialog(self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-        finally:
-            self._refresh_timer.start()
+        """Ask for an image file and its real-world size, then pin it to the arena."""
+        path, _ = QFileDialog.getOpenFileName(self, "Import Image", "", IMAGE_FILTER)
+        if not path:
+            return
+        dlg = _ImportImageDialog(self)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
         width_cm, height_cm = dlg.values()
-        print(f"Imported image dimensions: {width_cm}×{height_cm} cm")
+        dlg.deleteLater()
+        if accepted:
+            self._add_image(path, width_cm, height_cm)
+
+    def _add_image(self, path: str, width_cm: float, height_cm: float) -> None:
+        """Copy the image at *path* into resources/ and pin it, *width_cm* x
+        *height_cm*, to the centre of the visible arena; then save."""
+        try:
+            mpl_image.imread(path)      # refuse a file that cannot be shown
+        except Exception as exc:
+            self._set_status(f"Could not read image '{os.path.basename(path)}': {exc}",
+                             widgets.RED)
+            return
 
         x_range = self.ax.get_xlim()
         y_range = self.ax.get_ylim()
@@ -2055,23 +1991,22 @@ class BarrierDrawerPanel(QWidget):
             clamped = True
 
         resources_dir = self._get_resources_dir()
-        os.makedirs(resources_dir, exist_ok=True)
-
-        # Build unique filename
         base_name = os.path.basename(path)
         dest = os.path.join(resources_dir, base_name)
-        if os.path.abspath(path) != os.path.abspath(dest):
-            # Avoid name collision
-            stem, ext = os.path.splitext(base_name)
-            counter = 1
-            while os.path.exists(dest):
-                dest = os.path.join(resources_dir, f"{stem}_{counter}{ext}")
-                counter += 1
-            shutil.copy2(path, dest)
-
-        # Place image at centre of visible arena
-        cx = (x_range[0] + x_range[1]) / 2.0
-        cy = (y_range[0] + y_range[1]) / 2.0
+        try:
+            os.makedirs(resources_dir, exist_ok=True)
+            if os.path.abspath(path) != os.path.abspath(dest):
+                # Avoid name collision
+                stem, ext = os.path.splitext(base_name)
+                counter = 1
+                while os.path.exists(dest):
+                    dest = os.path.join(resources_dir, f"{stem}_{counter}{ext}")
+                    counter += 1
+                shutil.copy2(path, dest)
+        except OSError as exc:
+            self._set_status(f"Could not copy the image into {resources_dir}: {exc}",
+                             widgets.RED)
+            return
 
         # Unique name
         filename = os.path.basename(dest)
@@ -2083,11 +2018,12 @@ class BarrierDrawerPanel(QWidget):
             name = f"{stem}_{counter}"
             counter += 1
 
+        # Place image at centre of visible arena
         overlay = ImageOverlay(
             name=name,
             filename=filename,
-            center_x=cx,
-            center_y=cy,
+            center_x=(x_range[0] + x_range[1]) / 2.0,
+            center_y=(y_range[0] + y_range[1]) / 2.0,
             width_cm=width_cm,
             height_cm=height_cm,
             rotation_deg=0.0,
@@ -2096,16 +2032,14 @@ class BarrierDrawerPanel(QWidget):
         self._draw_image(overlay)
         self._refresh_image_list()
         self._select_image(len(self._images) - 1)
-        self._auto_save()
-        if clamped:
-            self._status_lbl.setText(
-                f"'{name}' imported — dimensions too large, "
-                f"scaled to {width_cm:.0f}×{height_cm:.0f} cm")
-            self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
-        else:
-            self._status_lbl.setText(
-                f"Imported '{name}' ({width_cm:.0f}×{height_cm:.0f} cm)")
-            self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        if self._write_barriers_file():
+            if clamped:
+                self._set_status(
+                    f"'{name}' imported — dimensions too large, "
+                    f"scaled to {width_cm:.0f}×{height_cm:.0f} cm", ACCENT)
+            else:
+                self._set_status(
+                    f"Imported '{name}' ({width_cm:.0f}×{height_cm:.0f} cm)", widgets.GREEN)
         self._canvas.draw_idle()
 
     def _delete_image_selected(self) -> None:
@@ -2113,22 +2047,17 @@ class BarrierDrawerPanel(QWidget):
         if idx < 0 or idx >= len(self._images):
             return
         overlay = self._images[idx]
-        reply = QMessageBox.question(
-            self, "Delete Image",
-            f"Remove image '{overlay.name}' from canvas?\n"
-            f"(The file in resources/ will not be deleted.)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not widgets.confirm(self, "Delete Image",
+                               f"Remove image '{overlay.name}' from canvas?\n"
+                               f"(The file in resources/ will not be deleted.)",
+                               ok_text="Remove", danger=True):
             return
-        self._remove_image_artist(overlay.name)
+        self._remove_image_artist(overlay)
         self._images.pop(idx)
         self._deselect_image()
         self._refresh_image_list()
-        self._auto_save()
-        self._status_lbl.setText(f"Removed image '{overlay.name}'")
-        self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+        if self._write_barriers_file():
+            self._set_status(f"Removed image '{overlay.name}'", widgets.RED)
         self._canvas.draw_idle()
 
     def _extract_image_as_barrier(self) -> None:
@@ -2136,20 +2065,16 @@ class BarrierDrawerPanel(QWidget):
         if idx < 0 or idx >= len(self._images):
             return
         overlay = self._images[idx]
-        resources_dir = self._get_resources_dir()
-        self._status_lbl.setText("Extracting polygon…")
-        self._status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+        self._set_status("Extracting polygon…", ACCENT)
 
         try:
-            verts = polygon_from_image(overlay, resources_dir)
+            verts = polygon_from_image(overlay, self._get_resources_dir())
         except Exception as exc:
-            self._status_lbl.setText(f"Extraction failed: {exc}")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status(f"Extraction failed: {exc}", widgets.RED)
             return
 
         if len(verts) < 3:
-            self._status_lbl.setText("Could not extract enough vertices")
-            self._status_lbl.setStyleSheet("color: #FF4444; font: bold 13px Arial;")
+            self._set_status("Could not extract enough vertices", widgets.RED)
             return
 
         existing = {b.name for b in self._barriers}
@@ -2165,17 +2090,15 @@ class BarrierDrawerPanel(QWidget):
             trigger_mode=TriggerMode.EVENT,
             trigger_when=TriggerWhen.INSIDE,
             callback_name="on_barrier",
-            color="#FF8800",
+            color=ACCENT,
             alpha=0.3,
             vertices=verts,
         )
         self._barriers.append(barrier)
         self._draw_barrier(barrier)
         self._refresh_barrier_list()
-        self._auto_save()
-        self._status_lbl.setText(
-            f"Extracted '{name}' ({len(verts)} vertices)")
-        self._status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        if self._write_barriers_file():
+            self._set_status(f"Extracted '{name}' ({len(verts)} vertices)", widgets.GREEN)
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -2190,17 +2113,20 @@ class BarrierDrawerPanel(QWidget):
             return 'all'
         return 'selected'
 
+    def _name_visible(self, barrier: BarrierData) -> bool:
+        """Whether *barrier*'s name label is shown in the current mode."""
+        mode = self._name_display_mode()
+        if mode == 'selected':
+            row = self._barrier_list.currentRow()
+            return 0 <= row < len(self._barriers) and self._barriers[row] is barrier
+        return mode == 'all'
+
     def _update_name_visibility(self) -> None:
         """Apply current name-display mode to all drawn barrier label artists."""
-        mode = self._name_display_mode()
-        row = self._barrier_list.currentRow()
-        selected_name = (self._barriers[row].name
-                         if 0 <= row < len(self._barriers) else None)
-        for name, artists in self._barrier_patches.items():
+        for barrier in self._barriers:
+            artists = self._barrier_artists.get(id(barrier), [])
             if len(artists) >= 2:
-                artists[1].set_visible(
-                    mode == 'all' or (mode == 'selected' and name == selected_name)
-                )
+                artists[1].set_visible(self._name_visible(barrier))
         self._canvas.draw_idle()
 
     def _on_show_all_names_clicked(self) -> None:
@@ -2223,14 +2149,12 @@ class BarrierDrawerPanel(QWidget):
             self._ruler_btn.setText("Virtual Ruler")
             self._clear_ruler_p1()
             self._clear_ruler()
-            self._tools_status_lbl.setText("Ready")
-            self._tools_status_lbl.setStyleSheet("color: white; font: bold 13px Arial;")
+            self._set_tools_status("Ready")
         else:
             self._ruler_mode = True
             self._ruler_btn.setText("Stop Ruler")
             if not self._ruler_artists:
-                self._tools_status_lbl.setText("Virtual ruler active")
-                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+                self._set_tools_status("Virtual ruler active", ACCENT)
 
     def _clear_ruler_p1(self) -> None:
         """Remove the pending first-point dot and reset first-point state."""
@@ -2262,10 +2186,10 @@ class BarrierDrawerPanel(QWidget):
         self._ruler_endpoints = [(x1, y1), (x2, y2)]
 
         line, = self.ax.plot([x1, x2], [y1, y2], '--',
-                              color='#DDDDDD', linewidth=1.5, alpha=0.9, zorder=30)
+                             color='#DDDDDD', linewidth=1.5, alpha=0.9, zorder=30)
         dot1, = self.ax.plot(x1, y1, 'o', color='#DDDDDD', markersize=7, zorder=31)
         dot2, = self.ax.plot(x2, y2, 'o', color='#DDDDDD', markersize=7, zorder=31)
-        dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        dist = math.hypot(x2 - x1, y2 - y1)
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         ann = self.ax.annotate(
             f"{dist:.1f} cm",
@@ -2280,47 +2204,41 @@ class BarrierDrawerPanel(QWidget):
         dot_mid, = self.ax.plot(mx, my, 's', color='#DDDDDD', markersize=7, zorder=31)
         self._ruler_artists = [line, dot1, dot2, ann, dot_mid]
         self._canvas.draw_idle()
-        self._tools_status_lbl.setText(f"Distance:\n{dist:.1f} cm")
-        self._tools_status_lbl.setStyleSheet("color: #39FF14; font: bold 13px Arial;")
+        self._set_tools_status(f"Distance:\n{dist:.1f} cm", widgets.GREEN)
 
     def _redraw_ruler(self) -> None:
         """Update ruler artists in-place after an endpoint or midpoint is dragged."""
         if len(self._ruler_artists) < 5 or len(self._ruler_endpoints) < 2:
             return
         (x1, y1), (x2, y2) = self._ruler_endpoints
-        dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        dist = math.hypot(x2 - x1, y2 - y1)
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
 
         line, dot1, dot2, ann, dot_mid = self._ruler_artists
-        line.set_xdata([x1, x2]); line.set_ydata([y1, y2])
-        dot1.set_xdata([x1]);     dot1.set_ydata([y1])
-        dot2.set_xdata([x2]);     dot2.set_ydata([y2])
-        dot_mid.set_xdata([mx]);  dot_mid.set_ydata([my])
+        line.set_xdata([x1, x2])
+        line.set_ydata([y1, y2])
+        dot1.set_xdata([x1])
+        dot1.set_ydata([y1])
+        dot2.set_xdata([x2])
+        dot2.set_ydata([y2])
+        dot_mid.set_xdata([mx])
+        dot_mid.set_ydata([my])
         ann.xy = (mx, my)
         ann.set_text(f"{dist:.1f} cm")
         self._canvas.draw_idle()
-        self._tools_status_lbl.setText(f"Distance:\n{dist:.1f} cm")
+        self._set_tools_status(f"Distance:\n{dist:.1f} cm", widgets.GREEN)
 
     def _hit_test_ruler_endpoints(self, event) -> 'int | None':
-        """Return 0 or 1 if the cursor is within 12 px of a ruler endpoint, else None."""
-        if len(self._ruler_artists) < 3 or event.x is None or event.y is None:
+        """Return 0 or 1 if the cursor is on a ruler endpoint, else None."""
+        if len(self._ruler_artists) < 3:
             return None
-        for idx in (0, 1):
-            h = self._ruler_artists[idx + 1]   # dot1 at [1], dot2 at [2]
-            hx, hy = h.get_xdata()[0], h.get_ydata()[0]
-            disp = self.ax.transData.transform((hx, hy))
-            if math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12:
-                return idx
-        return None
+        return self._hit_point(event, self._ruler_artists[1:3])   # dot1, dot2
 
     def _hit_test_ruler_midpoint(self, event) -> bool:
-        """Return True if the cursor is within 12 px of the ruler midpoint dot."""
-        if len(self._ruler_artists) < 5 or event.x is None or event.y is None:
+        """Return True if the cursor is on the ruler midpoint dot."""
+        if len(self._ruler_artists) < 5:
             return False
-        dot_mid = self._ruler_artists[4]
-        mx, my = dot_mid.get_xdata()[0], dot_mid.get_ydata()[0]
-        disp = self.ax.transData.transform((mx, my))
-        return math.sqrt((disp[0] - event.x) ** 2 + (disp[1] - event.y) ** 2) <= 12
+        return self._hit_point(event, self._ruler_artists[4:5]) is not None
 
     def _on_canvas_key(self, event) -> None:
         """Handle Escape: cancel a pending ruler first-point."""
@@ -2328,42 +2246,65 @@ class BarrierDrawerPanel(QWidget):
             self._clear_ruler_p1()
             self._canvas.draw_idle()
             if self._ruler_mode:
-                self._tools_status_lbl.setText("Virtual ruler active")
-                self._tools_status_lbl.setStyleSheet("color: #FF8800; font: bold 13px Arial;")
+                self._set_tools_status("Virtual ruler active", ACCENT)
 
     # ------------------------------------------------------------------
     # Panel lifecycle
     # ------------------------------------------------------------------
 
+    def _reset_interaction(self) -> None:
+        """Drop whatever is in progress: a drawing, a drag, the ruler, the
+        handles and the image selection."""
+        self._drawing_mode = None
+        self._polygon_vertices = []
+        self._circle_center = None
+        self._line_point1 = None
+        self._drag_state = None
+        self._clear_preview()
+        if self._ruler_mode:
+            self._toggle_ruler()        # leaves ruler mode and removes the ruler
+        else:
+            self._clear_ruler_p1()
+            self._clear_ruler()
+        self._clear_handles()
+        self._deselect_image()
+        self._update_button_states('normal')
+
+    def _on_config_changed(self) -> None:
+        """Follow a saved configuration change (receivers moved, origin shifted).
+
+        An origin shift has translated barriers.toml on disk, so the barriers
+        and images in memory are replaced by the file's: saving the old ones
+        would put the old frame back.  Unsaved edits are dropped.
+        """
+        dropped = self._has_unsaved_changes
+        if self._active:
+            self._reset_interaction()
+        arena_ok = self._refresh_arena()
+        if self._reload_from_disk() and arena_ok and self._active:
+            note = " (unsaved edits were discarded)" if dropped else ""
+            self._set_status(f"Arena settings changed — barriers reloaded{note}", ACCENT)
+
     def on_panel_show(self) -> None:
-        receiver_positions = self._settings.get_tower_coordinates()
-        self._update_arena(receiver_positions)
-
-        self._load_barriers()
-
-        self._cid_press = self._canvas.mpl_connect(
-            'button_press_event', self._on_canvas_click)
-        self._cid_release = self._canvas.mpl_connect(
-            'button_release_event', self._on_canvas_release)
-        self._cid_motion = self._canvas.mpl_connect(
-            'motion_notify_event', self._on_canvas_motion)
-        self._cid_key = self._canvas.mpl_connect(
-            'key_press_event', self._on_canvas_key)
-
-        self._refresh_timer.start()
+        """Redraw the receivers, reload barriers.toml and listen to the canvas."""
+        self._active = True
+        arena_ok = self._refresh_arena()
+        if self._reload_from_disk() and arena_ok:
+            self._set_status("Ready")
+        if not self._cids:
+            connect = self._canvas.mpl_connect
+            self._cids = [
+                connect('button_press_event', self._on_canvas_click),
+                connect('button_release_event', self._on_canvas_release),
+                connect('motion_notify_event', self._on_canvas_motion),
+                connect('key_press_event', self._on_canvas_key),
+            ]
 
     def on_panel_hide(self) -> None:
-        self._refresh_timer.stop()
-        for cid_attr in ('_cid_press', '_cid_release', '_cid_motion', '_cid_key'):
-            cid = getattr(self, cid_attr, None)
-            if cid is not None:
-                self._canvas.mpl_disconnect(cid)
-                setattr(self, cid_attr, None)
-        self._drawing_mode = None
-        self._drag_state = None
-        self._ruler_mode = False
-        self._clear_ruler_p1()
-        self._clear_preview()
-        self._clear_handles()
-        self._clear_ruler()
-        self._deselect_image()
+        """Stop listening to the canvas and drop whatever is in progress
+        (unsaved edits stay in memory until the next show reloads the file)."""
+        self._active = False
+        for cid in self._cids:
+            self._canvas.mpl_disconnect(cid)
+        self._cids = []
+        self._reset_interaction()

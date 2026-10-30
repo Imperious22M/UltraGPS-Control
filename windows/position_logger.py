@@ -8,9 +8,12 @@ session began.
 """
 
 import csv
+import logging
 import os
 import time
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 NUM_RECEIVERS = 6
 
@@ -81,10 +84,10 @@ class PositionLogger:
             self._sheet = self._workbook.create_sheet("positions")
             self._sheet.append(HEADER)
         except ImportError:
-            print("openpyxl is not installed, logging to CSV only")
+            logger.warning("openpyxl is not installed, logging to CSV only")
             self.xlsx_path = None
 
-        print(f"Logging positions to {self.csv_path}")
+        logger.info("Logging positions to %s", self.csv_path)
 
     def log(self, ticks, result: dict, continuous: bool) -> None:
         """Append one sample: the raw ticks and the ``get_position_full`` result."""
@@ -121,8 +124,8 @@ class PositionLogger:
         if self._workbook is not None:
             try:
                 self._workbook.save(self.xlsx_path)
-                print(f"Saved position spreadsheet {self.xlsx_path}")
+                logger.info("Saved position spreadsheet %s", self.xlsx_path)
             except Exception as exc:
-                print(f"Could not save {self.xlsx_path}: {exc}")
+                logger.warning("Could not save %s: %s", self.xlsx_path, exc)
             self._workbook = None
             self._sheet = None
