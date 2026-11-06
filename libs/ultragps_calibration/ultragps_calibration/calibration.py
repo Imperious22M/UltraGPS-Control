@@ -49,6 +49,13 @@ remain, or when it is at the same distance from every point it heard (the
 fitted slope would be 0).  :attr:`UltraGPSCalibration.last_fit` and
 :attr:`UltraGPSCalibration.last_skipped` describe the last fit for display.
 
+Active receivers
+----------------
+A pulse always carries six ticks, but only the first ``number_of_receivers``
+receivers of config.toml (ids ``0 .. N-1``, N from 3 to 6) are active: a run
+completes once they have met the threshold, and only they get offsets fitted
+and saved.  The dormant receivers' offsets in config.toml are left untouched.
+
 Two usage modes
 ---------------
 
@@ -75,6 +82,17 @@ Two usage modes
     # Query histogram data at any time for display:
     data = cal.get_histogram_data(receiver_id=0, run_num=1)
     modal_tick = cal.get_most_frequent(receiver_id=0, run_num=1)
+
+**Single collection** (no calibration points needed): one run slot collects
+the modal ticks with the transmitter on any one spot, the same way a
+calibration run does (most frequent tick per receiver, ``min_reads`` hits on
+it for every active receiver).  The Calibration panel's System Origin
+Calibration collects at (0, 0) like this and computes the intercepts itself;
+nothing is fitted or saved by the library:
+
+    cal.clear_run_data(1)
+    cal.start_run(1, min_reads=cal.calibration_reads,
+                  on_complete=lambda run: done(cal.get_modal_ticks(run)))
 
 **Full automated** (headless / scripted use):
 
@@ -121,6 +139,12 @@ MIN_CAL_POINTS: int = 2
 #: Most calibration points (one collection run each).
 MAX_CAL_POINTS: int = 4
 
+#: Receiver channels in a pulse reading (ids 0-5, R1-R6 in the GUI).
+RECEIVER_CHANNELS: int = 6
+
+#: Fewest active receivers (``number_of_receivers``) a config may set.
+MIN_RECEIVERS: int = 3
+
 # A receiver whose known distances to the points it heard have a sum of
 # squared deviations at or below this (cm²) is equally far from all of them,
 # so no slope can be fitted (the criterion points.py uses as well).
@@ -146,6 +170,20 @@ def _load_config(config_path: str) -> dict:
         raise FileNotFoundError(f"Config file not found: {path}")
     with open(path, "rb") as fh:
         return tomllib.load(fh)
+
+
+def _config_active_receivers(config: dict) -> int:
+    """Number of active receivers of a loaded config.
+
+    ``number_of_receivers`` clamped to ``[MIN_RECEIVERS, RECEIVER_CHANNELS]``;
+    every channel when the key is missing or not an integer.  The active
+    receivers are ids ``0 .. N-1``; the others stay in config.toml (offsets
+    included) but take no part in a calibration.
+    """
+    value = config.get("number_of_receivers")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return RECEIVER_CHANNELS
+    return max(MIN_RECEIVERS, min(value, RECEIVER_CHANNELS))
 
 
 def _config_cal_points(config: dict) -> list[list[float]]:
@@ -179,7 +217,8 @@ CONFIG_KEY_ORDER: tuple[str, ...] = (
 # come after a table's values, the listed ones first.
 _TABLE_KEY_ORDER: dict[tuple[str, ...], tuple[str, ...]] = {
     (): CONFIG_KEY_ORDER,
-    ("receivers",): ("cal_distances", "id", "position", "facing_deg", "offset"),
+    ("receivers",): ("cal_distances", "origin_distance", "id", "position", "facing_deg",
+                     "offset"),
     ("receivers", "offset"): ("intercept", "slope"),
 }
 
@@ -213,7 +252,8 @@ def write_config(path: str, config: dict) -> None:
     * the known top-level keys first, in :data:`CONFIG_KEY_ORDER`, then any
       other top-level value, then any other top-level table or array of
       tables, then the ``[[receivers]]`` array of tables;
-    * in each receiver ``cal_distances``, ``id``, ``position``, then
+    * in each receiver ``cal_distances``, ``origin_distance``, ``id``,
+      ``position``, then
       ``facing_deg`` and any other value, then the (indented)
       ``[receivers.offset]`` sub-table and any other sub-tables.
 
@@ -510,8 +550,9 @@ class UltraGPSCalibration:
                      hardware.
     """
 
-    RECEIVER_COUNT: int = 6
-    """Number of receivers expected per pulse reading."""
+    RECEIVER_COUNT: int = RECEIVER_CHANNELS
+    """Number of receivers expected per pulse reading (the wire format; see
+    :attr:`active_receiver_count` for how many take part)."""
 
     MAX_POINTS: int = MAX_CAL_POINTS
     """Maximum number of calibration points (one collection run each)."""
@@ -707,6 +748,22 @@ class UltraGPSCalibration:
         return points[1] if len(points) > 1 else [0.0, 0.0]
 
     @property
+    def active_receiver_count(self) -> int:
+        """Number of active receivers, ``number_of_receivers`` in config.toml
+        (3 to :attr:`RECEIVER_COUNT`; all of them when the key is missing or
+        the file cannot be read).
+
+        Read from the file on every access, so it follows a reload or a new
+        :attr:`config_path`.  Only receivers ``0 .. N-1`` count towards a
+        run's completion and get offsets fitted and saved; the others' ticks
+        are still recorded but their offsets are never touched.
+        """
+        try:
+            return _config_active_receivers(_load_config(self._config_path))
+        except (OSError, tomllib.TOMLDecodeError):
+            return self.RECEIVER_COUNT
+
+    @property
     def calibration_reads(self) -> int:
         """Default minimum reads per receiver, from ``calibration_reads`` in config.toml."""
         return int(_load_config(self._config_path).get("calibration_reads", 5))
@@ -746,7 +803,8 @@ class UltraGPSCalibration:
         """Start a calibration data-collection run in a background thread.
 
         The thread calls :meth:`UltraGPSClient.pulse` repeatedly, accumulates
-        tick counts via :meth:`add_reading`, and stops once every receiver has
+        tick counts via :meth:`add_reading`, and stops once every active
+        receiver (:attr:`active_receiver_count`, read when the run starts) has
         at least *min_reads* counts on its modal tick value.
 
         Args:
@@ -824,7 +882,8 @@ class UltraGPSCalibration:
 
         which for two points is ``slope = (d_1 - d_2) / (t_1 - t_2)``,
         ``intercept = d_1 - slope * t_1``.  Points where the receiver's modal
-        tick is 0 (no echo) are left out of its fit.  Receivers with missing
+        tick is 0 (no echo) are left out of its fit.  Only the active
+        receivers (``number_of_receivers``) are fitted.  Receivers with missing
         data, with fewer than two usable points, with identical ticks at
         every point or at the same distance from every point they heard (the
         slope would be 0) are skipped with a printed warning (and listed in
@@ -833,7 +892,7 @@ class UltraGPSCalibration:
 
         Returns:
             ``{receiver_id: {'slope': float, 'intercept': float}}`` for every
-            receiver that produced valid results.
+            active receiver that produced valid results.
         """
         offsets: dict[int, dict[str, float]] = {}
         fits: dict[int, dict] = {}
@@ -842,7 +901,7 @@ class UltraGPSCalibration:
         config = _load_config(self._config_path)
         n = min(len(_config_cal_points(config)), self.MAX_POINTS)
 
-        for recv_id in range(self.RECEIVER_COUNT):
+        for recv_id in range(_config_active_receivers(config)):
             # Look up known distances from config
             cal_distances: list[float] = []
             for r in config.get("receivers", []):
@@ -938,18 +997,21 @@ class UltraGPSCalibration:
         """Write calibration offsets to config.toml.
 
         Reads the current config, updates only the ``[receivers.offset]`` block
-        for each receiver present in *offsets*, and writes the full config back
-        to disk with :func:`write_config`.  All other config values — including
-        keys this library does not know — are preserved.
+        for each active receiver (``number_of_receivers``) present in
+        *offsets*, and writes the full config back to disk with
+        :func:`write_config`.  All other config values — including the
+        dormant receivers' offsets and keys this library does not know — are
+        preserved.
 
         Args:
             offsets: ``{receiver_id: {'slope': float, 'intercept': float}}``
                      as returned by :meth:`calculate_offsets`.
         """
         config = _load_config(self._config_path)
+        active = _config_active_receivers(config)
         for r in config.get("receivers", []):
             recv_id = r.get("id")
-            if recv_id in offsets:
+            if recv_id in offsets and isinstance(recv_id, int) and 0 <= recv_id < active:
                 if "offset" not in r:
                     r["offset"] = {}
                 r["offset"]["slope"]     = float(offsets[recv_id]["slope"])
@@ -1099,6 +1161,7 @@ class UltraGPSCalibration:
         """Start the collection thread for a run (see :meth:`start_run`) and
         return it."""
         self._check_run_num(run_num)
+        active = self.active_receiver_count
 
         with self._lock:
             if self._running:
@@ -1110,7 +1173,7 @@ class UltraGPSCalibration:
             thread = threading.Thread(
                 target=self._collection_loop,
                 args=(run_id, run_num, min_reads, on_reading, on_complete, on_error, on_tick,
-                      max_consecutive_failures),
+                      max_consecutive_failures, active),
                 daemon=True,
                 name=f"ultragps_cal_run_{run_num}",
             )
@@ -1177,12 +1240,14 @@ class UltraGPSCalibration:
         on_error: Optional[Callable[[int, str], None]],
         on_tick: Optional[Callable[[int, list], None]],
         max_consecutive_failures: int,
+        active: Optional[int] = None,
     ) -> None:
         """Background thread: collect pulse readings until the threshold is met.
 
         Issues one discard pulse first to flush any stale network buffer, then
-        loops calling ``client.pulse()`` until every receiver has at least
-        *min_reads* counts on its modal tick value.
+        loops calling ``client.pulse()`` until each of the first *active*
+        receivers (default: all) has at least *min_reads* counts on its modal
+        tick value.
 
         The thread acts for run *run_id* only.  Once :meth:`stop_run` has
         ended that run — even if a new run was started while this thread still
@@ -1193,6 +1258,8 @@ class UltraGPSCalibration:
         """
         completed_naturally = False
         error: Optional[str] = None
+        if active is None:
+            active = self.RECEIVER_COUNT
         try:
             # Discard one reading to flush the network buffer (mirrors GraphicsModule)
             try:
@@ -1243,10 +1310,10 @@ class UltraGPSCalibration:
                         except Exception as exc:
                             print(f"[calibration] on_tick callback error: {exc}")
 
-                # Check whether all receivers have met the threshold
+                # Check whether all active receivers have met the threshold
                 all_met = all(
                     self.get_max_count(i, run_num) >= min_reads
-                    for i in range(self.RECEIVER_COUNT)
+                    for i in range(active)
                 )
                 if all_met:
                     completed_naturally = True

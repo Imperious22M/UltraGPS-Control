@@ -5,11 +5,19 @@ Loads config.toml into memory, offers accessors for every setting and writes
 the file back on each change through ``ultragps_calibration.write_config``,
 which keeps every key it finds (known or not, e.g. a receiver's
 ``facing_deg``).  Also locates the config directory (user -> local -> system)
-and moves the arena's origin, which translates barriers.toml as well.
+and moves the arena's origin, which translates barriers.toml as well.  Each
+receiver also keeps ``origin_distance``, its distance to (0, 0) derived from
+its position and kept up to date whenever the arena changes (and checked at
+startup through sync_origin_distances()).  The
+receiver model of the coverage estimates (Arena Maker -> "Sensor settings...")
+is kept apart, in sensor.toml of the same directory.
 """
 
 import copy
+import dataclasses
+import logging
 import math
+import numbers
 import os
 import shutil
 import stat
@@ -19,6 +27,9 @@ from itertools import combinations
 
 from ultragps_barrier import translate_barriers_file
 from ultragps_calibration import MAX_CAL_POINTS, MIN_CAL_POINTS, write_config
+from ultragps_position import coverage
+
+log = logging.getLogger(__name__)
 
 #: Directory name used under ~/.config and /etc.
 APP_NAME = 'ultragps-control'
@@ -29,8 +40,40 @@ CONFIG_FILENAME = 'config.toml'
 #: Name of the barrier / image overlay file, next to config.toml.
 BARRIERS_FILENAME = 'barriers.toml'
 
-#: Number of receivers in the system (ids 0-5, labelled R1-R6 in the GUI).
+#: Name of the receiver model file (the Arena Maker's "Sensor settings..."),
+#: next to config.toml.  Optional: without it DEFAULT_SENSOR is used.
+SENSOR_FILENAME = 'sensor.toml'
+
+#: The receiver model used when sensor.toml is missing or unreadable (and
+#: what "Reset" in the sensor settings goes back to): the HC-SR04
+#: datasheet's echo-ranging limits as hard limits, 2-400 cm within ±15° of
+#: the receiver's axis.  The conservative check: one way (no echo) a
+#: receiver hears farther and wider.
+DEFAULT_SENSOR = coverage.DATASHEET.copy(name="Receiver")
+
+#: The SensorModel fields sensor.toml keeps, in file order.  The name is
+#: always DEFAULT_SENSOR's and the sampling window comes from the base
+#: station (or the panel's Window field), so neither is stored.
+SENSOR_FIELDS = tuple(f.name for f in dataclasses.fields(coverage.SensorModel)
+                      if f.name not in ('name', 'window_ms'))
+
+#: Fields that may be None (no limit), stored as the string "none".
+_SENSOR_OPTIONAL = ('max_range_cm', 'fov_half_deg')
+
+#: Number of receiver channels in the system (ids 0-5, labelled R1-R6 in the
+#: GUI): config.toml always keeps all of them, and the most that can be active.
 RECEIVER_COUNT = 6
+
+#: Fewest active receivers (number_of_receivers) a 2D fix can be made with.
+MIN_RECEIVERS = 3
+
+#: The slope (cm per tick) every receiver is calibrated to as of Nov 2026:
+#: what the calibration panel's "Set slopes to default" fills in.
+DEFAULT_SLOPE = 0.272
+
+#: A stored origin_distance further than this (cm) from the receiver's
+#: distance to (0, 0) is out of date (sync_origin_distances() rewrites it).
+ORIGIN_DISTANCE_TOLERANCE = 1e-6
 
 #: Points closer together than this (cm) count as the same spot.
 SAME_SPOT_CM = 1e-6
@@ -138,6 +181,25 @@ def _distance(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def _origin_distance(receiver):
+    """Distance (cm) from a stored receiver's position to (0, 0), or None
+    when it has no usable position (or one too far out to measure)."""
+    position = _stored_point(receiver.get('position')) if isinstance(receiver, dict) else None
+    if position is None:
+        return None
+    distance = math.hypot(position[0], position[1])
+    return distance if math.isfinite(distance) else None
+
+
+def _update_origin_distances(receivers):
+    """Recompute origin_distance of the given stored receivers; one without a
+    usable position keeps what it has."""
+    for receiver in receivers:
+        distance = _origin_distance(receiver)
+        if distance is not None:
+            receiver['origin_distance'] = distance
+
+
 def _receiver_label(receiver, index):
     """GUI label of a stored receiver (R1-R6), by id when it has a usable one."""
     receiver_id = receiver.get('id') if isinstance(receiver, dict) else None
@@ -148,23 +210,30 @@ def _receiver_label(receiver, index):
 
 def _replace_file(path, data):
     """Atomically replace the file at *path* with the bytes *data*, keeping its
-    permissions and, as far as this process may, its owner and group."""
+    permissions and, as far as this process may, its owner and group.  A file
+    that does not exist yet is created readable by all (mode 0644)."""
     target = os.path.realpath(path)
     directory, name = os.path.split(target)
-    original = os.stat(target)
+    try:
+        original = os.stat(target)
+    except FileNotFoundError:
+        original = None
     fd, tmp_path = tempfile.mkstemp(prefix=f'.{name}.', suffix='.tmp', dir=directory)
     try:
         with os.fdopen(fd, 'wb') as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        for uid in (original.st_uid, -1):
-            try:
-                os.chown(tmp_path, uid, original.st_gid)
-                break
-            except OSError:
-                continue
-        os.chmod(tmp_path, stat.S_IMODE(original.st_mode))
+        if original is None:
+            os.chmod(tmp_path, 0o644)
+        else:
+            for uid in (original.st_uid, -1):
+                try:
+                    os.chown(tmp_path, uid, original.st_gid)
+                    break
+                except OSError:
+                    continue
+            os.chmod(tmp_path, stat.S_IMODE(original.st_mode))
         os.replace(tmp_path, target)
     except BaseException:
         try:
@@ -172,6 +241,75 @@ def _replace_file(path, data):
         except OSError:
             pass
         raise
+
+
+def _sensor_from_table(table):
+    """The SensorModel a [sensor] table describes.
+
+    Fields the table leaves out take DEFAULT_SENSOR's values; unknown keys
+    are ignored.  The name is DEFAULT_SENSOR's and the sampling window the
+    dataclass default.
+
+    Raises:
+        ValueError: a value of the wrong type, or a model that does not
+            validate.
+    """
+    if not isinstance(table, dict):
+        raise ValueError("no [sensor] table")
+    changes = {}
+    for name in SENSOR_FIELDS:
+        if name not in table:
+            continue
+        value = table[name]
+        if name == 'threshold':
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be true or false, got {value!r}")
+        elif name in _SENSOR_OPTIONAL and isinstance(value, str):
+            if value.strip().lower() != 'none':
+                raise ValueError(f'{name} must be a number or "none", got {value!r}')
+            value = None
+        elif name == 'burst_cycles':
+            if (not _is_number(value) or not float(value).is_integer()):
+                raise ValueError(f"{name} must be a whole number, got {value!r}")
+            value = int(value)
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a number, got {value!r}")
+        else:
+            value = float(value)
+        changes[name] = value
+    default_window = coverage.SensorModel().window_ms
+    return DEFAULT_SENSOR.copy(window_ms=default_window, **changes)
+
+
+def _toml_value(value):
+    """A sensor.toml value: bool, int, float (inf allowed) or "none" for None."""
+    if value is None:
+        return '"none"'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
+    return repr(float(value))       # e.g. 30.0, 1e-05, inf: all valid TOML floats
+
+
+def _sensor_toml(model):
+    """The text of a sensor.toml holding *model* (every field but name and window)."""
+    lines = [
+        '# Receiver model for the coverage estimates (Arena Maker and Calibration',
+        '# panels), written by Arena Maker -> "Sensor settings...".  Units: cm,',
+        '# degrees, dB, ms, °C, %.  "none" means no limit.  The sampling window comes',
+        '# from the base station, so it is not stored here.',
+        '',
+        '[sensor]',
+    ]
+    for name in SENSOR_FIELDS:
+        value = getattr(model, name)
+        if name == 'burst_cycles':
+            value = int(value)
+        elif name != 'threshold' and value is not None:
+            value = float(value)
+        lines.append(f'{name} = {_toml_value(value)}')
+    return '\n'.join(lines) + '\n'
 
 
 class SettingsModule:
@@ -188,6 +326,9 @@ class SettingsModule:
             self._config_path = resolve_config_path()
         else:
             self._config_path = os.path.abspath(config_path)
+
+        #: Why sensor.toml could not be used ("" when it was, or is missing)
+        self.sensor_problem = ""
 
         # Load the config file into internal storage (or create default if missing)
         self._config = self._load_config()
@@ -221,6 +362,7 @@ class SettingsModule:
                     'id': receiver_id,
                     'position': [0.0, 0.0],
                     'cal_distances': [0.0, 0.0],
+                    'origin_distance': 0.0,
                     'offset': {'slope': 0.0, 'intercept': 0.0},
                 }
                 for receiver_id in range(RECEIVER_COUNT)
@@ -254,7 +396,8 @@ class SettingsModule:
 
         A packaged install resolves to /etc/ultragps-control, which an ordinary
         user cannot write to.  Rather than failing the save, copy the whole
-        config directory (config.toml, barriers.toml and resources/) into the
+        config directory (config.toml, barriers.toml, sensor.toml and
+        resources/) into the
         per-user directory and switch to it, so the user's edits land in
         ~/.config and take priority from then on.
         """
@@ -300,16 +443,25 @@ class SettingsModule:
         Verify that all required settings are initialized and consistent.
 
         Checks:
-        - Exactly 6 receivers (ids 0-5), each with a numeric (x, y) position
-        - The receivers are not all on the same spot (the uninitialized
-          default) and at least 3 of them are not collinear
+        - Exactly 6 receiver entries (ids 0-5), dormant ones included
+        - number_of_receivers is an integer from 3 to 6 (the active
+          receivers are ids 0..N-1)
+        - Each active receiver has a numeric (x, y) position, and the active
+          receivers are not all on the same spot (the uninitialized default)
+          and at least 3 of them are not collinear
         - 2 to 4 calibration points, numeric and pairwise distinct, with
           cal_point_1 / cal_point_2 equal to the first two
-        - Each receiver has one calibration distance per calibration point
-          and its offset parameters (slope and intercept)
+        - Each active receiver has one calibration distance per calibration
+          point and its offset parameters (slope and intercept)
 
-        A receiver or calibration point at exactly (0, 0) is fine: the origin
-        can be put anywhere, a receiver included.
+        origin_distance is not checked: it is derived from the position and
+        rewritten by sync_origin_distances() (at startup) and every save that
+        moves a receiver.
+
+        Dormant receivers (ids N..5) only need to exist: their position,
+        calibration distances and offsets may be anything, as they are kept
+        for later but not used.  A receiver or calibration point at exactly
+        (0, 0) is fine: the origin can be put anywhere, a receiver included.
 
         Returns:
             tuple (is_valid: bool, errors: list of str), the messages naming
@@ -322,6 +474,15 @@ class SettingsModule:
         count = len(receivers) if isinstance(receivers, list) else 0
         if count != RECEIVER_COUNT:
             errors.append(f"Expected {RECEIVER_COUNT} receivers, found {count}")
+
+        # Number of active receivers (an invalid value checks all six)
+        active = self._config.get('number_of_receivers', RECEIVER_COUNT)
+        if (isinstance(active, bool) or not isinstance(active, int)
+                or not MIN_RECEIVERS <= active <= RECEIVER_COUNT):
+            errors.append(
+                f"number_of_receivers must be a whole number from {MIN_RECEIVERS} to "
+                f"{RECEIVER_COUNT}, found {active!r}")
+            active = RECEIVER_COUNT
 
         # Calibration points (P1..Pn)
         raw_points = self._raw_cal_points()
@@ -348,13 +509,15 @@ class SettingsModule:
                         f"{key} does not match calibration point P{index + 1}; "
                         "save the calibration points again")
 
-        # Check each receiver
+        # Check each receiver; the dormant ones (ids active..5) only have to exist
         positions = []
         for i in range(RECEIVER_COUNT):
             label = f"R{i + 1}"
             receiver = self._find_receiver(i)
             if receiver is None:
                 errors.append(f"Receiver {label} not found")
+                continue
+            if i >= active:
                 continue
 
             position = _stored_point(receiver.get('position'))
@@ -377,7 +540,7 @@ class SettingsModule:
                     or not _is_number(offset.get('intercept'))):
                 errors.append(f"Receiver {label} offset parameters missing")
 
-        # Receiver geometry
+        # Geometry of the active receivers
         if len(positions) >= 2:
             span = max(_distance(a, b) for a, b in combinations(positions, 2))
             if not math.isfinite(span):
@@ -385,7 +548,7 @@ class SettingsModule:
             elif span <= SAME_SPOT_CM:
                 errors.append(
                     "Receiver positions not initialized (all receivers are on the same spot)")
-            elif len(positions) == RECEIVER_COUNT and not self._spans_plane(positions, span):
+            elif len(positions) == active and not self._spans_plane(positions, span):
                 errors.append(
                     "Receivers are all on one line; at least 3 of them must not be collinear")
 
@@ -411,7 +574,7 @@ class SettingsModule:
 
     @property
     def config_dir(self):
-        """Directory holding config.toml, barriers.toml and resources/."""
+        """Directory holding config.toml, barriers.toml, sensor.toml and resources/."""
         return os.path.dirname(self._config_path)
 
     @property
@@ -429,11 +592,13 @@ class SettingsModule:
     def arena_size(self):
         """
         Get the arena size (width, height) in cm: the width and height of the
-        bounding box of the receivers' positions, whatever their layout.
-        Always recalculates from current receiver positions; (0.0, 0.0) when no
-        receiver has a usable position.
+        bounding box of the active receivers' positions, whatever their
+        layout.  Always recalculates from current receiver positions; (0.0,
+        0.0) when no active receiver has a usable position.
         """
-        positions = [_stored_point(r.get('position')) for r in self._receivers()]
+        active = self.active_receiver_ids()
+        positions = [_stored_point(r.get('position')) for r in self._receivers()
+                     if r.get('id') in active]
         positions = [p for p in positions if p is not None]
         if not positions:
             return (0.0, 0.0)
@@ -465,14 +630,42 @@ class SettingsModule:
 
     @property
     def number_of_receivers(self):
-        """Get the number of receivers."""
-        return self._config.get('number_of_receivers', RECEIVER_COUNT)
+        """
+        Get the number of active receivers N (MIN_RECEIVERS to RECEIVER_COUNT).
+
+        The active receivers are ids 0..N-1 (R1..RN); the others stay in the
+        file with their calibration, position and facing but are not used.
+        A stored value outside the range is clamped; a missing or non-integer
+        one means all RECEIVER_COUNT receivers.
+        """
+        value = self._config.get('number_of_receivers', RECEIVER_COUNT)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return RECEIVER_COUNT
+        return max(MIN_RECEIVERS, min(value, RECEIVER_COUNT))
 
     @number_of_receivers.setter
     def number_of_receivers(self, value):
-        """Set the number of receivers and save to file."""
+        """
+        Set the number of active receivers and save to file.
+
+        Every receiver entry is kept: lowering N leaves the dormant receivers'
+        calibration, position and facing in place for when they come back.
+
+        Raises:
+            ValueError: value is not an integer from MIN_RECEIVERS to
+                RECEIVER_COUNT; nothing is changed then
+        """
+        if (isinstance(value, bool) or not isinstance(value, numbers.Integral)
+                or not MIN_RECEIVERS <= value <= RECEIVER_COUNT):
+            raise ValueError(
+                f"Number of receivers must be a whole number from {MIN_RECEIVERS} to "
+                f"{RECEIVER_COUNT}, got {value!r}")
         self._config['number_of_receivers'] = int(value)
         self._save_config()
+
+    def active_receiver_ids(self):
+        """Ids of the active receivers, [0, 1, ..., number_of_receivers - 1]."""
+        return list(range(self.number_of_receivers))
 
     @property
     def serial_port(self):
@@ -607,6 +800,65 @@ class SettingsModule:
         receiver's cal_distances in step, and save to file."""
         self._set_cal_point(1, value)
 
+    # ==================== Sensor model (sensor.toml) ====================
+
+    @property
+    def sensor_path(self):
+        """Absolute path to sensor.toml in the active config directory."""
+        return os.path.join(self.config_dir, SENSOR_FILENAME)
+
+    def sensor_model(self):
+        """
+        The receiver model for the coverage estimates, read from sensor.toml.
+
+        Read from the file on every call, so a save from anywhere is seen at
+        once.  A missing file gives DEFAULT_SENSOR; so does one that cannot
+        be read or holds an invalid value, with a logged warning and the
+        reason in ``sensor_problem`` ("" when the file was used or is
+        missing).  The model's name is DEFAULT_SENSOR's and its sampling
+        window the dataclass default: copy the real window in
+        (``model.copy(window_ms=...)``).
+
+        Returns:
+            coverage.SensorModel
+        """
+        path = self.sensor_path
+        problem = ""
+        model = DEFAULT_SENSOR
+        try:
+            with open(path, 'rb') as f:
+                data = tomllib.load(f)
+            model = _sensor_from_table(data.get('sensor'))
+        except FileNotFoundError:
+            pass
+        except (OSError, tomllib.TOMLDecodeError, ValueError) as err:
+            problem = f"{path}: {err}"
+            model = DEFAULT_SENSOR
+        if problem and problem != self.sensor_problem:
+            log.warning("Could not use %s, using the default receiver model", problem)
+        self.sensor_problem = problem
+        return model
+
+    def set_sensor_model(self, model):
+        """
+        Save *model* to sensor.toml (atomically): every field but its name
+        and sampling window.  When the config directory is read-only the
+        file goes to the per-user copy _ensure_writable() switches to.
+
+        Args:
+            model: a coverage.SensorModel (validated on creation)
+
+        Raises:
+            ValueError: *model* is not a SensorModel
+            OSError: the file could not be written
+        """
+        if not isinstance(model, coverage.SensorModel):
+            raise ValueError(f"Expected a coverage.SensorModel, got {model!r}")
+        data = _sensor_toml(model).encode('utf-8')
+        self._ensure_writable()
+        _replace_file(self.sensor_path, data)
+        self.sensor_problem = ""
+
     # ==================== Origin ====================
 
     def shift_origin(self, x, y):
@@ -617,8 +869,10 @@ class SettingsModule:
         every calibration point (cal_points and cal_point_1/2) in config.toml,
         and every barrier (polygon vertices, circle centre, line end points)
         and image overlay centre in barriers.toml of the same config
-        directory.  A translation changes no distance, so cal_distances,
-        slopes, intercepts and facings stay as they are.
+        directory.  A translation changes no distance between points, so
+        cal_distances, slopes, intercepts and facings stay as they are, and
+        sensor.toml (no coordinates) is not touched; every receiver's
+        origin_distance is recomputed for the new (0, 0).
 
         Everything is checked before anything is written: bad coordinates, a
         stored position or calibration point that is not a pair of numbers, or
@@ -666,6 +920,8 @@ class SettingsModule:
                 raise ValueError(f"cal_points is not a list: {shifted['cal_points']!r}")
             shifted['cal_points'] = [moved(p, f"Calibration point P{k}")
                                      for k, p in enumerate(shifted['cal_points'], start=1)]
+        _update_origin_distances(r for r in (receivers if isinstance(receivers, list) else [])
+                                 if isinstance(r, dict))
 
         self._ensure_writable()
         barriers_path = os.path.join(self.config_dir, BARRIERS_FILENAME)
@@ -746,7 +1002,8 @@ class SettingsModule:
     def set_receiver_position(self, receiver_id, x, y):
         """
         Set the position of a specific receiver, recompute its calibration
-        distances (one per calibration point) and save to file.
+        distances (one per calibration point) and origin_distance, and save to
+        file.
 
         Args:
             receiver_id: The receiver ID (0-5)
@@ -759,12 +1016,13 @@ class SettingsModule:
         receiver = self._require_receiver(receiver_id)
         receiver['position'] = _input_point((x, y), f"Receiver R{receiver_id + 1} position")
         self._update_cal_distances([receiver])
+        _update_origin_distances([receiver])
         self._save_config()
 
     def set_receiver_positions(self, positions):
         """
         Set the positions of several receivers at once, recompute their
-        calibration distances and save to file once.
+        calibration distances and origin_distance, and save to file once.
 
         Args:
             positions: [(receiver_id, (x, y)), ...] (the get_tower_coordinates()
@@ -788,7 +1046,9 @@ class SettingsModule:
 
         for receiver, position in updates:
             receiver['position'] = position
-        self._update_cal_distances([receiver for receiver, _ in updates])
+        moved = [receiver for receiver, _ in updates]
+        self._update_cal_distances(moved)
+        _update_origin_distances(moved)
         self._save_config()
 
     def get_receiver_facing(self, receiver_id):
@@ -871,6 +1131,55 @@ class SettingsModule:
         receiver['cal_distances'] = [float(d) for d in distances]
         self._save_config()
 
+    def get_origin_distance(self, receiver_id):
+        """
+        Get a receiver's distance to the arena's (0, 0), from the arena map.
+
+        Computed from the receiver's current position (so always in step with
+        it, saved or not); the stored origin_distance is the same value once
+        sync_origin_distances() or a position save has run.
+
+        Args:
+            receiver_id: The receiver ID (0-5)
+
+        Returns:
+            float distance in cm, or None for an unknown receiver or one
+            without a usable position
+        """
+        receiver = self._find_receiver(receiver_id)
+        return _origin_distance(receiver) if receiver is not None else None
+
+    def sync_origin_distances(self):
+        """
+        Bring every receiver's stored origin_distance in step with its
+        position, and save to file only when one was missing or out of date.
+
+        Called at startup (a hand-edited or older config.toml); the setters
+        that move receivers or the origin keep it up to date themselves.
+        Receivers without a usable position are left alone.
+
+        Returns:
+            True when the file was written, False when nothing changed
+
+        Raises:
+            OSError: the file could not be written (the values stay updated
+                in memory)
+        """
+        stale = []
+        for receiver in self._receivers():
+            distance = _origin_distance(receiver)
+            if distance is None:
+                continue
+            stored = receiver.get('origin_distance')
+            if (not _is_number(stored)
+                    or abs(stored - distance) > ORIGIN_DISTANCE_TOLERANCE):
+                stale.append(receiver)
+        if not stale:
+            return False
+        _update_origin_distances(stale)
+        self._save_config()
+        return True
+
     def get_receiver_offset(self, receiver_id):
         """
         Get the offset parameters of a specific receiver.
@@ -900,6 +1209,54 @@ class SettingsModule:
             receiver['offset'] = {}
         receiver['offset']['slope'] = float(slope)
         receiver['offset']['intercept'] = float(intercept)
+        self._save_config()
+
+    def set_receiver_offsets(self, offsets):
+        """
+        Set the slope and intercept of several receivers at once and save to
+        file once.
+
+        Args:
+            offsets: {receiver_id: {'slope': float, 'intercept': float}}
+
+        Raises:
+            ValueError: an unknown receiver, a value that is not a finite
+                number, or a slope that is not above 0; nothing is changed then
+        """
+        if not isinstance(offsets, dict):
+            raise ValueError(f"Expected {{receiver_id: {{'slope', 'intercept'}}}}, got {offsets!r}")
+        updates = []
+        for receiver_id, offset in offsets.items():
+            receiver = self._require_receiver(receiver_id)
+            label = f"R{receiver_id + 1}" if _is_number(receiver_id) else repr(receiver_id)
+            if not isinstance(offset, dict):
+                raise ValueError(
+                    f"Receiver {label} offset must be {{'slope', 'intercept'}}, got {offset!r}")
+            values = {}
+            for key in ('slope', 'intercept'):
+                value = offset.get(key)
+                try:
+                    if isinstance(value, (bool, str, bytes)):
+                        raise TypeError
+                    number = float(value)
+                except (TypeError, ValueError):
+                    number = math.nan
+                if not math.isfinite(number):
+                    raise ValueError(
+                        f"Receiver {label} {key} must be a finite number, got {value!r}")
+                values[key] = number
+            if values['slope'] <= 0:
+                raise ValueError(
+                    f"Receiver {label} slope must be above 0, got {values['slope']:g}")
+            updates.append((receiver, values))
+        if not updates:
+            return
+
+        for receiver, values in updates:
+            if not isinstance(receiver.get('offset'), dict):
+                receiver['offset'] = {}
+            receiver['offset']['slope'] = values['slope']
+            receiver['offset']['intercept'] = values['intercept']
         self._save_config()
 
     def get_receiver_slope(self, receiver_id):

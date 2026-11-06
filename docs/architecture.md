@@ -128,6 +128,18 @@ program; the panels work around them and say so:
 
 `ultragps_position.UltraGPSPositionLib` turns tick counts into a coordinate.
 
+### Active receivers
+
+The base station always reports six channels, and `config.toml` always keeps six
+`[[receivers]]` entries (ids 0–5), but an arena uses only the first
+`number_of_receivers` of them, N in 3–6: ids 0 to N − 1, R1 to RN in the GUI.
+The library reads N when it loads the configuration (clamped to 3 and the
+number of entries; all of them when the key is missing), and its
+`receiver_count` is N. A tick array of six is still accepted: the first N
+ticks are used and the rest ignored, and everything downstream — the filter,
+both solvers, the CEP subsets — works on the N active receivers. The dormant
+receivers keep their positions and offsets in the file but take no part.
+
 Each receiver has its own linear calibration, so ticks become centimetres via:
 
 ```
@@ -164,68 +176,60 @@ and `get_position_cep()` exist for library users.
     `lm_success` / `cep_success` and the length of `sane_indices` before trusting
     a coordinate.
 
-The position panel adds the **HDOP** of each fix, `coverage.hdop` over the
-receivers that passed the filter: how many centimetres of position error one
-centimetre of range error causes, given where those receivers are. It is
-infinite (no fix) with fewer than three.
-
 ## Calibration
 
-`ultragps_calibration.UltraGPSCalibration` collects one run per calibration
-point, 2 to 4 of them (`cal_points` in `config.toml`). During run *k* the
-transmitter stands on point *k* and the library pulses until every receiver has
-read its most frequent (modal) tick `calibration_reads` times; it keeps a
-histogram per receiver per run, on its own thread.
+Each receiver converts ticks to centimetres with its own line,
+`distance = tick * slope + intercept` (`receivers[].offset` in `config.toml`).
+In practice the slope is the same for every receiver, `DEFAULT_SLOPE = 0.272`
+cm per tick in `SettingsModule.py` (the value as of November 2026), and the
+intercept carries what differs between receivers. The Calibration panel's
+**Offsets** tab edits both by hand through
+`SettingsModule.set_receiver_offsets({rid: {'slope': …, 'intercept': …}})`,
+which checks every value first (a known receiver, finite numbers, slope > 0)
+and then saves them all at once, or raises `ValueError` and changes nothing.
 
-`calculate_offsets()` then pairs each receiver's modal tick at every point with
-its known distance to that point (`cal_distances`) and fits a least-squares
-line. For two points this is exactly the old formula:
+### Distances to the origin
+
+Every receiver entry carries `origin_distance`, its distance to (0, 0) —
+`hypot(x, y)` of its position — for all six entries. It is derived, not
+calibrated: `set_receiver_position(s)`, `shift_origin` and the default
+configuration keep it up to date, and `SettingsModule.sync_origin_distances()`,
+called by the main window right after the settings are loaded, recomputes all
+of them and saves the file only if one was missing or had changed (it returns
+whether it wrote). `get_origin_distance(rid)` reads one. Verification does not
+require it.
+
+### System Origin Calibration
+
+The System Origin Calibration measures new intercepts with the transmitter on
+(0, 0). `ultragps_calibration.UltraGPSCalibration` collects the same way as
+the multi-point calibration runs: on its own thread, it pulses until every
+active receiver has read its most frequent (modal) tick `calibration_reads`
+times, keeps a histogram per receiver, and reports progress through callbacks
+that reach the panel as queued signals. For this collection only, the
+intercepts are taken as 0 and the current slopes kept (nothing is written
+while it runs), so
 
 ```
-slope     = (dist_1 - dist_2) / (tick_1 - tick_2)
-intercept = dist_1 - slope * tick_1
+measured_i      = modal_tick_i * slope_i
+new_intercept_i = origin_distance_i - measured_i
 ```
 
-A modal tick of 0 (no echo) leaves that point out of that receiver's fit. A
-receiver is skipped, and keeps its saved offsets, when fewer than two points
-with an echo remain, when its ticks are all the same, or when it is the same
-distance from every point it heard; `last_skipped` gives the reason, and
-`last_fit` the ticks, distances and residuals of every fitted receiver.
+A receiver whose modal tick is 0 (no echo) gets no new intercept. The panel
+shows each receiver's current and new intercept and the difference
+`(new - current) / |current| * 100` (n/a for a current intercept of 0), and
+only on **Save intercepts** saves the new intercepts, with the slopes unchanged, through
+`set_receiver_offsets`, then calls `notify_config_changed()`.
 
-### Choosing the points
+The wire format stays six receivers (`RECEIVER_COUNT`), but only the active
+ones (`number_of_receivers`, re-read whenever the configuration is) have to
+meet the reading threshold and get new intercepts; a dormant receiver's slope
+and intercept are never touched.
 
-Where the points are matters more than how many readings are taken.
-`ultragps_calibration.points`, ported from the UltraGPS Simulator, scores a set
-of points by the RMS distance error its calibration would cause over the whole
-arena and every receiver, per centimetre of error in one modal tick:
-
-```
-score = sqrt(mean over receivers and arena positions of 1/n + (D - d̄)² / Sxx)
-Sxx   = Σ (d_j - d̄)²      (d_j: a receiver's distance to point j)
-```
-
-A receiver wants its points at very different distances from it (a large
-`Sxx`), centred near the distances it will measure. In the simulator the score
-predicts the calibration error: the old pair of points near the centre scored
-4.82 and calibrated to a 3.1 cm distance error, the best four points 0.68 and
-1.1 cm. Points spread far apart, about 30 cm inside the receivers' box and heard
-by every receiver are best.
-
-The module has no idea of the room; two callables stand in for it. `inside`
-says whether a point is in the arena — the panel uses the receivers' outline —
-and `hears` says which receivers hear the transmitter's direct sound from
-there — the panel uses `coverage.hears` with the chosen receiver model. A point
-that a receiver cannot hear costs a large penalty, so a set every receiver hears
-wins whenever there is one. On top of the score:
-
-- `search()` finds the best set of 2, 3 and 4 points (**Find best points**);
-- `check_points()` lists the problems that make a set unusable (a point outside
-  the arena, two points under 20 cm apart, a receiver equidistant from every
-  point) and the warnings (out of range, not heard, distances spread under
-  10 cm, too close to the receivers' walls);
-- `quality_map()` scores every spot of a grid as the next point (given the
-  points already placed), and `goodness()` turns that into the 0–1 scale of the
-  green shading — 1 at the best spot, 0 at twice its error.
+The library still carries the earlier 2- to 4-point least-squares fit
+(`start_run`, `calculate_offsets`, against `cal_points` and `cal_distances`)
+and the point scoring of `ultragps_calibration.points`, for the UltraGPS
+Simulator and other callers; the Calibration panel no longer uses them.
 
 ### Moving the origin
 
@@ -236,7 +240,11 @@ with `ultragps_barrier.translate_barriers_file` (built on `translate_barrier`
 and `translate_overlay`). Both files are checked before either is written;
 `barriers.toml` is replaced first and put back if `config.toml` then fails. It
 raises `ValueError` (nothing written) or `OSError`, and the caller then calls
-`notify_config_changed()`. Distances, and so the calibration, are unchanged.
+`notify_config_changed()`. Every receiver's `origin_distance` is recomputed for
+the new origin; the distances between receivers and calibration points, and so
+the slopes and intercepts, are unchanged. On the Calibration panel's **Origin
+(0,0)** tab, a point measured with the transmitter is shown on the arena and
+moved to only after the operator confirms it.
 
 ## Receiver coverage model
 
@@ -260,15 +268,15 @@ trigger:
    after its trigger) and before the base station stops sampling (the `H`
    window, 80 ms by default).
 
-From `hears()` come `coverage_map()` (how many receivers hear each spot) and
-`hdop_map()` (the fix precision there), and `summary()` condenses them into the
-shares of the arena heard by at least 3, at least 4 and all receivers, the
-fewest receivers at any spot and the median HDOP. A receiver without a
-`facing_deg` is aimed at the centroid of all the receivers.
+From `hears()` comes `coverage_map()` (how many receivers hear each spot), and
+`summary()` condenses it into the shares of the arena heard by at least 3, at
+least 4 and all receivers and the fewest receivers at any spot. A receiver
+without a `facing_deg` is aimed at the centroid of the active receivers. The panels pass
+only the active receivers, so dormant ones never count towards coverage.
 
-Two `SensorModel` presets are provided:
+The library defines two `SensorModel`s:
 
-| | `SIMULATOR` (default) | `DATASHEET` |
+| | `SIMULATOR` (the library default) | `DATASHEET` |
 |---|---|---|
 | Decides by | the physical model above | hard limits: 2–400 cm within ±15° |
 | Reach on axis | 7.48 m | 4.00 m |
@@ -279,6 +287,21 @@ Two `SensorModel` presets are provided:
 
 `model.copy(window_ms=…)` feeds in the base station's sampling window; the
 panels do so once the window is known.
+
+The panels use one `SensorModel`, the one of the Setup panel's **Sensor
+settings…** pop-up. `SettingsModule.sensor_model()` reads it from `sensor.toml`
+in the configuration directory, and `set_sensor_model(model)` writes it there
+(atomically, `ValueError` / `OSError` on failure); see
+[Configuration](configuration.md#sensortoml). Without the file — or with one
+that cannot be read, which is logged and reported in `sensor_problem` — it is
+`SettingsModule.DEFAULT_SENSOR`, the `DATASHEET` limits. The pop-up edits every
+variable — the detection mode (`threshold`), the reception angle
+(`fov_half_deg`, `rx_beam_deg`), the distances (`max_range_cm`,
+`min_range_cm`), `snr_db`, the burst, the air and the timing — and applies them
+with `model.copy(**changes)`; the sampling window is not stored, but copied in
+from the panel's **Window** field. The Setup panel's coverage estimate shades
+how many receivers hear each spot; the panel offers no choice of model. It
+re-reads it when shown and whenever the configuration changes.
 
 ### Checked against the HC-SR04 datasheet
 
@@ -316,7 +339,7 @@ transmitter at least there — and `SIMULATOR` the best estimate. The simulator'
 30 dB margin and 27.5° beam are its estimates, not measurements: with weaker
 modules the reach falls quickly (at 24 dB, 5.3 m on axis and 2.2 m at 45°). For
 the shipped 236 × 236 cm layout, with every receiver aimed at the centre, the
-simulator has all six receivers hearing the whole arena (median HDOP 0.83); the
+simulator has all six receivers hearing the whole arena; the
 datasheet limits give a fix (3 or more receivers) on 24 % of it.
 
 ### The sampling window
@@ -368,7 +391,7 @@ N: BARRIER <name> <enter|exit|inside|outside> <x> <y> <lm|cep>
 | Main (Qt) | every widget and Matplotlib canvas | never waits on the network, except that hiding the Position panel waits for its thread to stop (at most one reply timeout) |
 | `NetworkThread` | the read/solve/barrier/log loop | a `QThread` in `position_window.py`, running while the Position panel is shown |
 | Workers | one job each: a ground-station command, a measurement, a reconnect attempt, a shading map, a point search, a coverage map | `widgets.run_in_thread`; results come back on the GUI thread |
-| Calibration run | the collection for one calibration point | inside `UltraGPSCalibration.start_run`; its callbacks reach the panel through queued signals |
+| Calibration collection | one collection: the transmitter on (0, 0) for the System Origin Calibration | inside `UltraGPSCalibration`, on its own collection thread; its callbacks reach the panel through queued signals |
 | Log saver | writing the `.xlsx` position log when logging stops | so that leaving the Position panel does not wait for it |
 | Server threads | one accept thread per TCP port, plus send/recv per client | inside `UltraGPSServer` |
 | Client threads | one TCP receive, one UDP receive | inside `UltraGPSClient` |
@@ -402,7 +425,7 @@ panels sit in scroll areas so that they stay usable on a 1024 × 600 screen.
 
 ```
 graphics.py            entry point: startup check, feed server, main window
-SettingsModule.py      config discovery, config.toml read/write, origin shift
+SettingsModule.py      config discovery, config.toml / sensor.toml read/write, origin shift
 bin/ultragps-control   launcher used by the Debian package
 config/                default config.toml, barriers.toml and resources/
 windows/               the PyQt6 panels and their shared GUI helpers
@@ -413,8 +436,8 @@ libs/                  five independently installable libraries
 |-------------------|---------------|
 | `main_window.py` | the main window: shared objects, panel navigation, link indicator and reconnection, main menu |
 | `position_window.py`, `position_logger.py` | the Position panel, its `NetworkThread`, the CSV / spreadsheet log |
-| `calibration_window.py` | the Calibration panel: Points, Origin (0,0), Run, Check |
-| `arena_maker_window.py` | the Setup panel: receiver layout, templates, coverage estimate |
+| `calibration_window.py` | the Calibration panel: Origin (0,0), Offsets, System Origin Calibration |
+| `arena_maker_window.py` | the Setup panel: receiver layout and count, (0, 0), templates, coverage estimate and its sensor settings |
 | `base_station_window.py` | the Base Station panel |
 | `barrier_drawer_window.py` | the Barriers panel |
 | `arena_view.py` | shared arena drawing: receiver outline in any layout, compass rose, beams, point groups, heat maps, click / drag picking |
@@ -431,7 +454,7 @@ Qt or Matplotlib.
 |---------|----------------|--------------|
 | `ultragps_client` | TCP/UDP link to the ground station: every command, bare-reply matching, connection state and reconnection | stdlib only |
 | `ultragps_position` | multilateration (`core`), and the receiver coverage model (`coverage`) | numpy, scipy |
-| `ultragps_calibration` | 2- to 4-point histogram calibration, the one `config.toml` writer (`write_config`), and calibration-point scoring (`points`) | `ultragps_client`, numpy |
+| `ultragps_calibration` | histogram collection (System Origin Calibration, and the older 2- to 4-point fit), the one `config.toml` writer (`write_config`), and calibration-point scoring (`points`) | `ultragps_client`, numpy |
 | `ultragps_barrier` | barrier geometry, persistence, image overlays, translation for origin moves (`transform`) | stdlib only |
 | `ultragps_server` | multi-port server and the message builders | stdlib only |
 

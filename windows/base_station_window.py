@@ -57,10 +57,10 @@ from windows.widgets import AMBER, CYAN, DIM, GOLD, GREEN, MAGENTA, ORANGE, RED
 
 log = logging.getLogger(__name__)
 
-#: Receivers in every reading (R1..R6).
+#: Receivers in every reading (R1..R6): the hardware's channels.
 RECEIVER_COUNT = 6
 
-#: Receivers a position needs.
+#: Receivers a position needs (also the fewest the settings can make active).
 MIN_RECEIVERS_FOR_FIX = 3
 
 #: The base station's factory baud rate ('M' restores it).
@@ -220,6 +220,20 @@ def _finite_xy(point) -> tuple[float, float] | None:
     except (TypeError, ValueError, IndexError):
         return None
     return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+
+def active_receiver_count(settings) -> int:
+    """The active receivers N (R1..RN, ids 0..N-1) of ``settings``
+    (``SettingsModule.number_of_receivers``) within [MIN_RECEIVERS_FOR_FIX,
+    RECEIVER_COUNT]; all of them when it is missing or not a whole number.
+    The other channels are still in every reading but not used."""
+    try:
+        n = settings.number_of_receivers
+    except (AttributeError, TypeError, ValueError, KeyError):
+        return RECEIVER_COUNT
+    if isinstance(n, bool) or not isinstance(n, int):
+        return RECEIVER_COUNT
+    return min(max(n, MIN_RECEIVERS_FOR_FIX), RECEIVER_COUNT)
 
 
 def arena_extent(receivers, cal_points=()) -> tuple[float, str, str] | None:
@@ -619,6 +633,7 @@ class BaseStationPanel(QWidget):
         self._ticks_info = ("", DIM)
 
         # From the settings
+        self._n_active = RECEIVER_COUNT           # R1..RN are used; the other channels are not
         self._offsets: list = [None] * RECEIVER_COUNT
         self._extent = None
         self._sanity_top: float | None = None
@@ -949,10 +964,12 @@ class BaseStationPanel(QWidget):
         grid = QGridLayout(table)
         ui_scale.margins(grid, 10, 6, 10, 6)
         ui_scale.spacing(grid, 6)
+        self._tick_heads = []
         for i in range(RECEIVER_COUNT):
             head = _label(f"R{i + 1}", MAGENTA, bold=True)
             head.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             grid.addWidget(head, 0, i + 1)
+            self._tick_heads.append(head)
         caption = _label("Raw ticks", DIM, NOTE_PX)
         caption.setToolTip("Timer1 counts from the trigger to the moment the receiver heard the "
                            "transmitter (16 µs each on the newest firmware); 0 = no echo.")
@@ -994,10 +1011,15 @@ class BaseStationPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _load_settings(self) -> None:
-        """Read what the panel needs from the settings: each receiver's
-        offset, the arena's extent and the positioning's distance limit."""
+        """Read what the panel needs from the settings: the active receivers,
+        their offsets, the arena's extent and the positioning's distance
+        limit.  Channels past the active ones get no offset."""
+        self._n_active = n_active = active_receiver_count(self._settings)
         offsets = []
         for rid in range(RECEIVER_COUNT):
+            if rid >= n_active:
+                offsets.append(None)
+                continue
             try:
                 off = self._settings.get_receiver_offset(rid)
                 slope, intercept = float(off["slope"]), float(off["intercept"])
@@ -1008,7 +1030,8 @@ class BaseStationPanel(QWidget):
         self._offsets = offsets
 
         try:
-            receivers = self._settings.get_tower_coordinates()
+            receivers = [(rid, xy) for rid, xy in self._settings.get_tower_coordinates()
+                         if 0 <= int(rid) < n_active]
         except (TypeError, ValueError):
             receivers = []
         try:
@@ -1205,6 +1228,17 @@ class BaseStationPanel(QWidget):
         ticks = self._ticks
         for i in range(RECEIVER_COUNT):
             tick_cell, dist_cell = self._tick_cells[i], self._dist_cells[i]
+            if i >= self._n_active:               # a channel the settings do not use: dimmed
+                self._paint(self._tick_heads[i], f"R{i + 1}", DIM, bold=True)
+                self._tick_heads[i].setToolTip(
+                    f"Not used: the settings use R1 to R{self._n_active}. The channel is still "
+                    f"in every reading.")
+                self._paint(tick_cell, "—" if ticks is None else str(ticks[i]), DIM, CELL_PX)
+                self._paint(dist_cell, "not used", DIM, CELL_PX)
+                dist_cell.setToolTip(f"R{i + 1} is not used for positioning.")
+                continue
+            self._paint(self._tick_heads[i], f"R{i + 1}", MAGENTA, bold=True)
+            self._tick_heads[i].setToolTip("")
             if ticks is None:
                 self._paint(tick_cell, "—", DIM, CELL_PX, bold=True)
                 self._paint(dist_cell, "—", DIM, CELL_PX, bold=True)
@@ -1453,7 +1487,7 @@ class BaseStationPanel(QWidget):
                 f"with the most valid readings and uses it from now on, also after a reboot.\n\n"
                 f"It takes about {expected:.0f} s and cannot be interrupted. Meanwhile the ground "
                 f"station answers nothing else: positioning and calibration pause.\n\n"
-                f"Keep the transmitter still where all six receivers hear it.\n\n"
+                f"Keep the transmitter still where all {self._n_active} receivers in use hear it.\n\n"
                 f"A new delay shifts every receiver's distances: recalibrate afterwards.")
         if not widgets.confirm(self, "Run the burst-delay sweep?", text, ok_text="Run sweep",
                                details=_SWEEP_DETAILS):
@@ -1691,8 +1725,8 @@ class BaseStationPanel(QWidget):
             return
         when = _now()
         if job == "P":
-            heard = sum(1 for tick in value if tick)
-            text = (f"Pulse at {when}: {heard} of {RECEIVER_COUNT} receivers heard the "
+            heard = sum(1 for tick in value[:self._n_active] if tick)
+            text = (f"Pulse at {when}: {heard} of {self._n_active} receivers heard the "
                     f"transmitter.")
             color = GREEN
             if heard < MIN_RECEIVERS_FOR_FIX:
@@ -1800,11 +1834,11 @@ class BaseStationPanel(QWidget):
         if resends:
             text += f" · no readings came, C re-sent {resends}×"
         if ticks is not None:
-            heard = sum(1 for tick in ticks if tick)
-            text += f" · {heard} of {RECEIVER_COUNT} receivers hear the transmitter"
+            heard = sum(1 for tick in ticks[:self._n_active] if tick)
+            text += f" · {heard} of {self._n_active} receivers hear the transmitter"
             color = GREEN if heard >= MIN_RECEIVERS_FOR_FIX else AMBER
             self._live_end_info = (f"Last live reading at {_now()}: {heard} of "
-                                   f"{RECEIVER_COUNT} receivers heard the transmitter.", color)
+                                   f"{self._n_active} receivers heard the transmitter.", color)
             self._show_ticks(ticks, (text, color))
         else:
             self._ticks_info = (text, AMBER if resends else DIM)

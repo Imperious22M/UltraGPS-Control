@@ -6,10 +6,9 @@ be judged before it is built.
 
 For any point of the arena this module predicts which receivers detect the
 transmitter's direct sound in time to be timed, and from that how many
-receivers cover the point (``coverage_map``) and how well their geometry pins
-a fix down (``hdop_map``).  It is a port of the UltraGPS Simulator's
-direct-sound detection model (``engine/acoustics.py`` and
-``engine/maps.py::_hears_direct`` / ``coverage`` / ``hdop``) for an open room:
+receivers cover the point (``coverage_map``).  It is a port of the UltraGPS
+Simulator's direct-sound detection model (``engine/acoustics.py`` and
+``engine/maps.py::_hears_direct`` / ``coverage``) for an open room:
 no walls or obstacles, a transmitter that radiates all round, and nominal
 modules (no module-to-module gain or aim spread).  Pure numpy/scipy,
 vectorised over points × receivers: a coverage map on a 5 cm grid over a
@@ -118,7 +117,6 @@ Quick-start
     facing = [None] * 6                                 # None: aim at the centroid
 
     xs, ys, count = coverage.coverage_map(coords, facing)   # receivers per point
-    xs, ys, dop   = coverage.hdop_map(coords, facing)       # inf: no fix there
     print(coverage.summary(coords, facing))                 # share with >= 3, ...
 
     # The base station sampling for 16 ms (50 Hz), against the datasheet:
@@ -460,9 +458,6 @@ SIMULATOR = SensorModel(name="Simulator", threshold=True, min_range_cm=0.0)
 DATASHEET = SensorModel(name="HC-SR04 datasheet", threshold=False, max_range_cm=400.0,
                         fov_half_deg=15.0, min_range_cm=2.0)
 
-#: The built-in models by name, for menus.
-PRESETS: dict[str, SensorModel] = {m.name: m for m in (SIMULATOR, DATASHEET)}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Receiver facing
@@ -671,37 +666,6 @@ def grid(coords, step: float = 5.0, margin: float = MARGIN_CM) -> tuple[np.ndarr
     return axes[0], axes[1]
 
 
-def hdop(points, coords, heard=None) -> np.ndarray:
-    """Horizontal dilution of precision at each point: cm of position error
-    per cm of range error.
-
-    ``sqrt(trace((JᵀJ)⁻¹))``, where J's rows are the unit vectors from the
-    receivers that hear the point to it (the simulator's ``maps.hdop``).
-
-    Args:
-        points: (M, 2) points, cm.
-        coords: (R, 2) receiver positions, cm.
-        heard:  (M, R) bool mask of the receivers that hear each point (from
-                ``hears``), or ``None``: every receiver.
-
-    Returns:
-        (M,) float array; ``inf`` where fewer than 3 receivers hear the point,
-        where they all lie on one line through it, or where the point is not
-        finite (no fix).
-    """
-    P = _as_points(points, "points")
-    C = _as_points(coords, "coords")
-    if heard is None:
-        heard = np.ones((len(P), len(C)), dtype=bool)
-    heard = np.asarray(heard, dtype=bool)
-    if heard.shape != (len(P), len(C)):
-        raise ValueError(f"heard must have shape {(len(P), len(C))}, not {heard.shape}")
-    out = np.empty(len(P))
-    for s in range(0, len(P), _CHUNK):
-        out[s:s + _CHUNK] = _hdop(P[s:s + _CHUNK], C, heard[s:s + _CHUNK])
-    return out
-
-
 def coverage_map(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float = 5.0,
                  margin: float = MARGIN_CM) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Number of receivers that hear the transmitter's direct sound at each
@@ -727,27 +691,6 @@ def coverage_map(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: 
     xs, ys = grid(coords, step, margin)
     count  = hears(_mesh(xs, ys), coords, facing_deg, model).sum(axis=1)
     return xs, ys, count.reshape(len(ys), len(xs)).astype(float)
-
-
-def hdop_map(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float = 5.0,
-             margin: float = MARGIN_CM) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """HDOP of the receivers that hear each point of a grid over the
-    receivers' box (the simulator's ``maps.hdop``).
-
-    Args:
-        coords, facing_deg, model, step, margin: As for ``coverage_map``.
-
-    Returns:
-        ``(xs, ys, Z)``: ``Z[j, i]`` is the HDOP at ``(xs[i], ys[j])``;
-        ``inf`` where there is no fix (fewer than 3 receivers, or all in line).
-
-    Raises:
-        ValueError: As ``grid`` does, e.g. with no receivers.
-    """
-    xs, ys = grid(coords, step, margin)
-    P      = _mesh(xs, ys)
-    dop    = hdop(P, coords, hears(P, coords, facing_deg, model))
-    return xs, ys, dop.reshape(len(ys), len(xs))
 
 
 def summary(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float = 5.0,
@@ -777,11 +720,9 @@ def summary(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float
                           a fix is possible;
           ``share_4``     ... by at least 4: one bad reading can be rejected;
           ``share_all``   ... by every receiver;
-          ``min_count``   fewest receivers hearing any of them (int);
-          ``median_hdop`` median HDOP over them (``inf`` when most have no
-                          fix).
+          ``min_count``   fewest receivers hearing any of them (int).
         With no receivers yet, or no points to judge, the shares and
-        ``min_count`` are 0 and the HDOP ``inf``.
+        ``min_count`` are 0.
 
     Raises:
         ValueError: As ``grid`` does for a bad step or receiver position, or
@@ -800,7 +741,6 @@ def summary(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float
         P = P[mask]
     heard = hears(P, C, facing_deg, model)
     count = heard.sum(axis=1)
-    dop   = hdop(P, C, heard)
     n     = len(P)
     share = (lambda k: float(np.mean(count >= k))) if n else (lambda k: 0.0)
     return {
@@ -810,7 +750,6 @@ def summary(coords, facing_deg=None, model: SensorModel = SIMULATOR, step: float
         "share_4":     share(4),
         "share_all":   share(max(len(C), 1)),
         "min_count":   int(count.min()) if n else 0,
-        "median_hdop": float(np.median(dop)) if n else math.inf,
     }
 
 
@@ -900,23 +839,3 @@ def _heard(dist, off, model: SensorModel) -> np.ndarray:
         if model.fov_half_deg is not None:
             ok &= np.abs((off + 180.0) % 360.0 - 180.0) <= model.fov_half_deg
     return ok
-
-
-def _hdop(P: np.ndarray, C: np.ndarray, heard: np.ndarray) -> np.ndarray:
-    """``hdop`` for one block of points."""
-    dx    = P[:, None, 0] - C[None, :, 0]
-    dy    = P[:, None, 1] - C[None, :, 1]
-    n     = np.maximum(np.hypot(dx, dy), 1e-9)
-    w     = heard.astype(float)
-    with np.errstate(invalid="ignore"):                             # an infinite point: NaN, no fix
-        ux    = dx / n
-        uy    = dy / n
-        a     = np.sum(w * ux * ux, axis=1)                         # JᵀJ = [[a, b], [b, d]]
-        b     = np.sum(w * ux * uy, axis=1)
-        d     = np.sum(w * uy * uy, axis=1)
-        det   = a * d - b * b
-        tr    = a + d
-        fix   = (heard.sum(axis=1) >= 3) & (det > 1e-12 * tr * tr)  # in line: singular
-    out   = np.full(len(P), math.inf)
-    out[fix] = np.sqrt(tr[fix] / det[fix])                          # trace((JᵀJ)⁻¹) = (a + d) / det
-    return out

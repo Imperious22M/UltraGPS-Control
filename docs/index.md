@@ -6,11 +6,11 @@ system, developed as a result of graduate research.
 `ultragps-control` runs on any computer on the same network as the ground-station
 host. It asks the ground station for raw per-receiver tick counts, converts them
 into a 2D position by multilateration, and draws the result live on an arena plot.
-Beyond tracking, it is also the tool used to set the arena up: placing and aiming
-receivers with a coverage estimate of the layout, calibrating them on 2 to 4
-points anywhere in the arena (with the best spots shaded green), moving the
-arena's (0, 0), checking the accuracy on a known point, tuning the base station,
-and drawing the virtual barriers that fire events when the transmitter crosses
+Beyond tracking, it is also the tool used to set the arena up: choosing 3 to 6
+receivers, placing and aiming them with a coverage estimate of the layout, moving
+the arena's (0, 0), setting each receiver's slope and intercept, measuring new
+intercepts with the transmitter on (0, 0) (the System Origin Calibration),
+tuning the base station, and drawing the virtual barriers that fire events when the transmitter crosses
 them.
 
 The position it computes does not stay inside the GUI. Every solved position is
@@ -28,7 +28,7 @@ background.
 
 - **[Architecture](architecture.md)** — how the program is structured, how
   data flows from the Arduino through the solver to the network clients, and
-  the receiver and calibration models behind the shading.
+  the receiver coverage model and the calibration maths.
 - **[Installation](installation.md)** — installing the Debian package or
   setting up a development checkout.
 - **[Configuration](configuration.md)** — where the settings files live, the

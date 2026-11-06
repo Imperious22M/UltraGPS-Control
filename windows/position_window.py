@@ -10,9 +10,8 @@ reconnected client is back in normal mode), and it re-sends the continuous
 command, backing off, while the stream stays silent.
 
 ``PositionPanel`` shows the arena (receivers, barriers, image overlays, the
-LM and CEP fixes with their trails), each receiver's distance history, the
-HDOP of the current fix, how many receivers passed the sanity filter, and the
-tracking state.  A timer redraws the canvas, and only when something changed,
+LM and CEP fixes with their trails), each receiver's distance history, how
+many receivers passed the sanity filter, and the tracking state.  A timer redraws the canvas, and only when something changed,
 so the redraw cost does not follow the reading rate.
 """
 
@@ -38,7 +37,7 @@ from matplotlib.transforms import Affine2D
 from SettingsModule import RECEIVER_COUNT, SettingsModule
 from ultragps_barrier import BarrierEvent, BarrierManager, EventType, load_images
 from ultragps_client import DEFAULT_TRIGGER_RATE_HZ, CommMode, UltraGPSClient
-from ultragps_position import UltraGPSPositionLib, coverage
+from ultragps_position import UltraGPSPositionLib
 from ultragps_server import send_barrier_event, send_nmea, send_position
 from windows import ui_scale, widgets
 from windows.arena_view import RECEIVER_COLOR, ArenaView
@@ -64,10 +63,6 @@ STALL_MIN_S = 1.0                        # ... but never less than this
 ERROR_LOG_INTERVAL_S = 5.0               # a repeating error is logged at most this often
 STOP_TIMEOUT_MS = 10000                  # stop() waits this long at most (a pulse takes <= 3.3 s)
 
-#: HDOP up to these values is shown green / gold; above, orange.
-HDOP_GOOD = 1.5
-HDOP_FAIR = 3.0
-
 # Tracking states shown on the panel: (text, colour)
 STATE_LINK_DOWN = ("Ground station link down: tracking paused until it reconnects", widgets.RED)
 STATE_STARTING = ("Starting the continuous stream…", widgets.AMBER)
@@ -82,14 +77,13 @@ class Fix:
 
     Attributes:
         ticks:       The 6 raw tick counts (0 = no echo).
-        distances:   Calibrated distance per receiver, cm.
+        distances:   Calibrated distance per active receiver (R1..RN), cm.
         sane:        Receivers (0-based ids) that passed the sanity filter.
         lm:          LM position (x, y) or None; the library's last good
                      position when this reading gave none.
         lm_success:  The LM solve of this reading converged.
         cep:         CEP position (x, y) or None (last good, as for ``lm``).
         cep_success: The CEP solve of this reading found a valid position.
-        hdop:        HDOP of this fix over the sane receivers (inf: no fix).
         continuous:  Read from the continuous stream (else a pulse).
         session:     The thread's run that made it (``NetworkThread.session``).
     """
@@ -101,9 +95,20 @@ class Fix:
     lm_success: bool
     cep: tuple | None
     cep_success: bool
-    hdop: float
     continuous: bool
     session: int = 0
+
+
+def _active_count(settings) -> int:
+    """The active receivers N (R1..RN) of ``settings`` within [3,
+    RECEIVER_COUNT]; all of them when the setting is missing or bad."""
+    try:
+        n = settings.number_of_receivers
+    except (AttributeError, TypeError, ValueError, KeyError):
+        return RECEIVER_COUNT
+    if isinstance(n, bool) or not isinstance(n, int):
+        return RECEIVER_COUNT
+    return min(max(n, 3), RECEIVER_COUNT)
 
 
 def _xy(position) -> tuple | None:
@@ -337,23 +342,13 @@ class NetworkThread(QThread):
         sane = tuple(int(i) for i in result.get("sane_indices", ()))
         lm, cep = _xy(result.get("lm_position")), _xy(result.get("cep_position"))
         lm_ok, cep_ok = bool(result.get("lm_success")), bool(result.get("cep_success"))
-        current = lm if lm_ok else cep if cep_ok else None
         return Fix(
             ticks=tuple(int(t) for t in ticks),
             distances=tuple(float(d) for d in (result.get("distances") or ())),
             sane=sane, lm=lm, lm_success=lm_ok and lm is not None,
             cep=cep, cep_success=cep_ok and cep is not None,
-            hdop=self._hdop(current, sane), continuous=continuous, session=self.session,
+            continuous=continuous, session=self.session,
         )
-
-    def _hdop(self, point, sane) -> float:
-        """HDOP at ``point`` over the receivers that passed the sanity filter."""
-        if point is None or len(sane) < 3:
-            return math.inf
-        coords = self._position_lib.receiver_coords
-        heard = np.zeros((1, len(coords)), dtype=bool)
-        heard[0, [i for i in sane if 0 <= i < len(coords)]] = True
-        return float(coverage.hdop([point], coords, heard)[0])
 
     def _publish(self, fix: Fix) -> None:
         """Barrier events for both positions, and the position feed."""
@@ -557,6 +552,10 @@ class _DistancePlot:
         self.text.set_text('---')
         self.led.set_markerfacecolor(widgets.GREEN)
 
+    def set_active(self, active: bool) -> None:
+        """Show the plot only for a receiver the settings use."""
+        self.ax.set_visible(active)
+
 
 # ---------------------------------------------------------------------------
 # Panel
@@ -565,7 +564,8 @@ class _DistancePlot:
 class PositionPanel(QWidget):
     """Full-page position tracking panel.
 
-    Owns the matplotlib figure (arena + 6 distance plots) and the
+    Owns the matplotlib figure (arena + a distance plot per active receiver,
+    R1..RN of the 6 slots) and the
     NetworkThread.  The canvas is refreshed by a 20 Hz QTimer, only when
     something changed; the timer and the thread run while the panel is shown.
     """
@@ -614,6 +614,7 @@ class PositionPanel(QWidget):
         self._lm_history = deque(maxlen=self.HISTORY)
         self._cep_history = deque(maxlen=self.HISTORY)
         self._distance_histories = [deque(maxlen=self.HISTORY) for _ in range(RECEIVER_COUNT)]
+        self._n_active = _active_count(self._settings)   # R1..RN shown; re-read on config_changed
         self._shown = False
         self._dirty = False
         self._draws = 0
@@ -622,7 +623,7 @@ class PositionPanel(QWidget):
         self._build_figure()
         self._build_ui()
         try:
-            self._view.set_receivers(self._settings.get_tower_coordinates())
+            self._view.set_receivers(self._active_towers())
             self._view.set_limits()
         except Exception:                 # drawn again (and reported) on show
             log.exception("Could not draw the receivers")
@@ -678,6 +679,8 @@ class PositionPanel(QWidget):
         for row, rid in enumerate((5, 4, 3)):
             self._distance_plots[rid] = _DistancePlot(self.fig, gs[row, 2], rid, self.HISTORY,
                                                       outer_side='right')
+        for rid, plot in enumerate(self._distance_plots):
+            plot.set_active(rid < self._n_active)
 
     # ------------------------------------------------------------------
     # Qt widget layout
@@ -749,16 +752,7 @@ class PositionPanel(QWidget):
         cep_cb.toggled.connect(self._on_show_cep)
         ctrl_layout.addLayout(self._column(cep_row, cep_cb))
 
-        # Fix quality: HDOP and the receivers that passed the sanity filter
-        self._hdop_label = QLabel("HDOP: ---")
-        ui_scale.font(self._hdop_label, 14, bold=True)
-        self._hdop_label.setStyleSheet(f"color: {widgets.DIM};")
-        ui_scale.min_width(self._hdop_label, 140)
-        self._hdop_label.setToolTip(
-            "Horizontal dilution of precision of the current fix, from the receivers that "
-            "passed the sanity filter: cm of position error per cm of range error.\n"
-            f"Up to {HDOP_GOOD:g} is good (green), up to {HDOP_FAIR:g} fair (gold); "
-            "higher means the receivers see the transmitter from too few directions.")
+        # Fix quality: the receivers that passed the sanity filter
         self.insuff_led = _Led(tooltip="Red: fewer than 3 receivers passed the sanity filter "
                                        "(no new fix)")
         self._sane_label = _label("Receivers: -/-", "white", 12, bold=True)
@@ -767,7 +761,7 @@ class PositionPanel(QWidget):
         sane_row.addWidget(self.insuff_led)
         sane_row.addWidget(self._sane_label)
         sane_row.addStretch(1)
-        ctrl_layout.addLayout(self._column(self._hdop_label, sane_row))
+        ctrl_layout.addLayout(self._column(sane_row))
 
         # Mode and logging
         self._mode_cb = _checkbox(
@@ -825,8 +819,11 @@ class PositionPanel(QWidget):
             self._position_lib.reload(self._settings.config_path)
         except Exception as exc:
             problems.append(f"position library: {exc}")
+        self._n_active = _active_count(self._settings)
+        for rid, plot in enumerate(self._distance_plots):
+            plot.set_active(rid < self._n_active)
         try:
-            self._view.set_receivers(self._settings.get_tower_coordinates())
+            self._view.set_receivers(self._active_towers())
             self._view.set_limits()
         except Exception as exc:
             problems.append(f"receivers: {exc}")
@@ -859,6 +856,11 @@ class PositionPanel(QWidget):
             widgets.warning(self, "Image Error",
                             "These image overlays could not be shown (missing or corrupted "
                             "files in the resources folder):\n" + "\n".join(sorted(new_failures)))
+
+    def _active_towers(self) -> list:
+        """``get_tower_coordinates()`` of the active receivers only."""
+        return [(rid, xy) for rid, xy in self._settings.get_tower_coordinates()
+                if 0 <= int(rid) < self._n_active]
 
     def _rebuild_barrier_manager(self) -> None:
         """A fresh BarrierManager for the settings' config directory (the
@@ -1091,8 +1093,6 @@ class PositionPanel(QWidget):
             history.clear()
         self.multilat_label.setText("Multilat: (---, ---)")
         self.cep_label.setText("CEP: (---, ---)")
-        self._hdop_label.setText("HDOP: ---")
-        self._hdop_label.setStyleSheet(f"color: {widgets.DIM};")
         self._sane_label.setText("Receivers: -/-")
         self.cep_validity_led.set_color(widgets.GREEN)
         self.insuff_led.set_color(widgets.GREEN)
@@ -1118,8 +1118,7 @@ class PositionPanel(QWidget):
             n_sane = len(fix.sane)
             self.insuff_led.set_color(widgets.GREEN if n_sane >= 3 else widgets.RED)
             self._sane_label.setText(f"Receivers: {n_sane}/{len(fix.distances)}")
-            self._show_hdop(fix.hdop)
-            for rid, plot in enumerate(self._distance_plots):
+            for rid, plot in enumerate(self._distance_plots[:self._n_active]):
                 plot.update(self._distance_histories[rid], rid in fix.sane)
 
         # The LM marker is the larger one, under CEP's, so both show when they agree
@@ -1127,17 +1126,6 @@ class PositionPanel(QWidget):
                          widgets.GREEN, 'Multilateration (LM)', size=170, zorder=8.0)
         self._draw_track('cep', self._cep_history, self._cep_trail, self.show_cep,
                          CEP_COLOR, 'CEP', size=70, zorder=8.2)
-
-    def _show_hdop(self, hdop: float) -> None:
-        if not math.isfinite(hdop):
-            text, color = "HDOP: no fix", widgets.RED
-        else:
-            text = f"HDOP: {hdop:.2f}"
-            color = (widgets.GREEN if hdop <= HDOP_GOOD else
-                     widgets.GOLD if hdop <= HDOP_FAIR else widgets.ORANGE)
-        if text != self._hdop_label.text():
-            self._hdop_label.setText(text)
-            self._hdop_label.setStyleSheet(f"color: {color};")
 
     def _draw_track(self, group: str, history, trail, shown: bool, color: str,
                     legend: str, size: float, zorder: float) -> None:

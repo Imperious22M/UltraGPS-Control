@@ -410,7 +410,10 @@ class BarrierDrawerPanel(QWidget):
         """
         ok = True
         try:
-            self._view.set_receivers(self._settings.get_tower_coordinates())
+            # Only the active receivers (R1..RN, number_of_receivers) are drawn
+            active = self._settings.number_of_receivers
+            self._view.set_receivers([(rid, xy) for rid, xy in self._settings.get_tower_coordinates()
+                                      if 0 <= int(rid) < active])
         except (TypeError, ValueError, IndexError) as exc:   # a malformed position in config.toml
             self._view.set_receivers([])
             self._set_status(f"Could not draw the receivers: {exc}", widgets.RED)

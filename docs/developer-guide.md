@@ -20,7 +20,7 @@ The program does not start without a ground station: see
 
 ```
 graphics.py            entry point: startup check, feed server, main window
-SettingsModule.py      config discovery, config.toml read/write, origin shift
+SettingsModule.py      config discovery, config.toml / sensor.toml read/write, origin shift
 bin/ultragps-control   launcher used by the Debian package
 build.sh               packaging and docs
 install.sh / run.sh    development environment
@@ -46,9 +46,12 @@ windows/               PyQt6 panels and their shared helpers
 | Protocol or wire format | `libs/ultragps_client`, `libs/ultragps_server` |
 | Positioning maths | `libs/ultragps_position` (`core.py`) |
 | Receiver limits and coverage maps | `libs/ultragps_position/ultragps_position/coverage.py` |
+| The saved receiver model (`sensor.toml`) | `SettingsModule.py` (`sensor_model`, `set_sensor_model`, `DEFAULT_SENSOR`) |
 | Barrier geometry or persistence | `libs/ultragps_barrier` |
-| Calibration procedure | `libs/ultragps_calibration` (`calibration.py`) |
-| Calibration-point scoring, search and checks | `libs/ultragps_calibration/ultragps_calibration/points.py` |
+| Calibration collection (histograms, modal ticks) | `libs/ultragps_calibration` (`calibration.py`) |
+| The Calibration panel (origin, offsets, System Origin Calibration) | `windows/calibration_window.py` |
+| The default slope, receiver offsets, distances to (0, 0) | `SettingsModule.py` (`DEFAULT_SLOPE`, `set_receiver_offsets`, `sync_origin_distances`, `get_origin_distance`) |
+| Calibration-point scoring, search and checks (no longer used by a panel) | `libs/ultragps_calibration/ultragps_calibration/points.py` |
 | A new setting | `SettingsModule.py` — and see the warning below |
 
 The dependency direction is one-way: libraries never import from `windows/` or
@@ -66,6 +69,10 @@ backward compatible.
     `UltraGPSCalibration`. A key that changes what the positioning or the
     calibration does has to be read in each place that needs it; add it to
     `CONFIG_KEY_ORDER` in `calibration.py` to give it a fixed place in the file.
+    A receiver's `origin_distance` is derived from its position: move
+    receivers only through `SettingsModule`'s position setters or
+    `shift_origin`, which keep it in step (`sync_origin_distances()` repairs it
+    at the next start otherwise).
     After saving, a panel calls `main_window.notify_config_changed()` so that
     the libraries and the other panels reload.
 

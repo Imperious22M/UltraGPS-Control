@@ -9,55 +9,61 @@ cal_point_2 = [87.0, 87.0]
 
 [[receivers]]
 cal_distances = [197.29419656948858, 289.9137802864845]
+origin_distance = 166.87720036002523
 id = 0
 position = [-118.0, -118.0]
 
     [receivers.offset]
-    intercept = -83.13
+    intercept = -80.37079963997479
     slope = 0.272
 
 [[receivers]]
 cal_distances = [82.63776376451628, 222.69710370815332]
+origin_distance = 118.0
 id = 1
 position = [-118.0, 0.0]
 
     [receivers.offset]
-    intercept = -74
+    intercept = -74.304
     slope = 0.272
 
 [[receivers]]
 cal_distances = [50.80354318352215, 207.3306537876153]
+origin_distance = 166.87720036002523
 id = 2
 position = [-118.0, 118.0]
 
     [receivers.offset]
-    intercept = -83.13
+    intercept = -81.73079963997478
     slope = 0.272
 
 [[receivers]]
 cal_distances = [283.6564823867066, 207.3306537876153]
+origin_distance = 166.87720036002523
 id = 3
 position = [118.0, -118.0]
 
     [receivers.offset]
-    intercept = -74
+    intercept = -82.0027996399748
     slope = 0.272
 
 [[receivers]]
 cal_distances = [219.92044015961773, 92.35799911215054]
+origin_distance = 118.0
 id = 4
 position = [118.0, 0.0]
 
     [receivers.offset]
-    intercept = -83.13
+    intercept = -76.75200000000001
     slope = 0.272
 
 [[receivers]]
 cal_distances = [210.0404722904612, 43.840620433565945]
+origin_distance = 166.87720036002523
 id = 5
 position = [118.0, 118.0]
 
     [receivers.offset]
-    intercept = -83.13
+    intercept = -86.3547996399748
     slope = 0.272
 

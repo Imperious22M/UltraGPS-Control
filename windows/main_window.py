@@ -15,7 +15,9 @@ Contract for the panels:
   stops everything it runs) and shows the next (``on_panel_show()``);
 * ``notify_config_changed()`` after every save that changes receivers,
   facings, offsets, calibration points or the origin: reloads the settings
-  and both libraries, then emits ``config_changed``;
+  and both libraries, then emits ``config_changed`` (the receivers'
+  ``origin_distance`` is kept by the SettingsModule setters, and synced once
+  at startup);
 * ``link_changed(bool)`` when the ground-station TCP link goes down (False)
   or comes back (True).
 
@@ -107,6 +109,16 @@ class UltraGPSMainWindow(QMainWindow):
         # reuse whatever it settled on for the other consumers so all four
         # (settings, position, calibration, barriers) read the same file.
         self.settings_module = SettingsModule(config_path)
+        # Bring each receiver's origin_distance (its distance to (0, 0) on the
+        # arena map) in step with its position; writes only when one changed.
+        # Before reading config_path: a read-only config dir switches to ~/.config.
+        try:
+            if self.settings_module.sync_origin_distances():
+                log.info("Updated the receivers' origin distances in %s",
+                         self.settings_module.config_path)
+        except (OSError, ValueError) as exc:
+            log.error("Could not update the receivers' origin distances in %s: %s",
+                      self.settings_module.config_path, exc)
         config_path = self.settings_module.config_path
         self.position_lib = UltraGPSPositionLib(config_path)
         self.cal = UltraGPSCalibration(config_path, self.client)

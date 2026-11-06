@@ -1,12 +1,13 @@
 # Configuration
 
 UltraGPS Control keeps its settings in a **configuration directory** holding
-three things:
+four things:
 
 | Item | What it holds |
 |------|---------------|
 | `config.toml` | receiver geometry, facing and calibration |
 | `barriers.toml` | virtual barriers and image overlays |
+| `sensor.toml` | the receiver model of the Setup panel's **Sensor settings…** (optional) |
 | `resources/` | image files referenced by the overlays |
 
 They travel together, because a barrier is only meaningful relative to the arena
@@ -34,8 +35,8 @@ If no configuration exists in any of the three, a default is created in
 `/etc` is not writable (that is, when not running as root). A freshly created
 default is *not* usable as-is: every receiver and calibration point is at
 (0, 0), and the program prints a warning telling you to initialise it — place
-the receivers on the **Setup** panel, then choose calibration points and
-calibrate on the **Calibration** panel.
+the receivers on the **Setup** panel, then set the slopes and run the
+**System Origin Calibration** on the **Calibration** panel.
 
 Pass `--config` to bypass the search entirely:
 
@@ -44,7 +45,7 @@ ultragps-control --config /path/to/config.toml
 ```
 
 The directory containing that file becomes the configuration directory, so
-`barriers.toml` and `resources/` are read from beside it. A `config.toml` that
+`barriers.toml`, `sensor.toml` and `resources/` are read from beside it. A `config.toml` that
 cannot be read — missing, unreadable or malformed — stops the program at startup
 with a message naming the file (exit status 1).
 
@@ -62,8 +63,8 @@ with a message naming the file (exit status 1).
 ```toml
 valid_settings = true       # set by the Setup panel once verification passes
 cal_state = 1
-calibration_reads = 5       # hits on the modal tick each receiver needs per point
-number_of_receivers = 6
+calibration_reads = 5       # hits on the modal tick each receiver needs per collection
+number_of_receivers = 6     # active receivers R1..RN, 3 to 6
 serial_port = '/dev/ttyACM0'
 units = 'cm'
 cal_point_1 = [-88.0, 77.0]       # always equal to cal_points[0] (older readers)
@@ -72,16 +73,20 @@ cal_points = [[-88.0, 77.0], [87.0, 87.0], [-88.0, -88.0], [87.0, -88.0]]
 
 [[receivers]]
 cal_distances = [197.29, 289.91, 42.43, 207.18]  # to each calibration point, in order
+origin_distance = 166.87720036002523  # to (0, 0); derived from position
 id = 0
 position = [-118.0, -118.0]       # where the receiver sits, in cm
 facing_deg = 45.0                 # optional: where it points (0 = +X, 90 = +Y)
 
     [receivers.offset]
-    intercept = -20.651537789998116   # ticks -> cm
-    slope = 0.3758116957204082
+    intercept = 25.44                 # ticks -> cm
+    slope = 0.272
 ```
 
-There are six `[[receivers]]` blocks, with ids 0 through 5 (R1–R6 in the GUI).
+There are always six `[[receivers]]` blocks, with ids 0 through 5 (R1–R6 in the
+GUI), one per base-station channel. Only the first `number_of_receivers` of them
+are active; the others are dormant but keep their position, facing and
+calibration, so that they come back calibrated when the arena uses them again.
 
 All coordinates and distances are **centimetres**. Positions are signed, relative
 to the arena's (0, 0) — the centre of a layout built from the W × H template, or
@@ -90,22 +95,17 @@ the receiver positions.
 
 | Key | Meaning |
 |-----|---------|
-| `valid_settings` | `true` once the whole file verifies (6 receivers with positions not all on one spot or one line, 2–4 distinct calibration points, matching `cal_distances`, offsets). Set by **Verify & Save** on the Setup panel and checked at every start |
-| `calibration_reads` | How many times each receiver must read its most frequent tick before a calibration point is done |
-| `cal_points` | The 2 to 4 calibration points P1–P4, in order. Written by **Save points** on the Calibration panel. A file without it (written before it existed) uses `[cal_point_1, cal_point_2]` |
+| `valid_settings` | `true` once the whole file verifies (6 receiver entries, `number_of_receivers` from 3 to 6, active receivers with positions not all on one spot or one line, 2–4 distinct calibration points, matching `cal_distances`, offsets for the active receivers). Set by **Verify & Save** on the Setup panel and checked at every start |
+| `calibration_reads` | How many times each receiver must read its most frequent tick before a collection is done — the System Origin Calibration uses it |
+| `cal_points` | The 2 to 4 calibration points P1–P4 of the earlier multi-point calibration, in order. No panel edits them any more; they are kept, checked by verification, and moved with (0, 0). A file without it (written before it existed) uses `[cal_point_1, cal_point_2]` |
 | `cal_point_1`, `cal_point_2` | Kept equal to the first two `cal_points` on every save, for older programs that only know two points |
+| `number_of_receivers` | How many receivers the arena uses, N from 3 to 6: R1 to RN (ids 0 to N − 1) are active. Chosen when placing the receivers by clicking on the Setup panel and written by **Verify & Save**. Dormant receivers (ids N to 5) are ignored by the positioning, the coverage estimate, calibration and the displays, but never removed from the file. A missing or invalid value means all six |
 | `receivers[].position` | The receiver's position |
-| `receivers[].facing_deg` | **Optional.** The direction the receiver points, in degrees (0 = +X, 90 = +Y). Absent means it is aimed at the centroid of all the receivers. Used by the coverage estimate and the calibration-point shading, not by the position solver |
+| `receivers[].facing_deg` | **Optional.** The direction the receiver points, in degrees (0 = +X, 90 = +Y). Absent means it is aimed at the centroid of the active receivers. Used by the coverage estimate, not by the position solver |
 | `receivers[].cal_distances` | The receiver's distance to each calibration point, one per point in `cal_points` order. Recomputed whenever the receivers or the calibration points are saved; calibration fits against them |
-| `receivers[].offset` | `slope` and `intercept`: what calibration produces. Each receiver converts ticks to centimetres with `distance = tick * slope + intercept` |
-| `cal_state`, `number_of_receivers`, `serial_port`, `units` | Kept in the file, but not used: there are always six receivers, the units are always centimetres, and the serial port is UltraGpsXY's business (its `-s` option) |
-
-!!! warning "The shipped calibration points need replacing"
-    The default `config.toml` still has only `cal_point_1 = [0.0, 59.0]` and
-    `cal_point_2 = [-59.0, 0.0]`. R3 and R4 are the same distance from both, so
-    no calibration on them can fit those two receivers; the Calibration panel
-    refuses them. See [Calibration points](usage.md#calibration-points) for
-    choosing better ones.
+| `receivers[].origin_distance` | **Derived.** The receiver's distance to (0, 0), `hypot(x, y)` of its `position`, kept for all six entries (dormant ones too). Recomputed and saved at startup and whenever positions change — saving a layout, moving (0, 0) — and only written when a value actually changed. The System Origin Calibration takes it as the true distance. Not needed for `valid_settings`; a missing value is filled in at the next start |
+| `receivers[].offset` | `slope` and `intercept`. Each receiver converts ticks to centimetres with `distance = tick * slope + intercept`. Edited on the Calibration panel's **Offsets** tab (a slope must be greater than 0); the default slope is 0.272 (`DEFAULT_SLOPE` in `SettingsModule.py`). The **System Origin Calibration** writes new intercepts and leaves the slopes as they are |
+| `cal_state`, `serial_port`, `units` | Kept in the file, but not used: the units are always centimetres, and the serial port is UltraGpsXY's business (its `-s` option) |
 
 ### Unknown keys are kept
 
@@ -122,15 +122,17 @@ half a file.
 
 Moving the arena's origin — the **Set (0, 0)** tool on the Calibration or Setup
 panel — makes the chosen point (0, 0) by translating the whole frame. It rewrites
-**both** files of the configuration directory:
+`config.toml` and `barriers.toml`:
 
-- `config.toml`: every receiver `position`, `cal_points` and
-  `cal_point_1` / `cal_point_2`;
+- `config.toml`: every receiver `position` and `origin_distance`, `cal_points`
+  and `cal_point_1` / `cal_point_2`;
 - `barriers.toml`: every barrier's coordinates (polygon `vertices`, circle
   `center`, line `point1` / `point2`) and every image overlay's centre.
 
-A translation changes no distance, so `cal_distances`, slopes, intercepts and
-facings stay as they are, and no new calibration is needed.
+A translation changes no distance between the receivers and the
+calibration points, so `cal_distances`, slopes, intercepts and facings stay as
+they are, and no new calibration is needed. `sensor.toml` holds
+no coordinates and is not touched.
 
 Everything is checked before anything is written. `barriers.toml` is rewritten in
 the barrier editor's own format, so if it holds something that format does not
@@ -138,6 +140,42 @@ have — an unknown key, a malformed entry — the move is refused with a messag
 neither file changes. `barriers.toml` is replaced first, then `config.toml`; if
 `config.toml` cannot be written, `barriers.toml` is put back. In a read-only
 directory both files go to the `~/.config` copy described above.
+
+## sensor.toml
+
+The receiver model — what a receiver can hear — used by the Setup panel's
+coverage estimate. It is written by **OK** in the Setup panel's **Sensor
+settings…** pop-up ([Usage](usage.md#coverage-estimate)) and re-read whenever
+the configuration is. Every field of the pop-up except the sampling window is
+stored, in a `[sensor]` table:
+
+```toml
+[sensor]
+threshold = false        # true: signal-strength model; false: hard limits only
+snr_db = 30.0            # burst over the detection threshold on axis at 1 m, dB
+rx_beam_deg = 27.5       # receiver beam's −6 dB half-angle, degrees
+rise_cycles = 6.0        # transducer ring-up, cycles of 40 kHz
+burst_cycles = 8         # cycles in the transmitter's burst
+temperature_c = 20.0     # air temperature, °C
+humidity_pct = 50.0      # relative humidity, %
+burst_lead_ms = 4.0      # transmitter fires this long after the trigger
+rx_ready_ms = 3.0        # receivers listen from this long after the trigger
+timeout_ms = 38.0        # the HC-SR04 gives up this long after it listens
+max_range_cm = 400.0     # farthest distance heard, or "none" for no limit
+fov_half_deg = 15.0      # hard field of view (half-angle), or "none"
+min_range_cm = 2.0       # nearest distance heard; 0 for no limit
+```
+
+The sampling window is not stored: it is the base station's `H` setting, taken
+from the base station once it is known.
+
+The file is optional. Without it the HC-SR04 datasheet limits shown above are
+used — 2–400 cm within ±15° of the receiver's axis, with the signal-strength
+model off. A file that cannot be read, or holds a value out of range, is ignored
+in the same way, with a warning in the log and on the panels that use it; the next
+**OK** in the pop-up replaces it. Saves are atomic and, in a read-only
+directory, go to the `~/.config` copy like every other save. **Reset** in the
+pop-up goes back to the datasheet limits; the file changes on **OK**.
 
 ## barriers.toml
 

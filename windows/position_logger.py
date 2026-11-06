@@ -15,6 +15,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+#: Hardware channels: every row has 6 tick and 6 distance columns.  The
+#: position library returns distances for the active receivers R1..RN only,
+#: so the distances of the channels not in use are left blank.
 NUM_RECEIVERS = 6
 
 HEADER = (

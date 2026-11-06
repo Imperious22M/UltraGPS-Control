@@ -18,7 +18,8 @@ Quick-start
 
     # Both methods take a plain list/array of integer tick values — one per
     # receiver in id order.  Use parse_message() to convert a raw server
-    # string (TCP or UDP) into the required tick list.
+    # string (TCP or UDP) into the required tick list.  Only the first
+    # number_of_receivers ticks are used (the active receivers).
 
     ticks = UltraGPSPositionLib.parse_message("N: 1234, 2345, 3456, 4567, 5678, 6789")
     result = lib.get_position(ticks)
@@ -83,6 +84,20 @@ def load_config(config_path: str) -> dict:
         return tomllib.load(fh)
 
 
+#: Fewest receivers a 2D fix can be made with.
+MIN_RECEIVERS: int = 3
+
+
+def _active_count(config: dict, total: int) -> int:
+    """Number of active receivers: ``number_of_receivers`` from *config*,
+    clamped to ``[MIN_RECEIVERS, total]``; *total* (every receiver) when the
+    key is missing or not an integer."""
+    value = config.get("number_of_receivers")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return total
+    return max(min(value, total), min(MIN_RECEIVERS, total))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main library class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +113,8 @@ class UltraGPSPositionLib:
     Args:
         config_path:      Path to the config.toml file that contains receiver
                           positions and per-receiver calibration offsets.
+                          Only the active receivers (ids below
+                          ``number_of_receivers``) are used.
         max_differential: Maximum allowed jump in distance (cm) between two
                           consecutive readings before a receiver is flagged as
                           noisy.  Default: 50.
@@ -143,8 +160,12 @@ class UltraGPSPositionLib:
         """(Re-)load receiver geometry and calibration from the config file."""
         config = load_config(self._config_path)
 
-        # Sort receivers by id so index == id throughout
+        # Sort receivers by id so index == id throughout.  Only the active
+        # receivers (ids 0..N-1, N = number_of_receivers) take part; the
+        # dormant ones keep their entries in config.toml but are ignored.
         receivers = sorted(config["receivers"], key=lambda r: r["id"])
+        active    = _active_count(config, len(receivers))
+        receivers = [r for r in receivers if int(r["id"]) < active]
         self._receiver_count = len(receivers)
 
         # (N, 2) float array  —  receiver positions in cm
@@ -425,7 +446,7 @@ class UltraGPSPositionLib:
 
     @property
     def receiver_count(self) -> int:
-        """Number of receivers loaded from config."""
+        """Number of active receivers loaded from config (``number_of_receivers``)."""
         return self._receiver_count
 
     @property
@@ -473,7 +494,9 @@ class UltraGPSPositionLib:
 
         Returns:
             ``tuple[float]`` of length ``receiver_count``.  Filled with
-            ``0.0`` if *ticks* is shorter than expected.
+            ``0.0`` if *ticks* is shorter than expected; ticks beyond the
+            active receivers (a full 6-tick message with fewer active) are
+            ignored.
         """
         try:
             tick_arr = [float(v) for v in ticks]

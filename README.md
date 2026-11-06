@@ -14,22 +14,24 @@ host. It:
 - Converts them into a **2D position** by multilateration, running two solvers
   side by side — an OLS-seeded Levenberg-Marquardt fit and a CEP best-subset
   search — so their disagreement flags an unreliable fix. The position panel
-  also shows the **HDOP** of each fix and how many receivers passed the sanity
-  filter.
+  also shows how many receivers passed the sanity filter.
 - Displays the result live on an arena plot with per-receiver distance traces.
-- **Calibrates** the receivers on 2 to 4 points placed anywhere in the arena:
-  click them on the arena, type their coordinates, or give them as an offset
-  from (0, 0), a receiver or another point. The arena is shaded **green where a
-  point calibrates best**, using the UltraGPS Simulator's scoring; **Find best
-  points** searches for the best set, and every point is checked before a run.
-  A separate **origin tool** moves (0, 0) — picked, typed, offset, or measured
-  by standing the transmitter on the mark — and an **accuracy check** measures
-  the transmitter on a known point.
-- Lays out the arena (**Setup**): receivers placed by clicking or dragging them
-  on the arena (or typed), each with a facing, or built from a W × H rectangle
-  or tape-measure distances. A **coverage estimate** shades how many receivers
-  hear each spot, or the fix precision (HDOP), under the simulator's receiver
-  model or the HC-SR04 datasheet's limits, with both summarised side by side.
+- **Calibrates** the receivers on the Calibration panel. The **origin tool**
+  moves (0, 0) — picked, typed, offset, or measured by standing the transmitter
+  on the mark and confirming. **Offsets** edits every receiver's slope and
+  intercept, with a one-click reset of the slopes to the default 0.272.
+  **System Origin Calibration** measures each receiver's distance with the
+  transmitter on (0, 0) and turns it into a new intercept — the distance the
+  arena map gives minus the distance measured — and shows the current and new
+  intercepts side by side before asking to save them.
+- Lays out the arena (**Setup**): 3 to 6 active receivers (of the base
+  station's six channels; dormant ones keep their calibration), placed by
+  clicking or dragging them on the arena (or typed), each with a facing, or
+  built from a W × H rectangle or tape-measure distances. An optional
+  **coverage estimate** shades how many receivers hear each spot, under a
+  sensor model whose reception angle, distances and timing are edited in a
+  **Sensor settings…** pop-up and saved in the configuration directory
+  (`sensor.toml`).
 - Exposes the base station on a **Base Station** panel: trigger rate (`F`),
   sampling window (`H`), baud rate (`B`, read-only), burst-delay sweep (`D`)
   and default (`E`), reset transmitter (`R`), reset settings (`M`), and test
@@ -202,17 +204,22 @@ The site builds with `strict: true`, so a broken internal link fails the build.
 
 ## Configuration
 
-Settings live in a directory holding `config.toml`, `barriers.toml` and
-`resources/`. It is searched for in this order, first hit wins:
+Settings live in a directory holding `config.toml`, `barriers.toml`,
+`sensor.toml` and `resources/`. It is searched for in this order, first hit wins:
 
 1. `~/.config/ultragps-control/` — your own settings
 2. `./config/` — the checkout's defaults
 3. `/etc/ultragps-control/` — installed by the Debian package
 
-The three travel together as a unit: `resources/` holds the image overlays that
+They travel together as a unit: `resources/` holds the image overlays that
 `barriers.toml` refers to, so a copy of the directory is never split up. It ships
 with three example PNGs — red, green and blue circles — which you can place on
 the arena with **Import** in the barrier editor.
+
+`sensor.toml` holds the receiver model of the Setup panel's **Sensor
+settings…** pop-up, which the coverage estimate uses. It is written when the pop-up's settings are
+applied; until then, the HC-SR04 datasheet limits (2–400 cm within ±15°) are
+used.
 
 If none exists, a default is created in `/etc` (or in `~/.config` when `/etc`
 isn't writable). When the active directory is read-only, the first save copies
@@ -222,7 +229,11 @@ and continues from there, so an installed package's defaults are never modified.
 
 Every save keeps the keys it does not know about, so hand-added settings survive.
 Moving the arena's (0, 0) rewrites `config.toml` and `barriers.toml` together, so
-the barriers stay on the same spot of the floor.
+the barriers stay on the same spot of the floor; `sensor.toml` holds no
+coordinates and is left as it is. Each receiver's distance to (0, 0)
+(`origin_distance`, used by the System Origin Calibration) is derived from its
+position and kept up to date in `config.toml` at startup and whenever the arena
+changes.
 
 See [Configuration](https://imperious22m.github.io/UltraGPS-Control/configuration/)
 for the file formats.

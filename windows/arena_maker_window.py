@@ -1,33 +1,43 @@
 """Arena Maker panel: lay out the receivers and see how well they cover the arena.
 
+The hardware has six receiver channels; the layout uses the first N of them
+(R1..RN, 3 <= N <= 6, config.toml's ``number_of_receivers``).  The others
+stay dormant: config.toml keeps their entries (calibration, position,
+facing), but they are not drawn, judged or saved here.
+
 Receivers are placed by clicking the arena ("Pick on arena" for the selected
-receiver, "Place all by clicking" for R1..R6 in turn), by dragging them, by
-typing X / Y, or as an offset from the origin or another receiver
-("Offset...").  Each one faces the direction in its "Facing (°)" column
-(0 = +X, 90 = +Y) or, left blank, the centroid of the receivers.  The two
-older ways of building a layout are kept as templates, with exactly their
-old maths: a W x H rectangle (``positions_from_dimensions``) and the
-tape-measure distances D1..D10 between receivers (the old R1..R10,
-``positions_from_distances``).
+receiver; "Place all by clicking" asks how many receivers to use, then takes
+R1..RN in turn: they disappear and each one reappears where it is clicked,
+and the rest of the panel stays locked until all are placed, or Esc / Cancel
+puts the previous layout back), by dragging them, by typing X / Y, or as an offset from the
+origin or another receiver ("Offset...").  Each one faces the direction in
+its "Facing (°)" column (0 = +X, 90 = +Y) or, left blank, the centroid of
+the receivers.  The two older ways of building a six-receiver layout are kept
+as templates, with exactly their old maths: a W x H rectangle
+(``positions_from_dimensions``) and the tape-measure distances D1..D10
+between receivers (the old R1..R10, ``positions_from_distances``), whose
+markers are drawn on the arena while that template is open (or always, if
+chosen).
 
 Whenever the layout changes, ``ultragps_position.coverage`` estimates what
 it gives: how many receivers hear the transmitter at each spot of the arena
-(3 are needed for a fix) or how precise a fix is there (HDOP), under the
-simulator's physical receiver model or the HC-SR04 datasheet's hard limits
-and the base station's sampling window, plus both models' summary numbers
-side by side.  The maps are computed on a worker thread; while a receiver is
-dragged a coarse preview follows it.
+(3 are needed for a fix), under one receiver model (by default the HC-SR04
+datasheet's 2-400 cm within ±15° as hard limits; every figure, the reception
+angle first, is edited in "Sensor settings..." and saved in sensor.toml of the
+config folder) and the base station's sampling window.  The shading is off
+until chosen; the summary numbers are always shown.  The maps are computed on
+a worker thread; while a receiver is dragged a coarse preview follows it.
 
-The calibration points are shown read-only (the Calibration panel edits
+The calibration points are drawn read-only (the Calibration panel edits
 them) and the origin tool moves (0, 0).  Nothing is written to config.toml
 until "Verify & Save" (an origin move applies to the saved frame at once):
-it refuses a layout the position library cannot use, saves the positions
-and facings, verifies the whole configuration and tells the main window.
+it refuses a layout the position library cannot use, saves the receiver
+count and the active receivers' positions and facings, verifies the whole
+configuration and tells the main window.
 """
 
 from __future__ import annotations
 
-import html
 import logging
 import math
 from dataclasses import dataclass
@@ -39,17 +49,18 @@ from matplotlib.figure import Figure
 from matplotlib.path import Path
 from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
-from SettingsModule import COLLINEAR_TOLERANCE, RECEIVER_COUNT, SAME_SPOT_CM, SettingsModule
+from SettingsModule import (
+    COLLINEAR_TOLERANCE, DEFAULT_SENSOR, MIN_RECEIVERS, RECEIVER_COUNT, SAME_SPOT_CM,
+    SENSOR_FILENAME, SettingsModule,
+)
 from ultragps_client import DEFAULT_SAMPLING_TIME_MS, SAMPLING_TIME_MAX_MS, SAMPLING_TIME_MIN_MS
 from ultragps_position import coverage
 from windows import measure, ui_scale, widgets
-from windows.arena_view import (
-    RECEIVERS, ArenaInteractor, ArenaView, outline_xy, resolve_facing, traffic_light_cmap,
-)
+from windows.arena_view import RECEIVERS, ArenaInteractor, ArenaView, outline_xy, resolve_facing
 from windows.ui_scale import ScalingCanvas
 from windows.widgets import AMBER, BLUE, CYAN, DIM, GOLD, GREEN, MAGENTA, ORANGE, RED
 
@@ -88,11 +99,13 @@ MIN_AREA_CM2 = 1.0
 #: coverage.MARGIN_CM (30 cm) beyond them.
 VIEW_PADDING_CM = coverage.MARGIN_CM + 10.0
 
-VIEW_COVERAGE, VIEW_HDOP, VIEW_OFF = "coverage", "hdop", "off"
+VIEW_COVERAGE, VIEW_OFF = "coverage", "off"
 
 MAP_VIEWS = ((VIEW_COVERAGE, "Receivers hearing each spot"),
-             (VIEW_HDOP, "Fix precision (HDOP)"),
              (VIEW_OFF, "No shading"))
+
+#: The view the panel opens with: no shading until the user asks for it.
+DEFAULT_VIEW = VIEW_OFF
 
 SNAP_STEPS = (("Snap 1 cm", 1.0), ("Snap 5 cm", 5.0), ("Snap 10 cm", 10.0), ("No snap", None))
 
@@ -111,31 +124,19 @@ TAPE_DISTANCES = (
     ("D10", "R5's Y (0 on the X axis)"),
 )
 
-#: What each coverage model assumes (the note under the selector, before the
-#: model's own ``describe()``, and tooltips).
-MODEL_NOTES = {
-    coverage.SIMULATOR.name: (
-        "The UltraGPS Simulator's physical receiver: signal margin, beam pattern, air "
-        "absorption and detection within the 8-cycle burst. Direct sound only (no walls, "
-        "obstacles or echoes), a transmitter radiating all round, nominal modules."),
-    coverage.DATASHEET.name: (
-        "The HC-SR04 datasheet's echo-ranging limits used as hard limits. The conservative "
-        "check: one way (no echo) a receiver hears farther and wider, so the real system "
-        "should do at least this well."),
-}
+#: What every coverage model assumes (the note under the summary).
+MODEL_NOTE = ("Direct sound only: walls, obstacles and echoes are not modelled, and the "
+              "transmitter is taken to radiate all round.")
 
 #: How to read each map (the note under the summary).
 VIEW_NOTES = {
     VIEW_COVERAGE: (
         "Each spot is coloured by how many receivers hear the transmitter there: a fix needs "
-        "3 (yellow); a 4th lets one bad reading be rejected (yellow-green); 5–6 are green. "
+        "3 (yellow); a 4th lets one bad reading be rejected (yellow-green); more are green. "
         "Red: fewer than 3, no fix (dark red: none). The dashed line is the edge of the area "
         "with a fix."),
-    VIEW_HDOP: (
-        "HDOP: cm of position error per cm of range error, from the receivers that hear each "
-        "spot. Green ≤ 1 is good geometry, yellow 2, red 3 or worse. It also shows red where "
-        "there is no fix: the dashed line is the edge of the area with a fix."),
-    VIEW_OFF: "No shading: the summary below still compares both models.",
+    VIEW_OFF: "No shading: choose “Receivers hearing each spot” to shade the arena. The "
+              "summary above is estimated all the same.",
 }
 
 _SIDE_CSS = f"""
@@ -334,11 +335,11 @@ class CoverageRequest:
     """One coverage computation: the inputs, copied, so the GUI may go on
     editing while a worker computes.
 
-    ``model`` is the selected model with the sampling window applied; the
-    summaries use every preset in ``coverage.PRESETS`` with that window.
-    ``outline`` is the closed receiver outline: the area the summaries judge
-    (none at all when it encloses less than ``MIN_AREA_CM2``, as with the
-    receivers on one line); None judges the receivers' box.
+    ``coords`` / ``facing`` are the active receivers' (R1..RN); ``model``
+    is the receiver model with the sampling window applied.  ``outline`` is
+    the closed receiver outline: the area the summary judges (none at all
+    when it encloses less than ``MIN_AREA_CM2``, as with the receivers on
+    one line); None judges the receivers' box.
     """
 
     generation: int
@@ -346,32 +347,30 @@ class CoverageRequest:
     coords: tuple
     facing: tuple
     model: coverage.SensorModel
-    window_ms: float
     step: float
     outline: tuple | None
 
 
 @dataclass
 class CoverageResult:
-    """The maps of a ``CoverageRequest`` (``Z[j, i]`` at ``(xs[i], ys[j])``)
-    and, unless it was a preview, both presets' ``coverage.summary``."""
+    """The receiver-count map of a ``CoverageRequest`` (``counts[j, i]`` at
+    ``(xs[i], ys[j])``) and, unless it was a preview, its
+    ``coverage.summary``."""
 
     request: CoverageRequest
     xs: np.ndarray
     ys: np.ndarray
     counts: np.ndarray
-    hdop: np.ndarray
-    summaries: dict | None
+    summary: dict | None
 
 
 def compute_coverage(request: CoverageRequest) -> CoverageResult:
-    """Coverage and HDOP maps for ``request`` (and the summaries of both
-    presets unless it is a preview); pure numpy, safe on a worker thread."""
+    """The coverage map for ``request`` (and its summary unless it is a
+    preview); pure numpy, safe on a worker thread."""
     coords = np.asarray(request.coords, dtype=float).reshape(-1, 2)
     facing = list(request.facing)
     xs, ys, counts = coverage.coverage_map(coords, facing, request.model, request.step)
-    _, _, dop = coverage.hdop_map(coords, facing, request.model, request.step)
-    summaries = None
+    summary = None
     if not request.preview:
         if request.outline is None:
             inside = None
@@ -379,11 +378,8 @@ def compute_coverage(request: CoverageRequest) -> CoverageResult:
             inside = _nowhere                     # a line has no inside (Path takes its points)
         else:
             inside = Path(np.asarray(request.outline)).contains_points
-        summaries = {name: coverage.summary(coords, facing,
-                                            preset.copy(window_ms=request.window_ms),
-                                            request.step, inside=inside)
-                     for name, preset in coverage.PRESETS.items()}
-    return CoverageResult(request, xs, ys, counts, dop, summaries)
+        summary = coverage.summary(coords, facing, request.model, request.step, inside=inside)
+    return CoverageResult(request, xs, ys, counts, summary)
 
 
 def _nowhere(points) -> np.ndarray:
@@ -412,10 +408,6 @@ def _share_text(value: float) -> str:
     return f"{100.0 * value:.0f} %"
 
 
-def _hdop_text(value: float) -> str:
-    return "no fix" if not math.isfinite(value) else f"{value:.2f}"
-
-
 def _style_label(label: QLabel, color: str, px: int = 11, bold: bool = False) -> None:
     """A label's colour and font size (scaled with the window)."""
     ui_scale.style(label, f"color: {color}; font: {'bold ' if bold else ''}{px}px Arial; "
@@ -427,10 +419,11 @@ def _style_label(label: QLabel, color: str, px: int = 11, bold: bool = False) ->
 # ---------------------------------------------------------------------------
 
 class _TapeOverlay:
-    """The tape-measure distances D1..D10 drawn on the arena while the
-    tape-measure section is open, as the old panel drew them: D1-D6 along the
-    receiver outline, D7 / D8 from (0, 0) along X, D9 / D10 the Y offsets of
-    R2 and R5 (when not 0)."""
+    """The tape-measure distances D1..D10 drawn on the arena (while the
+    tape-measure template is open, or always when "Always show distance
+    markers" is ticked; never with fewer than six receivers), as the old
+    panel drew them: D1-D6 along the receiver outline, D7 / D8 from (0, 0)
+    along X, D9 / D10 the Y offsets of R2 and R5 (when not 0)."""
 
     YELLOW = "#FFFF00"
     OFFSET_GREEN = "#00FF88"
@@ -491,16 +484,255 @@ class _TapeOverlay:
 
 
 # ---------------------------------------------------------------------------
+# Dialogs
+# ---------------------------------------------------------------------------
+
+def ask_receiver_count(parent, current: int) -> int | None:
+    """Ask how many receivers to place (MIN_RECEIVERS..RECEIVER_COUNT,
+    starting at ``current``); None if the user cancelled."""
+    dlg = widgets._dialog(parent, "Place all by clicking", MAGENTA)
+    layout = QVBoxLayout(dlg)
+    ui_scale.margins(layout, 18, 16, 18, 14)
+    ui_scale.spacing(layout, 12)
+    layout.addWidget(widgets._label("How many receivers?", MAGENTA, 15, bold=True))
+    note = widgets._label(
+        f"Receivers to use, {MIN_RECEIVERS} to {RECEIVER_COUNT} (a fix needs "
+        f"{NEEDED_FOR_FIX}). You then click the arena where each goes, R1 first. The others "
+        f"stay in config.toml with their calibration but are not used.", DIM, 12, wrap=True)
+    ui_scale.min_width(note, 360)
+    layout.addWidget(note)
+    row = QHBoxLayout()
+    ui_scale.spacing(row, 8)
+    spin = QSpinBox()
+    spin.setRange(MIN_RECEIVERS, RECEIVER_COUNT)
+    spin.setValue(max(MIN_RECEIVERS, min(int(current), RECEIVER_COUNT)))
+    ui_scale.style(spin, "QSpinBox { background-color: #222222; color: white; "
+                         "border: 1px solid #444444; border-radius: 3px; padding: 3px 6px; "
+                         "font: 12px Arial; }")
+    ui_scale.min_width(spin, 70)
+    which = widgets._label("", "white", 12)
+
+    def show_which(n: int) -> None:
+        which.setText(f"receivers: R1–R{n}")
+
+    spin.valueChanged.connect(show_which)
+    show_which(spin.value())
+    row.addWidget(spin)
+    row.addWidget(which, 1)
+    layout.addLayout(row)
+    buttons, _made = widgets._button_row(dlg, [("Place", MAGENTA, "black", True),
+                                               ("Cancel", "#555555", "white", False)])
+    layout.addLayout(buttons)
+    spin.setFocus()
+    dlg.adjustSize()
+    try:
+        if not widgets._accepted(widgets._exec(dlg)):
+            return None
+        return int(spin.value())
+    finally:
+        dlg.deleteLater()
+
+
+class SensorDialog(QDialog):
+    """Edit every figure of the receiver model (``coverage.SensorModel``)
+    except the sampling window, which the panel's Window field sets.
+
+    Blank "Reception angle" or "Max distance": no such limit.  The model
+    validates itself; while it refuses the input its message is shown and
+    OK is disabled.  ``value()`` is the model, or None while invalid.
+    """
+
+    #: (field, caption, unit, tooltip, kind): kind "opt" (blank = no limit),
+    #: "num" or "int"; signal-strength-only fields are in SIGNAL_FIELDS.
+    FIELDS = (
+        ("fov_half_deg", "Reception angle", "± °",
+         "How far off its axis a receiver hears the transmitter, degrees either side "
+         "(the HC-SR04 datasheet: ±15°). Blank: no limit (the signal decides)."),
+        ("max_range_cm", "Max distance", "cm",
+         "Nothing farther is heard (the HC-SR04 datasheet: 400 cm). Blank: no hard limit."),
+        ("min_range_cm", "Min distance", "cm",
+         "Nothing closer is heard (the HC-SR04 datasheet: 2 cm); 0 for no limit."),
+        ("snr_db", "Signal margin", "dB",
+         "The burst's strength over the receiver's detection threshold on axis at 1 m, "
+         "before air absorption."),
+        ("rx_beam_deg", "Beam width", "± °",
+         "The receiver's −6 dB beam half-angle, degrees (0 to 90): how fast the signal falls "
+         "off the axis."),
+        ("rise_cycles", "Ring-up", "cycles",
+         "The transducer's ring-up time constant, in 40 kHz cycles."),
+        ("burst_cycles", "Burst length", "cycles",
+         "Cycles in the transmitter's burst (whole number)."),
+        ("temperature_c", "Temperature", "°C",
+         "Air temperature: the speed of sound (and, for the signal, air absorption)."),
+        ("humidity_pct", "Humidity", "%", "Relative humidity, 0 to 100 %."),
+        ("burst_lead_ms", "Burst lead", "ms",
+         "The transmitter fires this long after the receivers' trigger: the base station's "
+         "burst delay plus radio and processing latency. Shorter than the receiver-ready "
+         "time leaves a blind zone round each receiver."),
+        ("rx_ready_ms", "Receiver ready", "ms",
+         "The receivers listen from this long after their trigger."),
+        ("timeout_ms", "Module timeout", "ms",
+         "The HC-SR04 gives up this long after it starts listening."),
+    )
+    OPTIONAL_FIELDS = ("fov_half_deg", "max_range_cm")
+    INT_FIELDS = ("burst_cycles",)
+    SIGNAL_FIELDS = ("snr_db", "rx_beam_deg", "rise_cycles", "burst_cycles")
+
+    def __init__(self, parent=None, model: coverage.SensorModel = DEFAULT_SENSOR,
+                 accent: str = GREEN):
+        super().__init__(parent)
+        self.setWindowTitle("Sensor settings")
+        self.setModal(True)
+        ui_scale.style(self, "QDialog { background-color: black; }" + widgets._input_css(accent))
+        self._base = model
+        self._model: coverage.SensorModel | None = model
+
+        layout = QVBoxLayout(self)
+        ui_scale.margins(layout, 18, 16, 18, 14)
+        ui_scale.spacing(layout, 10)
+        layout.addWidget(widgets._label("Sensor settings", accent, 15, bold=True))
+        note = widgets._label(
+            f"What a receiver can hear, for the coverage estimates (saved in {SENSOR_FILENAME} "
+            "in the config folder; the Calibration panel uses it too). The sampling window is "
+            "set beside the estimate.", DIM, 12, wrap=True)
+        ui_scale.min_width(note, 420)
+        layout.addWidget(note)
+
+        grid = QGridLayout()
+        ui_scale.spacing(grid, 6)
+        self._edits: dict[str, QLineEdit] = {}
+        self._captions: dict[str, QLabel] = {}
+        row = 0
+        for name, caption, unit, tip in self.FIELDS:
+            if name == "snr_db":                           # the mode goes before its own fields
+                grid.addWidget(widgets._label("Detection", DIM, 12), row, 0)
+                self._mode_combo = QComboBox()
+                self._mode_combo.addItem("Hard limits (angle and distance only)", False)
+                self._mode_combo.addItem("Signal strength over a threshold", True)
+                self._mode_combo.setToolTip(
+                    "Hard limits: a receiver hears everything within the reception angle and "
+                    "distances above. Signal strength: the signal margin, beam width and "
+                    "ring-up below decide the range as well.")
+                self._mode_combo.currentIndexChanged.connect(self._on_edited)
+                grid.addWidget(self._mode_combo, row, 1, 1, 2)
+                row += 1
+            prominent = name == "fov_half_deg"
+            label = widgets._label(caption, accent if prominent else DIM, 13 if prominent else 12,
+                                   bold=prominent)
+            label.setToolTip(tip)
+            edit = QLineEdit()
+            edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+            edit.setToolTip(tip)
+            if name in self.OPTIONAL_FIELDS:
+                edit.setPlaceholderText("no limit")
+            ui_scale.min_width(edit, 90)
+            edit.textEdited.connect(self._on_edited)
+            self._edits[name] = edit
+            self._captions[name] = label
+            grid.addWidget(label, row, 0)
+            grid.addWidget(edit, row, 1)
+            grid.addWidget(widgets._label(unit, DIM, 12), row, 2)
+            row += 1
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        self._describe = widgets._label("", "white", 11, wrap=True)
+        layout.addWidget(self._describe)
+        self._problem = widgets._label("", RED, 11, wrap=True)
+        layout.addWidget(self._problem)
+
+        reset_row = QHBoxLayout()
+        reset_btn = widgets.neon_button("Reset to HC-SR04 datasheet values", "#555555", "white",
+                                        font_px=11, padding=(4, 8),
+                                        tooltip=DEFAULT_SENSOR.describe())
+        reset_btn.clicked.connect(lambda: self.set_model(DEFAULT_SENSOR))
+        reset_row.addWidget(reset_btn)
+        reset_row.addStretch(1)
+        layout.addLayout(reset_row)
+
+        buttons, made = widgets._button_row(self, [("OK", GREEN, "black", True),
+                                                   ("Cancel", "#555555", "white", False)])
+        self._ok = made[0]
+        layout.addLayout(buttons)
+        self.set_model(model)
+        self.adjustSize()
+
+    def value(self) -> coverage.SensorModel | None:
+        """The model the input describes, or None while it is invalid."""
+        return self._model
+
+    def set_model(self, model: coverage.SensorModel) -> None:
+        """Fill the fields from ``model``."""
+        for name, edit in self._edits.items():
+            value = getattr(model, name)
+            edit.setText("" if value is None else widgets.format_number(value, 3))
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.setCurrentIndex(1 if model.threshold else 0)
+        self._mode_combo.blockSignals(False)
+        self._on_edited()
+
+    def set_field(self, name: str, text: str) -> None:
+        """Type ``text`` into field ``name`` (as the user would)."""
+        self._edits[name].setText(text)
+        self._on_edited()
+
+    def set_threshold(self, on: bool) -> None:
+        self._mode_combo.setCurrentIndex(1 if on else 0)
+
+    def _on_edited(self, *_args) -> None:
+        threshold = bool(self._mode_combo.currentData())
+        for name in self.SIGNAL_FIELDS:
+            self._edits[name].setEnabled(threshold)
+            self._captions[name].setEnabled(threshold)
+        changes: dict = {"threshold": threshold}
+        bad = []
+        for name, edit in self._edits.items():
+            text = edit.text().strip()
+            if not text and name in self.OPTIONAL_FIELDS:
+                value = None
+            else:
+                value = widgets.parse_number(text)
+                if value is not None and name in self.INT_FIELDS:
+                    value = int(value) if float(value).is_integer() else None
+            invalid = value is None and not (not text and name in self.OPTIONAL_FIELDS)
+            widgets._mark_invalid(edit, invalid)
+            if invalid:
+                bad.append(self._captions[name].text())
+            else:
+                changes[name] = value
+        if bad:
+            self._model = None
+            problem = f"Not a number: {', '.join(bad)}."
+        else:
+            try:
+                self._model = self._base.copy(name=DEFAULT_SENSOR.name, **changes)
+                problem = ""
+            except ValueError as exc:
+                self._model = None
+                problem = str(exc).split(": ", 1)[-1]        # without the model's name
+                for name, caption, _unit, _tip in self.FIELDS:   # in the dialog's words
+                    problem = problem.replace(name, caption)
+        self._problem.setText(problem)
+        self._problem.setVisible(bool(problem))
+        self._describe.setText(f"{self._model.describe()}." if self._model is not None else "")
+        self._ok.setEnabled(self._model is not None)
+
+
+# ---------------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------------
 
 class ArenaMakerPanel(QWidget):
     """Full-page arena configuration panel (see the module docstring).
 
-    The panel edits a working copy of the layout (``positions()`` /
-    ``facings()``); ``is_dirty()`` tells whether it differs from the saved
-    one.  The configuration is written by "Verify & Save"
-    (``verify_and_save``) and by the origin tool.
+    The panel edits a working copy of the layout: the receiver count N
+    (``receiver_count()``) and the active receivers' positions and facings
+    (``positions()`` / ``facings()``, R1..RN).  It keeps all six receivers'
+    positions internally, so lowering N and raising it again brings the
+    dormant ones back where they were.  ``is_dirty()`` tells whether the
+    count or an active receiver differs from the saved layout.  The
+    configuration is written by "Verify & Save" (``verify_and_save``) and by
+    the origin tool.
     """
 
     def __init__(self, settings_module: SettingsModule, main_window):
@@ -514,11 +746,18 @@ class ArenaMakerPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         ui_scale.style(self, "QWidget#arenaMakerPanel { background-color: black; }")
 
-        # The layout being edited and the saved one (id order)
+        # The layout being edited and the saved one: all six receivers (id
+        # order), of which the first _count (_saved_count) are active
+        self._count = RECEIVER_COUNT
         self._positions: list[tuple[float, float]] = [(0.0, 0.0)] * RECEIVER_COUNT
         self._facings: list[float | None] = [None] * RECEIVER_COUNT
+        self._saved_count = self._count
         self._saved_positions = list(self._positions)
         self._saved_facings = list(self._facings)
+        # The receiver model in use, and as last read from sensor.toml (a model
+        # that could not be saved stays in use until the file changes)
+        self._sensor_saved = self._read_sensor()
+        self._sensor = self._sensor_saved
         self._cal_points: list[tuple[float, float]] = []
         self._load_problem = ""                 # what could not be read from the settings
         self._config_syncs = 0                  # config_changed signals handled
@@ -529,6 +768,8 @@ class ArenaMakerPanel(QWidget):
         self._drag: tuple[int, float, float] | None = None   # receiver being dragged, where
         self._hover: tuple[float, float] | None = None       # the pointer over the arena
         self._advancing = False                 # "Place all" is moving to the next receiver
+        self._placing: list | None = None       # "Place all": the receivers clicked so far
+        self._before_placing: tuple | None = None   # (positions, facings, count) to go back to
         self._tape_dirty = False
         self._prev_d9 = 0.0                     # D9 / D10 as last shown (see _on_tape_finished)
         self._prev_d10 = 0.0
@@ -538,7 +779,7 @@ class ArenaMakerPanel(QWidget):
         self._worker: widgets.Worker | None = None
         self._pending: bool | None = None       # a request waits (True: a preview)
         self._result: CoverageResult | None = None
-        self._summaries: dict | None = None
+        self._summary: dict | None = None
         self._window_worker: widgets.Worker | None = None
         self._footprint_cache: dict = {}        # model -> (angles, reach)
 
@@ -559,53 +800,83 @@ class ArenaMakerPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def receiver_count(self) -> int:
+        """N, the receivers the layout being edited uses (R1..RN)."""
+        return self._count
+
     def positions(self) -> list[tuple[float, float]]:
-        """The receiver positions being edited, R1 first."""
-        return list(self._positions)
+        """The active receivers' positions being edited, R1 first."""
+        return self._positions[:self._count]
 
     def facings(self) -> list[float | None]:
-        """The receiver facings being edited (None: aimed at the centroid)."""
-        return list(self._facings)
+        """The active receivers' facings being edited (None: aimed at the centroid)."""
+        return self._facings[:self._count]
 
     def is_dirty(self) -> bool:
-        """Whether the layout differs from the saved one."""
-        return self._positions != self._saved_positions or self._facings != self._saved_facings
+        """Whether the receiver count or an active receiver differs from the
+        saved layout."""
+        n = self._count
+        return (n != self._saved_count or self._positions[:n] != self._saved_positions[:n]
+                or self._facings[:n] != self._saved_facings[:n])
 
     def model(self) -> coverage.SensorModel:
-        """The selected coverage model with the sampling window applied."""
-        preset = coverage.PRESETS[self._model_combo.currentData()]
-        return preset.copy(window_ms=float(self._window_spin.value()))
+        """The receiver model with the sampling window applied."""
+        return self._sensor.copy(window_ms=float(self._window_spin.value()))
+
+    def sensor_model(self) -> coverage.SensorModel:
+        """The receiver model as set in "Sensor settings..." (its own window)."""
+        return self._sensor
+
+    def set_sensor_model(self, model: coverage.SensorModel) -> None:
+        """Use ``model`` for the coverage estimate (the panel's sampling
+        window still applies).  Nothing is saved: "Sensor settings..." saves
+        to sensor.toml (``SettingsModule.set_sensor_model``)."""
+        if not isinstance(model, coverage.SensorModel):
+            raise TypeError(f"expected a coverage.SensorModel, got {model!r}")
+        if model == self._sensor:
+            return
+        self._sensor = model
+        self._on_model_changed()
 
     def set_layout(self, positions, facings=None) -> None:
         """Edit the layout: ``positions`` ``[(x, y)]`` or ``[(id, (x, y))]``
-        (all receivers, id order), ``facings`` one per receiver (None or a
-        non-finite entry: aimed at the centroid; None keeps the current ones).
-        Not saved.
+        of R1..RN in id order, MIN_RECEIVERS <= N <= RECEIVER_COUNT (this
+        sets the receiver count), ``facings`` one per receiver (None or a
+        non-finite entry: aimed at the centroid; None keeps the current
+        ones).  The dormant receivers are kept.  Not saved.
 
         Raises:
-            ValueError: Not one finite position (and one number or None as
-                facing) per receiver; nothing is changed then.
+            ValueError: Not MIN_RECEIVERS to RECEIVER_COUNT finite positions
+                (and one number or None as facing each); nothing is changed
+                then.
         """
         xy = [p[1] if len(p) == 2 and np.ndim(p[1]) == 1 else p for p in positions]
         pts = np.asarray(xy, dtype=float)
-        if pts.shape != (RECEIVER_COUNT, 2) or not np.all(np.isfinite(pts)):
-            raise ValueError(f"expected {RECEIVER_COUNT} finite (x, y) positions, got {xy!r}")
+        n = len(pts)
+        if (pts.ndim != 2 or pts.shape[1:] != (2,) or not MIN_RECEIVERS <= n <= RECEIVER_COUNT
+                or not np.all(np.isfinite(pts))):
+            raise ValueError(f"expected {MIN_RECEIVERS} to {RECEIVER_COUNT} finite (x, y) "
+                             f"positions, got {xy!r}")
+        full_facings = None
         if facings is not None:
-            if len(facings) != RECEIVER_COUNT:
-                raise ValueError(f"expected {RECEIVER_COUNT} facings, got {len(facings)}")
+            if len(facings) != n:
+                raise ValueError(f"expected {n} facings, got {len(facings)}")
             try:                                          # checked before anything changes
                 facings = [None if f is None else float(f) for f in facings]
             except (TypeError, ValueError):
                 raise ValueError(f"facings must be numbers or None, got {facings!r}") from None
-        self._apply_layout(positions=[tuple(p) for p in pts], facings=facings, refit=True)
+            full_facings = facings + self._facings[n:]
+        full = [(float(x), float(y)) for x, y in pts] + self._positions[n:]
+        self._apply_layout(positions=full, facings=full_facings, count=n, refit=True)
 
     def coverage_result(self) -> CoverageResult | None:
-        """The coverage maps on show (None before the first computation)."""
+        """The coverage map on show (None before the first computation)."""
         return self._result
 
-    def summaries(self) -> dict | None:
-        """Both presets' ``coverage.summary`` for the layout on show."""
-        return self._summaries
+    def summary(self) -> dict | None:
+        """``coverage.summary`` of the layout on show (None before the first
+        full computation)."""
+        return self._summary
 
     def verify_and_save(self) -> bool:
         """"Verify & Save": True if the layout was saved (or unchanged)."""
@@ -674,6 +945,7 @@ class ArenaMakerPanel(QWidget):
         back_btn = widgets.neon_button("← Back", GREEN)
         back_btn.clicked.connect(lambda: self._leave("main"))
         top_layout.addWidget(back_btn)
+        self._back_btn = back_btn
         layout.addWidget(top_bar)
 
         body = QHBoxLayout()
@@ -691,6 +963,12 @@ class ArenaMakerPanel(QWidget):
         self._hint.setWordWrap(True)
         _style_label(self._hint, DIM)
         tools.addWidget(self._hint, 1)
+        self._cancel_place_btn = widgets.neon_button(
+            "Cancel placing", MAGENTA, "black", font_px=11, padding=(3, 8),
+            tooltip="Stop placing and put the previous layout back (Esc)")
+        self._cancel_place_btn.clicked.connect(self._leave_pick_modes)
+        self._cancel_place_btn.setVisible(False)
+        tools.addWidget(self._cancel_place_btn)
         self._snap_combo = QComboBox()
         for text, step in SNAP_STEPS:
             self._snap_combo.addItem(text, step)
@@ -713,18 +991,18 @@ class ArenaMakerPanel(QWidget):
         ui_scale.margins(column, 8, 6, 8, 8)
         ui_scale.spacing(column, 8)
         column.addWidget(self._build_receivers_section())
-        column.addWidget(self._build_coverage_section())
-        column.addWidget(self._build_templates_section())
-        column.addWidget(self._build_tape_section())
-        column.addWidget(self._build_cal_section())
+        # (0, 0) right under the receivers it is usually measured from
         self._origin_tool = widgets.OriginTool(accent=BLUE)
         self._origin_tool.pickModeChanged.connect(self._on_origin_pick_mode)
         self._origin_tool.previewChanged.connect(self._on_origin_preview)
         self._origin_tool.originRequested.connect(self._on_origin_requested)
         self._origin_tool.measuringChanged.connect(self._on_measuring_changed)
         column.addWidget(self._origin_tool)
+        column.addWidget(self._build_coverage_section())
+        column.addWidget(self._build_templates_section())
         column.addStretch(1)
         scroll = widgets.scroll_area(side)
+        self._side_scroll = scroll
         ui_scale.min_width(scroll, 340)
         ui_scale.max_width(scroll, 400)
         body.addWidget(scroll)
@@ -742,8 +1020,9 @@ class ArenaMakerPanel(QWidget):
         box.add(self._note("Select a receiver, then type its X / Y, click Pick on arena, or drag "
                            "it on the arena. Facing: degrees, 0 = +X, 90 = +Y; blank = auto "
                            "(aimed at the receivers' centroid)."))
+        # One row per active receiver (set_points sets the rows; no + / −)
         self._table = widgets.PointTable(prefix="R", extra_columns=[("Facing (°)", "auto")],
-                                         accent=MAGENTA, min_rows=RECEIVER_COUNT,
+                                         accent=MAGENTA, min_rows=MIN_RECEIVERS,
                                          max_rows=RECEIVER_COUNT)
         self._table.pointsEdited.connect(self._on_table_edited)
         self._table.selectionChanged.connect(self._on_selection_changed)
@@ -752,7 +1031,9 @@ class ArenaMakerPanel(QWidget):
 
         self._place_all_btn = widgets.neon_button(
             "Place all by clicking", MAGENTA, "black", font_px=11, padding=(4, 8), checkable=True,
-            tooltip="Click the arena where R1 goes, then R2, ... R6 (Esc or a right click stops)")
+            tooltip=f"Choose how many receivers to use ({MIN_RECEIVERS} to {RECEIVER_COUNT}), "
+                    f"then click the arena where R1 goes, then R2, ...: every receiver must be "
+                    f"placed (Esc puts the previous layout back)")
         self._place_all_btn.toggled.connect(self._on_place_all)
         box.add(self._place_all_btn)
         row = QHBoxLayout()
@@ -771,6 +1052,8 @@ class ArenaMakerPanel(QWidget):
         row.addWidget(auto_btn)
         row.addStretch(1)
         box.add_layout(row)
+        self._count_note = self._note()
+        box.add(self._count_note)
         return box
 
     def _build_coverage_section(self) -> QWidget:
@@ -780,17 +1063,12 @@ class ArenaMakerPanel(QWidget):
         self._view_combo = QComboBox()
         for key, text in MAP_VIEWS:
             self._view_combo.addItem(text, key)
+        self._view_combo.setCurrentIndex(self._view_combo.findData(DEFAULT_VIEW))
+        self._view_combo.setToolTip("Shade the arena by how many receivers hear each spot, "
+                                    "or not at all (the default)")
         self._view_combo.currentIndexChanged.connect(self._on_view_changed)
         grid.addWidget(QLabel("Show"), 0, 0)
         grid.addWidget(self._view_combo, 0, 1, 1, 2)
-
-        self._model_combo = QComboBox()
-        for k, name in enumerate(coverage.PRESETS):
-            self._model_combo.addItem(name, name)
-            self._model_combo.setItemData(k, MODEL_NOTES.get(name, ""), Qt.ItemDataRole.ToolTipRole)
-        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
-        grid.addWidget(QLabel("Model"), 1, 0)
-        grid.addWidget(self._model_combo, 1, 1, 1, 2)
 
         self._window_spin = QSpinBox()
         self._window_spin.setRange(SAMPLING_TIME_MIN_MS, SAMPLING_TIME_MAX_MS)
@@ -806,71 +1084,75 @@ class ArenaMakerPanel(QWidget):
         self._read_btn = widgets.neon_button("Read", GREEN, "black", font_px=11, padding=(3, 8),
                                              tooltip="Ask the base station for its sampling window")
         self._read_btn.clicked.connect(self._read_window)
-        grid.addWidget(QLabel("Window"), 2, 0)
-        grid.addWidget(self._window_spin, 2, 1)
-        grid.addWidget(self._read_btn, 2, 2)
+        grid.addWidget(QLabel("Window"), 1, 0)
+        grid.addWidget(self._window_spin, 1, 1)
+        grid.addWidget(self._read_btn, 1, 2)
         grid.setColumnStretch(1, 1)
         box.add_layout(grid)
         self._window_status = self._note()
         self._window_status.setVisible(False)
         box.add(self._window_status)
 
+        sensor_row = QHBoxLayout()
+        ui_scale.spacing(sensor_row, 6)
+        sensor_btn = widgets.neon_button(
+            "Sensor settings…", GREEN, "black", font_px=11, padding=(4, 8),
+            tooltip="What a receiver can hear: its reception angle, distances and the rest of "
+                    f"the model (saved in {SENSOR_FILENAME} in the config folder)")
+        sensor_btn.clicked.connect(self._on_sensor_settings)
+        sensor_row.addWidget(sensor_btn)
+        sensor_row.addStretch(1)
+        box.add_layout(sensor_row)
+        # The model in one line (white): what a receiver hears
+        self._model_note = self._note("", "white")
+        self._model_note.setTextFormat(Qt.TextFormat.PlainText)
+        box.add(self._model_note)
+
         checks = QHBoxLayout()
         ui_scale.spacing(checks, 10)
         self._beams_check = QCheckBox("Beams")
         self._beams_check.setChecked(True)
-        self._beams_check.setToolTip("Draw each receiver's beam: ±27.5° (−6 dB) for the simulator, "
-                                     "the ±15° hard field of view for the datasheet")
+        self._beams_check.setToolTip("Draw each receiver's reception angle as a wedge round its "
+                                     "facing (its −6 dB beam when the angle has no limit)")
         self._beams_check.toggled.connect(lambda _on: self._draw_layout())
         self._footprint_check = QCheckBox("Selected receiver's reach")
         self._footprint_check.setChecked(True)
         self._footprint_check.setToolTip("Outline where the selected receiver hears the "
-                                         "transmitter under the chosen model")
+                                         "transmitter, with the sensor settings")
         self._footprint_check.toggled.connect(lambda _on: self._draw_selection())
         checks.addWidget(self._beams_check)
         checks.addWidget(self._footprint_check)
         checks.addStretch(1)
         box.add_layout(checks)
 
-        # Both presets side by side
+        # The layout's numbers
         self._summary_grid = QGridLayout()
         ui_scale.spacing(self._summary_grid, 4)
-        self._summary_headers = {}
-        for col, name in enumerate(coverage.PRESETS, start=1):
-            header = QLabel(name)
-            header.setWordWrap(True)
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            header.setToolTip(MODEL_NOTES.get(name, ""))
-            _style_label(header, DIM, bold=True)
-            self._summary_headers[name] = header
-            self._summary_grid.addWidget(header, 0, col)
         self._summary_rows = (
-            ("share_3", "Fix possible (≥ 3 hear)"),
-            ("share_4", "One spare (≥ 4 hear)"),
-            ("share_all", f"All {RECEIVER_COUNT} hear"),
+            ("share_3", f"Fix possible (≥ {NEEDED_FOR_FIX} hear)"),
+            ("share_4", f"One spare (≥ {NEEDED_FOR_FIX + 1} hear)"),
+            ("share_all", "All receivers hear"),
             ("min_count", "Fewest hearing a spot"),
-            ("median_hdop", "Median HDOP"),
         )
-        self._summary_cells: dict[tuple[str, str], QLabel] = {}
-        for row, (key, text) in enumerate(self._summary_rows, start=1):
-            self._summary_grid.addWidget(self._note(text, "white", 11), row, 0)
-            for col, name in enumerate(coverage.PRESETS, start=1):
-                cell = QLabel("–")
-                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._summary_cells[(key, name)] = cell
-                self._summary_grid.addWidget(cell, row, col)
+        self._summary_captions: dict[str, QLabel] = {}
+        self._summary_cells: dict[str, QLabel] = {}
+        for row, (key, text) in enumerate(self._summary_rows):
+            caption = self._note(text, "white", 11)
+            self._summary_captions[key] = caption
+            self._summary_grid.addWidget(caption, row, 0)
+            cell = QLabel("–")
+            cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._summary_cells[key] = cell
+            self._summary_grid.addWidget(cell, row, 1)
         self._summary_grid.setColumnStretch(0, 3)
         self._summary_grid.setColumnStretch(1, 2)
-        self._summary_grid.setColumnStretch(2, 2)
         box.add_layout(self._summary_grid)
         self._summary_note = self._note()
         box.add(self._summary_note)
-        # What the selected model assumes, and how to read the map
-        self._model_note = self._note()
-        self._model_note.setTextFormat(Qt.TextFormat.RichText)
-        box.add(self._model_note)
+        # What the model assumes, and how to read the map
         self._view_note = self._note()
         box.add(self._view_note)
+        box.add(self._note(MODEL_NOTE))
         self._coverage_error = self._note("", RED)
         self._coverage_error.setVisible(False)
         box.add(self._coverage_error)
@@ -878,7 +1160,21 @@ class ArenaMakerPanel(QWidget):
         return box
 
     def _build_templates_section(self) -> QWidget:
-        box = widgets.Section("Template: rectangle W × H", CYAN, collapsible=True, expanded=False)
+        box = widgets.Section("Templates", CYAN)
+        box.add(self._note("Six-receiver layouts: using one sets 6 receivers."))
+        self._markers_check = QCheckBox("Always show distance markers")
+        self._markers_check.setChecked(False)
+        self._markers_check.setToolTip(
+            "Draw the tape-measure distances D1–D10 on the arena all the time, not only while "
+            "the tape-measure template is open (six receivers only)")
+        self._markers_check.toggled.connect(lambda _on: self._update_tape_visibility())
+        box.add(self._markers_check)
+        box.add(self._build_rectangle_section())
+        box.add(self._build_tape_section())
+        return box
+
+    def _build_rectangle_section(self) -> QWidget:
+        box = widgets.Section("Rectangle W × H", CYAN, collapsible=True, expanded=False)
         self._templates_box = box
         box.add(self._note("R1–R3 up the left side, R4–R6 up the right side (corners and "
                            "middles), centred on (0, 0). Facings are kept."))
@@ -902,13 +1198,15 @@ class ArenaMakerPanel(QWidget):
         return box
 
     def _build_tape_section(self) -> QWidget:
-        box = widgets.Section("Template: tape-measure distances", CYAN, collapsible=True,
-                              expanded=False)
+        box = widgets.Section("Tape-measure distances", CYAN, collapsible=True, expanded=False)
         self._tape_box = box
-        box.toggled.connect(self._on_tape_toggled)
+        box.toggled.connect(lambda _expanded: self._update_tape_visibility())
         box.add(self._note("Distances measured between the receivers (D1–D10, the old R1–R10; "
-                           "shown on the arena while this is open). A change rebuilds the "
+                           "marked on the arena while this is open). A change rebuilds the "
                            "two-column layout; D9 / D10 move R2 / R5 alone."))
+        self._tape_count_note = self._note("", AMBER)
+        self._tape_count_note.setVisible(False)
+        box.add(self._tape_count_note)
         grid = QGridLayout()
         ui_scale.spacing(grid, 4)
         self._tape_edits: dict[str, QLineEdit] = {}
@@ -932,28 +1230,15 @@ class ArenaMakerPanel(QWidget):
         box.add(self._tape_status)
         return box
 
-    def _build_cal_section(self) -> QWidget:
-        box = widgets.Section("Calibration points", GREEN)
-        self._cal_label = self._note("", GREEN, 12)
-        box.add(self._cal_label)
-        box.add(self._note("Edited on the Calibration panel. Saving the layout recomputes "
-                           "their distances to the receivers; receivers moved for real need "
-                           "a new calibration there."))
-        cal_btn = widgets.neon_button("Calibration panel →", GREEN, "black", font_px=11,
-                                      padding=(4, 8))
-        cal_btn.clicked.connect(lambda: self._leave("calibration"))
-        row = QHBoxLayout()
-        row.addWidget(cal_btn)
-        row.addStretch(1)
-        box.add_layout(row)
-        return box
-
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
 
-    def _read_settings(self) -> tuple[list, list, list, str]:
-        """``(positions, facings, cal_points, problem)`` as saved."""
+    def _read_settings(self) -> tuple[int, list, list, list, str]:
+        """``(count, positions, facings, cal_points, problem)`` as saved:
+        the receiver count N and all six receivers (a dormant one without a
+        usable position is put at (0, 0) without complaint)."""
+        count = int(self._settings.number_of_receivers)
         positions, missing = [], []
         for rid in range(RECEIVER_COUNT):
             position = self._settings.get_receiver_position(rid)
@@ -963,49 +1248,93 @@ class ArenaMakerPanel(QWidget):
                     raise ValueError
             except (TypeError, ValueError):
                 x, y = 0.0, 0.0
-                missing.append(f"R{rid + 1}")
+                if rid < count:
+                    missing.append(f"R{rid + 1}")
             positions.append((x, y))
         problem = (f"config.toml has no usable position for {', '.join(missing)}"
                    if missing else "")
         facings = list(self._settings.get_receiver_facings())
+        facings = (facings + [None] * RECEIVER_COUNT)[:RECEIVER_COUNT]
         try:
             cal_points = [(float(p[0]), float(p[1])) for p in self._settings.cal_points]
         except ValueError as exc:
             cal_points = []
             problem = f"{problem}; {exc}" if problem else str(exc)
-        return positions, facings, cal_points, problem
+        return count, positions, facings, cal_points, problem
+
+    def _read_sensor(self) -> coverage.SensorModel:
+        """The receiver model saved in sensor.toml (DEFAULT_SENSOR if missing
+        or unreadable; the reason is in the settings' ``sensor_problem``)."""
+        try:
+            return self._settings.sensor_model()
+        except Exception:                         # never let a bad file break the panel
+            log.exception("Could not read the sensor settings")
+            return DEFAULT_SENSOR
+
+    def _sync_sensor(self) -> None:
+        """Take the saved receiver model over if sensor.toml changed since it
+        was last read (a model that could not be saved is otherwise kept)."""
+        saved = self._read_sensor()
+        changed = saved != self._sensor_saved
+        self._sensor_saved = saved
+        if changed:
+            self.set_sensor_model(saved)
+        else:
+            self._update_model_note()                     # a problem may have come or gone
 
     def _sync_with_settings(self) -> None:
-        """Take the saved layout over.  Unsaved edits are kept when the saved
-        receivers are unchanged, and moved with them after a pure translation
-        (an origin move); otherwise they are dropped."""
+        """Take the saved layout (and receiver count) over.  Unsaved edits are
+        kept when the saved receivers are unchanged, and moved with them after
+        a pure translation (an origin move); otherwise they are dropped.  The
+        receiver model follows sensor.toml."""
+        self._sync_sensor()
         try:
-            positions, facings, cal_points, problem = self._read_settings()
+            count, positions, facings, cal_points, problem = self._read_settings()
         except Exception as exc:                  # a broken configuration: keep what is shown
             log.exception("Could not read the settings")
             self._set_state(f"Could not read the settings: {exc}", RED)
             return
         dirty = self.is_dirty()
-        shift = _common_shift(self._saved_positions, positions)
+        n = self._saved_count                     # judged on the receivers that were saved
+        shift = (_common_shift(self._saved_positions[:n], positions[:n])
+                 if count == self._saved_count else None)
         dropped = False
         if not dirty:
-            working, working_facings = positions, facings
+            working, working_facings, working_count = positions, facings, count
         elif shift is not None:
             dx, dy = shift
             working = [(x + dx, y + dy) for x, y in self._positions]
-            working_facings = self._facings
+            working_facings, working_count = self._facings, self._count
         else:
-            working, working_facings = positions, facings
+            working, working_facings, working_count = positions, facings, count
             dropped = True
+        if self._placing is not None:
+            # "Place all" runs: the layout to go back to follows the same rule,
+            # the receivers clicked so far move with an origin shift, and the
+            # receiver count being placed stays
+            b_positions, b_facings, b_count = self._before_placing
+            b_dirty = (b_count != n or b_positions[:b_count] != self._saved_positions[:b_count]
+                       or b_facings[:b_count] != self._saved_facings[:b_count])
+            if shift is not None:
+                dx, dy = shift
+                self._placing = [(x + dx, y + dy) for x, y in self._placing]
+            if b_dirty and shift is not None:
+                b_positions = [(x + dx, y + dy) for x, y in b_positions]
+            else:
+                b_positions, b_facings, b_count = list(positions), list(facings), count
+            self._before_placing = (b_positions, b_facings, b_count)
+            working_count = self._count
+        self._saved_count = count
         self._saved_positions, self._saved_facings = list(positions), list(facings)
         self._cal_points = cal_points
         self._load_problem = problem
         moved_frame = shift is not None and shift != (0.0, 0.0)
-        self._apply_layout(working, working_facings, refit=moved_frame or not self._fitted)
+        self._apply_layout(working, working_facings, count=working_count,
+                           refit=moved_frame or not self._fitted)
         self._draw_cal_points()
         if dropped:
             self._set_state("The saved layout changed: unsaved edits were dropped", AMBER)
-        if on_one_spot(positions):
+        if on_one_spot(positions[:count]):
             self._templates_box.set_expanded(True)          # a new arena: offer the templates
 
     def _on_config_changed(self) -> None:
@@ -1030,42 +1359,79 @@ class ArenaMakerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_layout(self, positions=None, facings=None, source: str | None = None,
-                      refit: bool = False) -> None:
-        """Make ``positions`` / ``facings`` (None: keep) the layout being edited
-        and refresh everything that shows it.  ``source`` ("table", "tape")
-        is the widget the change came from, which keeps its own text."""
+                      refit: bool = False, count: int | None = None) -> None:
+        """Make ``positions`` / ``facings`` (all six receivers) and ``count``
+        (None: keep each) the layout being edited and refresh everything that
+        shows it.  ``source`` ("table", "tape") is the widget the change came
+        from, which keeps its own text."""
         if positions is not None:
             self._positions = [(float(x), float(y)) for x, y in positions]
         if facings is not None:
             self._facings = [None if f is None or not math.isfinite(float(f)) else float(f)
                              for f in facings]
+        recount = count is not None and int(count) != self._count
+        if count is not None:
+            self._count = max(MIN_RECEIVERS, min(int(count), RECEIVER_COUNT))
         self._table.clear_row_status()
-        if source != "table":
-            self._table.set_points([(x, y, f) for (x, y), f in zip(self._positions, self._facings)])
+        if source != "table" or recount:
+            self._table.set_points([(x, y, f) for (x, y), f in zip(self.positions(),
+                                                                   self.facings())])
         if source != "tape":
             self._fill_tape()
         else:
             self._update_tape_note()
+        self._update_count_texts()
         self._update_references()
+        self._update_tape_visibility(draw=False)
         self._draw_layout()
-        if refit or not self._layout_in_view():
+        if refit or recount or not self._layout_in_view():
             self._fit_view()
         self._update_state()
         self._refresh_readout()
         self._schedule_coverage()
+
+    def _set_receiver_count(self, n: int) -> None:
+        """Use R1..Rn (MIN_RECEIVERS <= n <= RECEIVER_COUNT): the dormant
+        receivers keep their place for when they come back.  Not saved.
+
+        Raises:
+            ValueError: ``n`` out of range; nothing is changed then.
+        """
+        if isinstance(n, bool) or int(n) != n or not MIN_RECEIVERS <= int(n) <= RECEIVER_COUNT:
+            raise ValueError(f"the receiver count must be {MIN_RECEIVERS} to {RECEIVER_COUNT}, "
+                             f"got {n!r}")
+        if int(n) != self._count:
+            self._apply_layout(count=int(n))
+
+    def _update_count_texts(self) -> None:
+        """Everything that names the receiver count."""
+        n = self._count
+        if n == RECEIVER_COUNT:
+            dormant = ""
+        elif n == RECEIVER_COUNT - 1:
+            dormant = f" R{RECEIVER_COUNT} is not used (config.toml keeps it)."
+        else:
+            dormant = f" R{n + 1}–R{RECEIVER_COUNT} are not used (config.toml keeps them)."
+        self._count_note.setText(f"Using {n} receivers (R1–R{n}).{dormant}")
+        self._summary_captions["share_all"].setText(f"All {n} hear")
+        if n < RECEIVER_COUNT:
+            self._tape_count_note.setText(
+                f"This template lays out {RECEIVER_COUNT} receivers and you use {n}: its "
+                f"markers are hidden, and a change here sets {RECEIVER_COUNT} receivers.")
+        self._tape_count_note.setVisible(n < RECEIVER_COUNT)
 
     def _update_references(self) -> None:
         """Reference points for "Offset..." and "Aim at...": the receivers
         (the table adds them itself) and the calibration points."""
         cal = {f"P{k + 1}": p for k, p in enumerate(self._cal_points)}
         self._table.set_references(cal)
-        refs = {f"R{i + 1}": p for i, p in enumerate(self._positions)}
+        refs = {f"R{i + 1}": p for i, p in enumerate(self.positions())}
         refs.update(cal)
         self._origin_tool.set_references(refs)
 
     def _update_state(self) -> None:
         dirty = self.is_dirty()
-        self._revert_btn.setEnabled(dirty)
+        self._revert_btn.setEnabled(dirty and self._placing is None)
         if self._load_problem:
             self._set_state(self._load_problem, RED)
         elif dirty:
@@ -1083,12 +1449,16 @@ class ArenaMakerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _shown_positions(self) -> list[tuple[float, float]]:
-        """The layout as drawn: the working one with a dragged receiver where
-        the mouse has it."""
-        positions = list(self._positions)
+        """The active receivers as drawn: the working layout with a dragged
+        receiver where the mouse has it; while "Place all" runs, only the
+        receivers clicked so far."""
+        if self._placing is not None:
+            return list(self._placing)
+        positions = self.positions()
         if self._drag is not None:
             index, x, y = self._drag
-            positions[index] = (x, y)
+            if 0 <= index < len(positions):
+                positions[index] = (x, y)
         return positions
 
     def _beam_deg(self, model: coverage.SensorModel) -> float:
@@ -1098,17 +1468,19 @@ class ArenaMakerPanel(QWidget):
     def _draw_layout(self) -> None:
         """Receivers (with facing arrows and beams), selection, overlays."""
         positions = self._shown_positions()
-        self._view.set_receivers(list(enumerate(positions)), facing_deg=self._facings,
+        self._view.set_receivers(list(enumerate(positions)),
+                                 facing_deg=self.facings()[:len(positions)],
                                  show_beams=self._beams_check.isChecked(),
                                  beam_deg=self._beam_deg(self.model()))
         self._draw_selection()
-        self._tape.update(positions)
+        if len(positions) == RECEIVER_COUNT:              # D1..D10 describe six receivers
+            self._tape.update(positions)
         self._view.draw_idle()
 
     def _draw_selection(self) -> None:
         """A ring round the selected receiver and, optionally, its reach."""
         row = self._table.selected()
-        if not 0 <= row < RECEIVER_COUNT:
+        if self._placing is not None or not 0 <= row < self._count:
             self._view.clear_points("selected")
             self._view.clear_shapes("reach")
             self._view.draw_idle()
@@ -1117,7 +1489,7 @@ class ArenaMakerPanel(QWidget):
         self._view.set_points("selected", [positions[row]], color="none", edgecolor=GOLD,
                               marker="o", size=420, zorder=4.5)
         if self._footprint_check.isChecked() and not on_one_spot(positions):
-            facing = resolve_facing(positions, self._facings)[row]
+            facing = resolve_facing(positions, self.facings())[row]
             try:
                 outline = self._footprint(positions[row], facing, self.model())
             except Exception:                     # never let a drawing aid break the panel
@@ -1151,17 +1523,12 @@ class ArenaMakerPanel(QWidget):
         return out
 
     def _draw_cal_points(self) -> None:
+        """The calibration points, read-only references on the arena."""
         if self._cal_points:
             self._view.set_points("cal", self._cal_points, color=GREEN, marker="D", labels="P",
                                   size=60, legend="Calibration points", draggable=False)
-            text = "   ".join(f"P{k + 1} ({x:.1f}, {y:.1f})"
-                              for k, (x, y) in enumerate(self._cal_points))
-            if len(self._cal_points) >= 2 and on_one_spot(self._cal_points):
-                text += "\nNot set yet: all on one spot."
         else:
             self._view.clear_points("cal")
-            text = "None (or unreadable) in config.toml."
-        self._cal_label.setText(text)
         self._view.draw_idle()
 
     def _show_map(self) -> None:
@@ -1174,14 +1541,8 @@ class ArenaMakerPanel(QWidget):
             self._update_title()
             self._view.draw_idle()
             return
-        if view == VIEW_COVERAGE:
-            self._view.set_coverage(res.xs, res.ys, res.counts, n_receivers=RECEIVER_COUNT,
-                                    needed=NEEDED_FOR_FIX, alpha=0.45)
-        else:
-            self._view.set_heatmap(res.xs, res.ys, res.hdop, cmap=traffic_light_cmap(reverse=True),
-                                   vmin=1.0, vmax=3.0, alpha=0.5, fmt=_hdop_text,
-                                   legend=[("HDOP ≤ 1 (good)", 1.0), ("HDOP 2", 2.0),
-                                           ("HDOP ≥ 3 or no fix", 3.0)])
+        self._view.set_coverage(res.xs, res.ys, res.counts, n_receivers=len(res.request.coords),
+                                needed=NEEDED_FOR_FIX, alpha=0.45)
         try:
             edge = _contour_segments(self._view.ax, res.xs, res.ys, res.counts,
                                      NEEDED_FOR_FIX - 0.5)
@@ -1199,30 +1560,24 @@ class ArenaMakerPanel(QWidget):
     def _update_title(self) -> None:
         view = self._view_combo.currentData()
         model = self.model()
-        what = {VIEW_COVERAGE: "Receivers hearing each spot", VIEW_HDOP: "Fix precision (HDOP)",
-                VIEW_OFF: "Receiver layout"}[view]
+        what = {VIEW_COVERAGE: "Receivers hearing each spot", VIEW_OFF: "Receiver layout"}[view]
         window = ("" if model.window_ms == DEFAULT_SAMPLING_TIME_MS
                   else f", {model.window_ms:g} ms window")
-        if on_one_spot(self._positions):
+        reception = (f"±{model.fov_half_deg:g}°" if model.fov_half_deg is not None
+                     else "no angle limit")
+        if on_one_spot(self.positions()):
             self._view.set_title("No layout yet: place the receivers")
         else:
-            self._view.set_title(what if view == VIEW_OFF else f"{what}: {model.name}{window}")
+            self._view.set_title(what if view == VIEW_OFF
+                                 else f"{what} ({self._count} receivers, {reception}{window})")
 
-    def _show_summary(self, summaries: dict) -> None:
-        """Both presets' numbers, coloured good / fair / poor."""
-        self._summaries = summaries
-        selected = self._model_combo.currentData()
-        for name, header in self._summary_headers.items():
-            color = GREEN if name == selected else DIM
-            _style_label(header, color, bold=True)
-        for (key, name), cell in self._summary_cells.items():
-            s = summaries.get(name)
+    def _show_summary(self, summary: dict) -> None:
+        """The layout's numbers, coloured good / fair / poor."""
+        self._summary = summary
+        s = summary
+        for key, cell in self._summary_cells.items():
             if s is None or s["points"] == 0:
                 text, color = "–", DIM
-            elif key == "median_hdop":
-                value = s[key]
-                text = _hdop_text(value)
-                color = GREEN if value <= 1.5 else AMBER if value <= 3.0 else RED
             elif key == "min_count":
                 value = s[key]
                 text = str(value)
@@ -1238,23 +1593,26 @@ class ArenaMakerPanel(QWidget):
                     color = GREEN if value >= good else AMBER if value >= fair else RED
             cell.setText(text)
             _style_label(cell, color, 12, bold=True)
-        points = max((s["points"] for s in summaries.values()), default=0)
+        points = s["points"] if s is not None else 0
         step = self._result.request.step if self._result is not None else MAP_STEP_CM
         if points:
+            receivers = s.get("receivers", self._count)
             self._summary_note.setText(
-                f"Share of the area inside the receiver outline ({points} spots, {step:g} cm "
-                f"apart). Green: good, amber: fair, red: poor.")
+                f"Share of the area inside the outline of the {receivers} receivers ({points} "
+                f"spots, {step:g} cm apart). Green: good, amber: fair, red: poor.")
         else:
             self._summary_note.setText("The receivers enclose no area yet (they are on one spot "
                                        "or one line): there is nothing to judge.")
 
     def _update_model_note(self) -> None:
-        model = self.model()
-        note = MODEL_NOTES.get(model.name, "")
-        # What it assumes (dim), then what that means for a receiver (white)
-        self._model_note.setText(f"{html.escape(note)}<br><span style='color: white;'>"
-                                 f"{html.escape(model.describe())}.</span>")
-        self._model_combo.setToolTip(f"{note}\n{model.describe()}.")
+        """What a receiver hears under the sensor settings, and how to read the map."""
+        text = f"{self.model().describe()}."
+        problem = getattr(self._settings, "sensor_problem", "")
+        if problem:
+            text += f" ({SENSOR_FILENAME} could not be used, so these are the defaults: {problem})"
+        self._model_note.setText(text)
+        self._model_note.setToolTip(
+            f"Change it with “Sensor settings…” (saved in {SENSOR_FILENAME})")
         self._view_note.setText(VIEW_NOTES[self._view_combo.currentData()])
 
     # ------------------------------------------------------------------
@@ -1284,12 +1642,12 @@ class ArenaMakerPanel(QWidget):
     def _layout_in_view(self) -> bool:
         x0, x1 = self._view.ax.get_xlim()
         y0, y1 = self._view.ax.get_ylim()
-        return all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in self._positions)
+        return all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in self.positions())
 
     def _fit_view(self) -> None:
         """Fit the view to the layout; a layout with every receiver on one
         spot (a new arena) gets room to place the receivers in."""
-        if on_one_spot(self._positions):
+        if on_one_spot(self.positions()):
             half = EMPTY_VIEW_CM / 2.0
             cx, cy = self._positions[0]
             self._view.set_limits(padding=0.0, include_origin=False,
@@ -1322,16 +1680,15 @@ class ArenaMakerPanel(QWidget):
     def _readout_text(self, x: float, y: float) -> str:
         """Hover read-out: where, and which receivers hear the transmitter there."""
         text = f"x {x:.1f}  y {y:.1f} cm"
-        coords = np.asarray(self._positions, dtype=float)
-        heard = coverage.hears((x, y), coords, self._facings, self.model())
+        if self._placing is not None:                     # no layout to judge yet
+            return text
+        coords = np.asarray(self.positions(), dtype=float)
+        heard = coverage.hears((x, y), coords, self.facings(), self.model())
         ids = np.flatnonzero(heard[0])
         if not len(ids):
             text += "  |  no receiver hears it"
         else:
             text += f"  |  heard by {len(ids)}: " + " ".join(f"R{i + 1}" for i in ids)
-        if self._view_combo.currentData() == VIEW_HDOP:
-            value = float(coverage.hdop((x, y), coords, heard)[0])
-            text += f"  |  HDOP {_hdop_text(value)}"
         return text
 
     def _on_hovered(self, x: float, y: float) -> None:
@@ -1354,10 +1711,16 @@ class ArenaMakerPanel(QWidget):
             self._view.draw_idle()
 
     def _update_hint(self) -> None:
-        if self._table.pick_mode():
+        if self._placing is not None:
+            k = len(self._placing)
+            text = (f"Click the arena where R{k + 1} goes ({k + 1} of {self._count}). Every "
+                    f"receiver must be placed; Esc or Cancel placing puts the previous layout "
+                    f"back.")
+            color = MAGENTA
+        elif self._table.pick_mode():
             row = self._table.selected()
             name = f"R{row + 1}" if row >= 0 else "the receiver"
-            step = (f" ({row + 1} of {RECEIVER_COUNT})" if self._place_all_btn.isChecked()
+            step = (f" ({row + 1} of {self._count})" if self._place_all_btn.isChecked()
                     else "")
             text = f"Click the arena where {name} goes{step}. Esc or a right click cancels."
             color = MAGENTA
@@ -1375,8 +1738,9 @@ class ArenaMakerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_table_edited(self, points: list) -> None:
-        self._apply_layout(positions=[(p[0], p[1]) for p in points],
-                           facings=[p[2] for p in points], source="table")
+        n = len(points)                                   # the active receivers
+        self._apply_layout(positions=[(p[0], p[1]) for p in points] + self._positions[n:],
+                           facings=[p[2] for p in points] + self._facings[n:], source="table")
 
     def _on_selection_changed(self, _row: int) -> None:
         self._aim_btn.setEnabled(self._table.selected() >= 0)
@@ -1398,7 +1762,8 @@ class ArenaMakerPanel(QWidget):
 
     def _update_pick_routing(self) -> None:
         """While a pick mode is on every press is a click (even on a receiver)."""
-        picking = self._table.pick_mode() or self._origin_tool.pick_mode()
+        picking = (self._placing is not None or self._table.pick_mode()
+                   or self._origin_tool.pick_mode())
         self._interactor.pick_enabled = not picking
         self._update_hint()
 
@@ -1408,15 +1773,89 @@ class ArenaMakerPanel(QWidget):
         self._origin_tool.set_pick_mode(False)
 
     def _on_place_all(self, on: bool) -> None:
+        """"Place all by clicking": ask how many receivers to use, then place
+        R1..RN in turn (``_start_placing``); switched off, it stops placing
+        and puts the previous layout back."""
         if on:
             self._origin_tool.set_pick_mode(False)
-            self._table.select(0)
-            self._table.set_pick_mode(True)
+            self._advancing = True                        # not the user switching "Place all" off
+            try:
+                self._table.set_pick_mode(False)
+            finally:
+                self._advancing = False
+            before = (list(self._positions), list(self._facings), self._count)
+            count = ask_receiver_count(self, self._count)
+            if count is None:                             # cancelled: nothing to place
+                self._place_all_btn.setChecked(False)
+                return
+            if not self._place_all_btn.isChecked():       # switched off meanwhile
+                return
+            self._set_receiver_count(count)
+            self._start_placing(before)
+        elif self._placing is not None:
+            self._end_placing(finished=False)
         elif self._table.pick_mode():
             self._table.set_pick_mode(False)
         self._update_hint()
 
+    def _start_placing(self, before: tuple) -> None:
+        """Hide every receiver and lock the panel: each receiver reappears
+        where it is clicked, and nothing else can be used until the last one
+        is placed (or placing is cancelled, back to ``before``)."""
+        self._cancel_drag()
+        self._placing = []
+        self._before_placing = before
+        self._coverage_timer.stop()
+        self._pending = None
+        self._generation += 1                             # results on their way are stale
+        self._set_locked(True)
+        self._update_tape_visibility(draw=False)
+        self._view.clear_heatmap()
+        self._view.clear_shapes("fix_edge")
+        self._update_pick_routing()
+        self._draw_layout()
+
+    def _end_placing(self, finished: bool) -> None:
+        """Unlock the panel with the receivers clicked (``finished``) or the
+        layout from before placing started."""
+        placed, before = self._placing, self._before_placing
+        self._placing = self._before_placing = None
+        self._set_locked(False)
+        if self._place_all_btn.isChecked():
+            self._place_all_btn.blockSignals(True)
+            self._place_all_btn.setChecked(False)
+            self._place_all_btn.blockSignals(False)
+        self._update_tape_visibility(draw=False)          # markers as the templates say
+        self._update_pick_routing()
+        if finished:
+            n = len(placed)
+            self._apply_layout(positions=placed + self._positions[n:])
+        else:
+            positions, facings, count = before
+            self._apply_layout(positions=positions, facings=facings, count=count)
+
+    def _set_locked(self, locked: bool) -> None:
+        """While placing, only the arena (and its view aids) can be used."""
+        for widget in (self._side_scroll, self._back_btn):
+            widget.setEnabled(not locked)
+        self._cancel_place_btn.setVisible(locked)
+        if locked:
+            self._revert_btn.setEnabled(False)
+            self._save_btn.setEnabled(False)
+        else:
+            self._save_btn.setEnabled(not self._origin_tool.is_measuring())
+            self._update_state()
+
     def _on_arena_clicked(self, x: float, y: float, button: int) -> None:
+        if self._placing is not None:                     # only left clicks place receivers
+            if button == 1:
+                self._placing.append((float(x), float(y)))
+                if len(self._placing) >= self._count:
+                    self._end_placing(finished=True)
+                else:
+                    self._draw_layout()
+                    self._update_hint()
+            return
         if button == 3:                                   # right click: cancel picking
             self._leave_pick_modes()
             return
@@ -1431,7 +1870,7 @@ class ArenaMakerPanel(QWidget):
             finally:
                 self._advancing = False
             if placing_all and placed:
-                if row + 1 < RECEIVER_COUNT:
+                if row + 1 < self._count:
                     self._table.select(row + 1)
                     self._table.set_pick_mode(True)
                 else:
@@ -1473,12 +1912,13 @@ class ArenaMakerPanel(QWidget):
 
     def _on_aim_at(self) -> None:
         row = self._table.selected()
-        if not 0 <= row < RECEIVER_COUNT:
+        if not 0 <= row < self._count:
             return
-        here = self._positions[row]
-        others = [p for i, p in enumerate(self._positions) if i != row]
+        active = self.positions()
+        here = active[row]
+        others = [p for i, p in enumerate(active) if i != row]
         centre = tuple(np.mean(others, axis=0)) if others else (0.0, 0.0)
-        refs = {f"R{i + 1}": p for i, p in enumerate(self._positions) if i != row}
+        refs = {f"R{i + 1}": p for i, p in enumerate(active) if i != row}
         refs.update({f"P{k + 1}": p for k, p in enumerate(self._cal_points)})
         target = widgets.ask_point(self, f"Aim R{row + 1} at", initial=centre, references=refs,
                                    text=f"The point R{row + 1} should face, in the arena frame.",
@@ -1494,10 +1934,12 @@ class ArenaMakerPanel(QWidget):
         self._apply_layout(facings=facings)
 
     def _on_auto_aim(self) -> None:
-        self._apply_layout(facings=[None] * RECEIVER_COUNT)
+        n = self._count                                   # the dormant ones keep theirs
+        self._apply_layout(facings=[None] * n + self._facings[n:])
 
     def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape and (self._table.pick_mode()
+        if event.key() == Qt.Key.Key_Escape and (self._placing is not None
+                                                 or self._table.pick_mode()
                                                  or self._origin_tool.pick_mode()):
             self._leave_pick_modes()
             return
@@ -1520,11 +1962,12 @@ class ArenaMakerPanel(QWidget):
             self._rect_status.setVisible(True)
             return
         self._rect_status.setVisible(False)
-        layout = positions_from_dimensions(width, height)
-        self._apply_layout(positions=[p for _, p in layout], refit=True)
+        layout = positions_from_dimensions(width, height)       # six receivers
+        self._apply_layout(positions=[p for _, p in layout], count=RECEIVER_COUNT, refit=True)
 
     def _fill_tape(self) -> None:
-        """Show the layout's D1..D10 (and the W x H of its bounding box)."""
+        """Show the six receivers' D1..D10 (and the W x H of the active
+        receivers' bounding box)."""
         values = distances_from_positions(list(enumerate(self._positions)))
         for (name, _), value in zip(TAPE_DISTANCES, values):
             self._tape_edits[name].setText(widgets.format_number(value, 3))
@@ -1532,8 +1975,8 @@ class ArenaMakerPanel(QWidget):
         self._prev_d9 = widgets.parse_number(self._tape_edits["D9"].text()) or 0.0
         self._prev_d10 = widgets.parse_number(self._tape_edits["D10"].text()) or 0.0
         self._tape_dirty = False
-        if not on_one_spot(self._positions):
-            w, h = np.ptp(np.asarray(self._positions, dtype=float), axis=0)
+        if not on_one_spot(self.positions()):
+            w, h = np.ptp(np.asarray(self.positions(), dtype=float), axis=0)
             self._width_edit.setText(widgets.format_number(w, 2))
             self._height_edit.setText(widgets.format_number(h, 2))
         self._update_tape_note()
@@ -1591,12 +2034,26 @@ class ArenaMakerPanel(QWidget):
             self._set_tape_status("D1–D8 must be more than 0.", RED)
             return
         layout = positions_from_distances(r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
-        self._apply_layout(positions=[p for _, p in layout], source="tape")
+        self._apply_layout(positions=[p for _, p in layout], source="tape",
+                           count=RECEIVER_COUNT)              # six receivers
 
-    def _on_tape_toggled(self, expanded: bool) -> None:
-        self._tape.set_visible(expanded)
-        self._tape.update(self._shown_positions())
-        self._view.draw_idle()
+    def tape_markers_visible(self) -> bool:
+        """Whether D1..D10 are drawn on the arena."""
+        return self._tape.visible()
+
+    def _update_tape_visibility(self, draw: bool = True) -> None:
+        """D1..D10 on the arena while the tape-measure template is open, or
+        always when "Always show distance markers" is ticked; never with
+        fewer than six receivers (they describe six), nor while placing."""
+        shown = (self._placing is None and self._count == RECEIVER_COUNT
+                 and (self._tape_box.is_expanded() or self._markers_check.isChecked()))
+        if shown == self._tape.visible():
+            return
+        self._tape.set_visible(shown)
+        if shown:
+            self._tape.update(self._shown_positions())
+        if draw:
+            self._view.draw_idle()
 
     # ------------------------------------------------------------------
     # Coverage
@@ -1604,16 +2061,34 @@ class ArenaMakerPanel(QWidget):
 
     def _on_view_changed(self, _index: int) -> None:
         self._update_model_note()
-        self._show_map()                                  # both maps are already computed
+        self._show_map()                                  # the map is already computed
         self._refresh_readout()
         if self._result is None:
             self._schedule_coverage()
 
-    def _on_model_changed(self, _index: int) -> None:
+    def _on_sensor_settings(self) -> None:
+        """"Sensor settings...": edit the receiver model in a dialog."""
+        dlg = SensorDialog(self, self._sensor, accent=GREEN)
+        try:
+            if not widgets._accepted(widgets._exec(dlg)) or dlg.value() is None:
+                return
+            model = dlg.value()
+        finally:
+            dlg.deleteLater()
+        try:
+            self._settings.set_sensor_model(model)
+        except (ValueError, OSError) as exc:
+            log.exception("Could not save the sensor settings")
+            widgets.error(self, "Sensor settings not saved",
+                          f"The sensor settings could not be saved to {SENSOR_FILENAME}: {exc}\n\n"
+                          "They are used until the program is closed.")
+        else:
+            self._sensor_saved = self._read_sensor()
+        self.set_sensor_model(model)
+
+    def _on_model_changed(self) -> None:
         self._update_model_note()
         self._draw_layout()                               # the beam wedges follow the model
-        if self._summaries is not None:
-            self._show_summary(self._summaries)
         self._refresh_readout()
         self._schedule_coverage()
 
@@ -1635,7 +2110,7 @@ class ArenaMakerPanel(QWidget):
             self._coverage_timer.start()
 
     def _start_job(self, preview: bool) -> None:
-        if not self._active:
+        if not self._active or self._placing is not None:   # no layout to judge while placing
             return
         if self._worker is not None:                      # one at a time: the newest waits
             self._pending = preview if self._pending is None else (self._pending and preview)
@@ -1646,7 +2121,7 @@ class ArenaMakerPanel(QWidget):
         outline = tuple(zip(xs, ys)) if len(xs) >= 4 else None
         request = CoverageRequest(
             generation=self._generation, preview=preview, coords=tuple(positions),
-            facing=tuple(self._facings), model=model, window_ms=model.window_ms,
+            facing=tuple(self.facings()), model=model,
             step=map_step(positions, preview), outline=outline)
         self._worker = widgets.run_in_thread(
             compute_coverage, request, on_result=self._on_coverage,
@@ -1660,8 +2135,8 @@ class ArenaMakerPanel(QWidget):
         self._result = result
         self._coverage_error.setVisible(False)
         self._show_map()
-        if result.summaries is not None:
-            self._show_summary(result.summaries)
+        if result.summary is not None:
+            self._show_summary(result.summary)
 
     def _on_coverage_failed(self, message: str) -> None:
         self._coverage_error.setText(f"Coverage estimate failed: {message}")
@@ -1764,14 +2239,16 @@ class ArenaMakerPanel(QWidget):
 
     def _on_measuring_changed(self, measuring: bool) -> None:
         # notify_config_changed reloads the position library the measurement uses
-        self._save_btn.setEnabled(not measuring)
+        self._save_btn.setEnabled(not measuring and self._placing is None)
 
     # ------------------------------------------------------------------
     # Verify and save
     # ------------------------------------------------------------------
 
     def _verify_and_save(self) -> bool:
-        issues = layout_issues(self._positions)
+        """Save the receiver count and the active receivers' positions and
+        facings (the dormant receivers' entries are left as they are)."""
+        issues = layout_issues(self.positions())
         if issues:
             per_row: dict[int, list[str]] = {}
             for message, rows in issues:
@@ -1784,9 +2261,12 @@ class ArenaMakerPanel(QWidget):
                           "saved:", details="\n".join(message for message, _ in issues))
             return False
 
-        positions, facings = list(self._positions), list(self._facings)
-        moved = positions != self._saved_positions
-        turned = facings != self._saved_facings
+        n = self._count
+        working, working_facings = list(self._positions), list(self._facings)
+        positions, facings = working[:n], working_facings[:n]
+        moved = positions != self._saved_positions[:n]
+        turned = facings != self._saved_facings[:n]
+        recounted = n != self._saved_count
         try:
             # Distances to the calibration points that do not match the saved
             # positions (config.toml edited by hand, say) are recomputed as well
@@ -1796,9 +2276,13 @@ class ArenaMakerPanel(QWidget):
             for rid, (new, old) in enumerate(zip(facings, self._saved_facings)):
                 if new != old:
                     self._settings.set_receiver_facing(rid, new)
+            if recounted:
+                self._settings.number_of_receivers = n
             # This is the saved layout now: the reload must not take it for the
             # old one moved by an origin shift (and so move it once more)
-            self._saved_positions, self._saved_facings = positions, facings
+            self._saved_count = n
+            self._saved_positions = positions + self._saved_positions[n:]
+            self._saved_facings = facings + self._saved_facings[n:]
             valid, errors = self._settings.verify_settings()
             flag_changed = bool(self._settings.valid_settings) != valid
             if flag_changed:
@@ -1808,14 +2292,15 @@ class ArenaMakerPanel(QWidget):
                 log.exception("Saving the layout failed")
             widgets.error(self, "Save failed", f"The layout could not be saved: {exc}")
             self._notify_config_changed()                 # everyone sees what is saved now ...
-            self._apply_layout(positions, facings)        # ... and the edits stay, unsaved
+            self._apply_layout(working, working_facings, count=n)   # ... and the edits stay
             return False
 
-        if moved or stale or turned or flag_changed:
+        if moved or stale or turned or recounted or flag_changed:
             self._notify_config_changed()
         self._update_state()
 
-        what = "saved" if moved or turned else "unchanged"
+        what = (f"saved ({n} receivers, R1–R{n})" if moved or turned or recounted
+                else "unchanged")
         if moved:
             note = ("\n\nReceivers that were moved for real need a new calibration "
                     "(Calibration panel): their slopes and intercepts were measured where "
@@ -1838,7 +2323,8 @@ class ArenaMakerPanel(QWidget):
 
     def _cal_distances_stale(self, positions) -> bool:
         """Whether a saved receiver's ``cal_distances`` are not its distances
-        to the calibration points from ``positions`` (the saved layout)."""
+        to the calibration points from ``positions`` (the saved layout of
+        the active receivers, R1 first)."""
         if not self._cal_points:
             return False                                  # unreadable: nothing to compare with
         for rid, position in enumerate(positions):
@@ -1859,7 +2345,8 @@ class ArenaMakerPanel(QWidget):
             return
         if widgets.confirm(self, "Revert", "Discard the unsaved layout changes?",
                            ok_text="Discard", danger=True):
-            self._apply_layout(self._saved_positions, self._saved_facings, refit=True)
+            self._apply_layout(self._saved_positions, self._saved_facings,
+                               count=self._saved_count, refit=True)
 
     def _leave(self, panel: str) -> None:
         """Go to another panel; unsaved edits are discarded after asking."""
@@ -1869,7 +2356,8 @@ class ArenaMakerPanel(QWidget):
                                    "them?", ok_text="Discard and leave", cancel_text="Stay",
                                    danger=True):
                 return
-            self._apply_layout(self._saved_positions, self._saved_facings, refit=True)
+            self._apply_layout(self._saved_positions, self._saved_facings,
+                               count=self._saved_count, refit=True)
         self._main_window.show_panel(panel)
 
     # ------------------------------------------------------------------
@@ -1878,6 +2366,8 @@ class ArenaMakerPanel(QWidget):
 
     def on_panel_show(self) -> None:
         self._active = True
+        # The coverage shading starts off each time the panel opens
+        self._view_combo.setCurrentIndex(self._view_combo.findData(DEFAULT_VIEW))
         self._sync_window_from_client()
         self._update_link_state(self._link_up())
         self._sync_with_settings()                        # also anything changed while hidden
