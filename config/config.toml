@@ -4,66 +4,66 @@ calibration_reads = 5
 number_of_receivers = 6
 serial_port = '/dev/ttyACM0'
 units = 'cm'
-cal_point_1 = [-88.0, 77.0]
-cal_point_2 = [87.0, 87.0]
+cal_point_1 = [-87.97465759615761, 79.62785825263013]
+cal_point_2 = [87.02534240384239, 89.62785825263013]
 
 [[receivers]]
-cal_distances = [197.29419656948858, 289.9137802864845]
-origin_distance = 166.87720036002523
+cal_distances = [235.3146829248018, 335.1686142824235]
+origin_distance = 210.26399141149108
 id = 0
-position = [-118.0, -118.0]
+position = [-149.9746575961576, -147.37214174736988]
 
     [receivers.offset]
-    intercept = -80.37079963997479
-    slope = 0.272
+    intercept = -87.9075085885089
+    slope = 0.5315
 
 [[receivers]]
-cal_distances = [82.63776376451628, 222.69710370815332]
-origin_distance = 118.0
+cal_distances = [98.85848471426213, 252.46385879963097]
+origin_distance = 149.9976785156378
 id = 1
-position = [-118.0, 0.0]
+position = [-149.9746575961576, 2.6278582526301335]
 
     [receivers.offset]
-    intercept = -74.304
-    slope = 0.272
+    intercept = -76.42132148436218
+    slope = 0.5315
 
 [[receivers]]
-cal_distances = [50.80354318352215, 207.3306537876153]
-origin_distance = 166.87720036002523
+cal_distances = [95.77577981932593, 245.2305038122297]
+origin_distance = 213.98051555192978
 id = 2
-position = [-118.0, 118.0]
+position = [-149.9746575961576, 152.62785825263012]
 
     [receivers.offset]
-    intercept = -81.73079963997478
-    slope = 0.272
+    intercept = -71.96648444807022
+    slope = 0.5315
 
 [[receivers]]
-cal_distances = [283.6564823867066, 207.3306537876153]
-origin_distance = 166.87720036002523
+cal_distances = [328.89664029904594, 245.2305038122297]
+origin_distance = 210.3001462828712
 id = 3
-position = [118.0, -118.0]
+position = [150.0253424038424, -147.37214174736988]
 
     [receivers.offset]
-    intercept = -82.0027996399748
-    slope = 0.272
+    intercept = -82.02485371712879
+    slope = 0.5315
 
 [[receivers]]
-cal_distances = [219.92044015961773, 92.35799911215054]
-origin_distance = 118.0
+cal_distances = [250.14595739287893, 107.41508273980894]
+origin_distance = 150.04835554709044
 id = 4
-position = [118.0, 0.0]
+position = [150.0253424038424, 2.6278582526301335]
 
     [receivers.offset]
-    intercept = -76.75200000000001
-    slope = 0.272
+    intercept = -84.87464445290956
+    slope = 0.5315
 
 [[receivers]]
-cal_distances = [210.0404722904612, 43.840620433565945]
-origin_distance = 166.87720036002523
+cal_distances = [248.94376875109768, 89.09545442950498]
+origin_distance = 214.0160425719883
 id = 5
-position = [118.0, 118.0]
+position = [150.0253424038424, 152.62785825263012]
 
     [receivers.offset]
-    intercept = -86.3547996399748
-    slope = 0.272
+    intercept = -84.68695742801168
+    slope = 0.5315
 
